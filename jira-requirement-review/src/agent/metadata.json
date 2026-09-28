@@ -1,0 +1,108 @@
+{
+    "name": "JiraRequirementReview",
+    "version": "2.2.18",
+    "description": "Reviews one Jira requirement (or a batch via Sprint/JQL query) across the issue, its parent card, its subtasks, its linked issues, and an optional meeting transcript, then produces a structured review of Assumptions, Open Questions, Requirement Gaps, Ambiguities, Edge Cases, Missing Functional/Technical Details, Missing Acceptance Criteria, and Dependency Questions (each with evidence source, confidence, and priority where applicable), plus an overall readiness score and executive summary per issue. By default it returns a draft for you to copy into Jira; turn on 'Publish to Jira' to have it post the comment to each issue directly, and 'Generate Word Report' to also produce a downloadable .docx report.",
+    "config": {
+        "triggers": [
+            {
+                "name": "issue_key",
+                "type": "str",
+                "required": false,
+                "description": "Target Jira issue to review (e.g. ABC-123). Provide this OR a Sprint / JQL query.",
+                "friendly_name": "Jira Issue Key"
+            },
+            {
+                "name": "jql_override",
+                "type": "str",
+                "required": false,
+                "description": "A Sprint or JQL query to review a batch of issues (e.g. 'project = KS AND status = \"To Do\"' or 'sprint = \"Sprint 42\"'). Provide this OR a single Jira Issue Key.",
+                "friendly_name": "Sprint / JQL Query"
+            },
+            {
+                "name": "include_parent",
+                "type": "boolean",
+                "required": false,
+                "description": "Also read the parent card's description and comments (default true).",
+                "friendly_name": "Include Parent",
+                "default": true
+            },
+            {
+                "name": "include_subtasks",
+                "type": "boolean",
+                "required": false,
+                "description": "Also read the target's subtasks' descriptions and comments (default true).",
+                "friendly_name": "Include Subtasks",
+                "default": true
+            },
+            {
+                "name": "include_linked_issues",
+                "type": "boolean",
+                "required": false,
+                "description": "Also read linked issues (blocks/relates-to/etc.) to surface Dependency Question findings (default true).",
+                "friendly_name": "Include Linked Issues",
+                "default": true
+            },
+            {
+                "name": "include_attachments",
+                "type": "boolean",
+                "required": false,
+                "description": "Also read the files attached to the issue (PDF, Word, Excel, PowerPoint, CSV, JSON, text and images). The requirement is often in the attached spec rather than the description (default true).",
+                "friendly_name": "Include Attachments",
+                "default": true
+            },
+            {
+                "name": "include_confluence",
+                "type": "boolean",
+                "required": false,
+                "description": "Also read Confluence pages the issue links to, and the files attached to those pages. Only pages on the same Atlassian site are read (default true).",
+                "friendly_name": "Include Confluence Pages",
+                "default": true
+            },
+            {
+                "name": "transcript_file",
+                "type": "file",
+                "required": false,
+                "description": "Optional requirements-meeting transcript file. May cover multiple cards; only the parts relevant to each reviewed issue are used. Requires object storage (TENANT_ID) configured.",
+                "friendly_name": "Meeting Transcript",
+                "accepts": ".txt,.vtt,.md,.csv,.docx,.pdf"
+            },
+            {
+                "name": "post_to_jira",
+                "type": "boolean",
+                "required": false,
+                "description": "If ON, the agent posts the review as a comment directly on each reviewed Jira issue (visible per your Jira's normal comment rules). If OFF, it only returns a draft for you to copy/paste into Jira yourself. Default OFF.",
+                "friendly_name": "Publish to Jira",
+                "default": false
+            },
+            {
+                "name": "generate_docx",
+                "type": "boolean",
+                "required": false,
+                "description": "If ON, also produces a consolidated Word (.docx) review report (all reviewed issues) as a download link. Requires object storage (TENANT_ID) configured. Default OFF.",
+                "friendly_name": "Generate Word Report",
+                "default": false
+            },
+            {
+                "name": "comment_id",
+                "type": "str",
+                "required": false,
+                "description": "Set by the router on the webhook path: the id of the Jira comment that asked for this review, so the review answers what was actually asked. Leave blank when triggering manually.",
+                "friendly_name": "Triggering Comment Id"
+            },
+            {
+                "name": "mode",
+                "type": "str",
+                "required": false,
+                "description": "Set by the router to 'delegated', which returns a structured result and writes NOTHING to Jira so the router can post exactly one reply. Leave blank for a normal manual run.",
+                "friendly_name": "Mode"
+            },
+            {
+                "name": "run_id",
+                "type": "str",
+                "required": false,
+                "description": "Set by the router: the correlation id that appears in the Jira comment, the email and every log line for this run. Leave blank when triggering manually.",
+                "friendly_name": "Run Id"
+            }
+        ]
+    }
+}

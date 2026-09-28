@@ -1,0 +1,6 @@
+{
+    "name": "Jira Requirement Review Tools",
+    "version": "1.0.0",
+    "description": "Tool activities for the Jira requirement review agent: context gathering, requirement analysis, review rendering and delivery.",
+    "config": {}
+}

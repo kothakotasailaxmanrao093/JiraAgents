@@ -1,0 +1,42 @@
+{
+  "agent_version": "4.3.0",
+  "conflicts": [],
+  "contract_version": "1.0",
+  "created": [],
+  "degraded": false,
+  "degraded_reason": "",
+  "display_name": "JiraTaskCreation",
+  "duplicates": [],
+  "email_kind": "clarification",
+  "email_recommended": true,
+  "errors": [],
+  "findings": [],
+  "headline": "More information needed before this can be broken down",
+  "outcome": "NEEDS_INFO",
+  "produced_by": "JiraTaskCreation",
+  "questions": [
+    "Which depots does this apply to?",
+    "What happens when the reading is out of range?"
+  ],
+  "run_id": "4a81f7c2",
+  "sources_missing": [
+    {
+      "what": "Confluence: Depot Ops Runbook",
+      "what_to_do": "please grant access, or paste the relevant section into the ticket",
+      "why": "this account has no access"
+    },
+    {
+      "what": "Attachment: matrix.xlsx",
+      "what_to_do": "please re-attach it in a readable format",
+      "why": "password-protected"
+    }
+  ],
+  "sources_read": [
+    "FL-120 description",
+    "3 comment(s)",
+    "Attachment: spec_v1.pdf",
+    "1 linked work item(s)",
+    "111 existing ticket(s) in the project"
+  ],
+  "summary": "Two questions before this can be broken down."
+}

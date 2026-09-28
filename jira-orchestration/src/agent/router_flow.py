@@ -1,0 +1,586 @@
+"""The routing decision sequence — pure, SDK-free, and therefore testable.
+
+`router_agent.py` is a thin binding that passes the SDK's executors in. Keeping
+the sequence here means the whole router can be tested without Temporal, without
+Jira and without a model — which matters, because the properties worth testing
+are things like "exactly one comment on every path including failures", and
+those are hard to see through a live worker.
+
+**The invariant this module exists to hold: every run either ends ``ignored``
+(one of the closed ``IgnoreReason`` set) or attempts exactly one reply.** No
+path posts twice, and no failure — in ingress, classification, email or the
+post itself — ends a run in silence. Every tool call goes through ``_safe`` so
+an exception becomes a result the run can report, never a crash that says
+nothing (D0, 2026-09-25).
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Awaitable, Callable
+from datetime import timedelta
+from typing import Any
+
+from temporalio.common import RetryPolicy
+
+from routing.catalog import AgentSpec, display_name_for
+from routing.classify import Decision, classify, classify_by_verb
+from routing.compose import (
+    AMBIGUOUS_OPTIONS,
+    HELP_OPTIONS,
+    compose,
+    router_only,
+)
+from routing.ingress import IngressOutcome
+from shared.contract import AgentResult, Outcome
+
+logger = logging.getLogger(__name__)
+
+# execute(tool_name, *args, start_to_close_timeout=...) -> dict
+Execute = Callable[..., Awaitable[dict]]
+# dispatch(agent_name, payload, **options) -> dict  (the child's contract)
+Dispatch = Callable[..., Awaitable[dict]]
+
+_INGRESS_TIMEOUT = timedelta(minutes=2)
+_NOT_ROUTED = "Not routed — the request could not be read, so it was never classified."
+_CLASSIFY_TIMEOUT = timedelta(minutes=2)
+_POST_TIMEOUT = timedelta(minutes=2)
+
+
+async def run_router(
+    payload: dict[str, Any],
+    execute: Execute,
+    dispatch: Dispatch,
+) -> dict[str, Any]:
+    """Handle one webhook delivery, start to finish."""
+    issue_key = str(payload.get("issue_key") or "").strip().upper()
+    comment_id = str(payload.get("comment_id") or "").strip()
+    webhook_event = str(payload.get("webhookEvent") or payload.get("webhook_event") or "")
+
+    # --- gates 1-4, and the run_id everything downstream carries -------------
+    gate = await _safe(
+        execute,
+        "ingress_check",
+        issue_key,
+        comment_id,
+        webhook_event or "comment_created",
+        start_to_close_timeout=_INGRESS_TIMEOUT,
+    )
+    run_id = str(gate.get("run_id") or "")
+    outcome = gate.get("outcome")
+
+    if outcome == IngressOutcome.IGNORED.value:
+        # Silent by design, and only for the closed IgnoreReason set. Answering
+        # "this wasn't for me" on every unrelated comment would make the system
+        # unbearable on a busy project.
+        logger.info(f"run {run_id}: ignored — {gate.get('ignored')}")
+        return {"status": "ignored", "run_id": run_id, "ignored": gate.get("ignored")}
+
+    if outcome != IngressOutcome.PROCEED.value:
+        # FAILED, the activity itself raising, or an outcome this build does not
+        # know — none of them is "not for me", so the person is told.
+        return await _report_unreadable(gate, execute, run_id, issue_key, comment_id)
+
+    body = str(gate.get("comment_body") or "")
+    issue_key = str(gate.get("issue_key") or issue_key)
+    comment_id = str(gate.get("comment_id") or comment_id)
+
+    # --- classify: Layer 1 free, Layer 2 only if needed ----------------------
+    keyword = str(gate.get("trigger_keyword") or "Aetherion")
+
+    # Ask Layer 1 directly rather than inferring from a full classify() result.
+    # Inferring meant reading the *reason text* to guess whether a verb had been
+    # found, and the no-verb reason contains the word "verb" — so the classifier
+    # was never called at all. Decisions must not be recovered from prose.
+    decision = classify_by_verb(body, keyword)
+
+    if decision is None:
+        # A raised classifier is the same as an unreachable one: scores None,
+        # which asks rather than guessing.
+        answer = await _safe(
+            execute,
+            "classify_intent",
+            body,
+            str(gate.get("issue_summary") or ""),
+            start_to_close_timeout=_CLASSIFY_TIMEOUT,
+        )
+        decision = classify(
+            body,
+            scores=answer.get("scores"),
+            has_children=bool(gate.get("has_children")),
+            keyword=keyword,
+        )
+
+    logger.info(
+        f"run {run_id}: {issue_key} classified {decision.intent} "
+        f"(layer {decision.layer}, confidence {decision.confidence:.2f})"
+    )
+
+    # --- dispatch, or answer directly ---------------------------------------
+    if decision.dispatches:
+        assert decision.agent is not None
+        # The real task queue, if this deployment needed an override — see
+        # AgentSpec.task_queue for why this cannot be read here directly.
+        overrides = gate.get("task_queue_overrides") or {}
+        agent = decision.agent.with_task_queue(overrides.get(decision.agent.agent_name))
+        blocks, ran, result = await _dispatch_and_compose(
+            agent, decision, gate, dispatch, execute, run_id, issue_key, comment_id
+        )
+    else:
+        blocks, ran, result = _answer_directly(decision)
+
+    # --- finalise: ONE reply, whatever happened above ------------------------
+    posted = await _post(
+        execute,
+        issue_key,
+        blocks,
+        run_id,
+        comment_id,
+        str(gate.get("idempotency_key") or ""),
+        str(gate.get("processed_label") or ""),
+        str(gate.get("thread_id") or ""),
+    )
+
+    return {
+        "status": "answered",
+        "run_id": run_id,
+        "issue_key": issue_key,
+        "intent": decision.intent,
+        "layer": decision.layer,
+        "routed_to": decision.reason,
+        "ran": ran,
+        "outcome": result.outcome.value if result else None,
+        "posted": bool(posted.get("posted")),
+        "comment_id": posted.get("comment_id", ""),
+        "created": [c.key for c in (result.created if result else [])],
+    }
+
+
+async def _safe(execute: Execute, name: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    """Run one tool; an exception becomes ``{"raised": …}``, never a crash.
+
+    A crashed workflow posts nothing and emails nobody — the silence D0 was
+    about. Every caller decides what a raised result means for the reply.
+    """
+    try:
+        result = await execute(name, *args, **kwargs)
+    except Exception as exc:  # noqa: BLE001 — reported by the caller, never dropped
+        detail = f"{type(exc).__name__}: {str(exc)[:300]}"
+        logger.error(f"{name} raised: {detail}")
+        return {"raised": detail, "error": detail}
+    return result if isinstance(result, dict) else {}
+
+
+async def _post(
+    execute: Execute,
+    issue_key: str,
+    blocks: list[tuple[str, object]],
+    run_id: str,
+    comment_id: str,
+    idempotency: str = "",
+    label: str = "",
+    thread_id: str = "",
+) -> dict[str, Any]:
+    """Post THE reply; if it cannot be posted, tell the administrators.
+
+    The one failure the user cannot see, because the channel for telling them
+    is the thing that broke.
+    """
+    posted = await _safe(
+        execute,
+        "post_reply",
+        issue_key,
+        blocks,
+        run_id,
+        comment_id,
+        idempotency,
+        label,
+        thread_id,
+        start_to_close_timeout=_POST_TIMEOUT,
+    )
+    if not posted.get("posted") and not posted.get("read_only"):
+        await _safe(
+            execute,
+            "notify_admins",
+            f"Could not post the reply on {issue_key}",
+            str(posted.get("error") or "unknown error"),
+            run_id,
+            start_to_close_timeout=_POST_TIMEOUT,
+        )
+    return posted
+
+
+async def _report_unreadable(
+    gate: dict[str, Any],
+    execute: Execute,
+    run_id: str,
+    issue_key: str,
+    comment_id: str,
+) -> dict[str, Any]:
+    """Ingress failed: say so on the ticket, and alert the administrators.
+
+    A permissions failure at ingress will usually block this reply too — it is
+    attempted anyway, because a transient 5xx or one failing sub-call leaves
+    commenting possible, and ``_post`` alerts the administrators if it is not.
+    """
+    issue_key = str(gate.get("issue_key") or issue_key)
+    comment_id = str(gate.get("comment_id") or comment_id)
+    problem = str(gate.get("problem") or f"Could not read {issue_key}: {gate.get('error')}")
+    logger.error(f"run {run_id}: could not read {issue_key} — {gate.get('error')}")
+    notified = await _safe(
+        execute,
+        "notify_admins",
+        f"Could not read {issue_key}",
+        problem,
+        run_id,
+        start_to_close_timeout=_POST_TIMEOUT,
+    )
+    blocks = router_only(
+        "Could not read this ticket — nothing was done",
+        routed_to=_NOT_ROUTED,
+        what_happened=(
+            f"I received your request but could not read {issue_key}. Nothing was "
+            "created and nothing was changed, so asking again is safe once this is "
+            "resolved."
+        ),
+        problems=[problem],
+        notification=_admin_alert_line(notified),
+    )
+    # Threaded under the asking comment; post_reply falls back to a plain
+    # comment if Jira refuses. No label and no answered record: this request
+    # was never handled, and asking again must work.
+    posted = await _post(execute, issue_key, blocks, run_id, comment_id, "", "", comment_id)
+    return {
+        "status": "failed",
+        "run_id": run_id,
+        "issue_key": issue_key,
+        "error": gate.get("error", ""),
+        "posted": bool(posted.get("posted")),
+    }
+
+
+async def _dispatch_and_compose(
+    spec: AgentSpec,
+    decision: Decision,
+    gate: dict[str, Any],
+    dispatch: Dispatch,
+    execute: Execute,
+    run_id: str,
+    issue_key: str,
+    comment_id: str,
+) -> tuple[list[tuple[str, object]], list[str], AgentResult | None]:
+    """Call one child and turn its answer into the reply.
+
+    A child that fails still produces a reply — the router owns the comment, so a
+    dead child cannot mean silence.
+    """
+    child_payload: dict[str, Any] = {
+        "issue_key": issue_key,
+        "comment_id": comment_id,
+        "run_id": run_id,
+    }
+    # Forced last, so no caller and no configuration can override them.
+    child_payload.update(spec.forced_payload)
+
+    options: dict[str, Any] = {
+        "execution_timeout": timedelta(minutes=spec.timeout_minutes),
+        "workflow_id": f"{spec.intent.lower()}-{run_id}",
+        # Bounds Temporal's retry of a child that STARTS and then fails — e.g.
+        # a transient exception inside the child's own run. It does NOT bound
+        # a child that never starts at all because no worker ever polls its
+        # task queue (the F22 misconfigured-queue case): that sits "Running"
+        # with no failure to retry, so this policy plays no part, and
+        # `execution_timeout` above is the only thing that ends it. An earlier
+        # version of this comment claimed this policy alone made "every
+        # dispatch fail fast" — a live run through the exact never-started
+        # case disproved that, taking the full execution_timeout instead of
+        # the ~14s this policy budgets. Left honest rather than restated
+        # confidently: RetryPolicy.non_retryable_error_types could still
+        # distinguish "wrong name, will never succeed" from "worker
+        # restarting, try again in a moment" for the case this DOES cover,
+        # but the platform's real error-type strings for that are still
+        # unconfirmed.
+        "retry_policy": RetryPolicy(
+            initial_interval=timedelta(seconds=2),
+            backoff_coefficient=2.0,
+            maximum_interval=timedelta(seconds=10),
+            maximum_attempts=3,
+        ),
+    }
+    if spec.task_queue:
+        # Without this, Temporal defaults a child workflow to the CALLER's
+        # queue when none is given — the router's own — and the child fails
+        # immediately because that worker never registered its workflow type.
+        options["task_queue"] = spec.task_queue
+
+    routed_to_ran = f"{spec.display_name} — {decision.reason}"
+    routed_to_failed = (
+        f"{spec.display_name} — {decision.reason.rstrip('.')} — "
+        "but that agent could not be reached."
+    )
+
+    try:
+        raw = await dispatch(spec.agent_name, child_payload, **options)
+    except Exception as exc:  # noqa: BLE001 — every failure still gets a reply
+        # The real cause, never flattened: logged with the run_id for tracing,
+        # AND put in the reply's Problems section so the person reading the
+        # ticket is not left with only "did not respond".
+        detail = f"{type(exc).__name__}: {str(exc)[:300]}"
+        logger.error(f"run {run_id}: dispatch to {spec.agent_name} failed: {detail}")
+
+        notified = await _safe(
+            execute,
+            "notify_admins",
+            f"{spec.display_name} did not respond on {issue_key}",
+            detail,
+            run_id,
+            start_to_close_timeout=_POST_TIMEOUT,
+        )
+        notification = _admin_alert_line(notified)
+
+        return (
+            router_only(
+                "Could not complete this request",
+                routed_to=routed_to_failed,
+                what_happened=(
+                    f"The {spec.display_name} agent did not respond. "
+                    + (
+                        "Nothing was created, so asking again is safe."
+                        if not spec.writes_to_jira
+                        else "It may not have finished, so check the ticket before asking again."
+                    )
+                ),
+                problems=[f"Dispatch to the {spec.display_name} agent failed: {detail}"],
+                notification=notification,
+            ),
+            [],  # nothing ran to completion, so nothing is named
+            None,
+        )
+
+    try:
+        result = AgentResult.from_dict(raw if isinstance(raw, dict) else (raw or [{}])[0])
+    except Exception as exc:  # noqa: BLE001 — a malformed contract is still reportable
+        detail = f"{type(exc).__name__}: {str(exc)[:300]}"
+        logger.error(f"run {run_id}: {spec.agent_name} returned an unusable result: {detail}")
+        return (
+            router_only(
+                "Could not complete this request",
+                routed_to=routed_to_ran,
+                what_happened=f"The {spec.display_name} agent returned something unreadable.",
+                problems=[detail],
+            ),
+            [],
+            None,
+        )
+
+    # The router decides and sends the one outcome email (the children stand
+    # down in delegated mode). Sent before the reply is composed, so the reply
+    # can say what really happened rather than what was intended.
+    notification = ""
+    kind = _EMAIL_KIND_FOR.get(result.outcome)
+    if kind:
+        emailed = await _safe(
+            execute,
+            "send_outcome_email",
+            kind,
+            issue_key,
+            result.headline,
+            _email_details(result),
+            run_id,
+            start_to_close_timeout=_POST_TIMEOUT,
+        )
+        notification = _outcome_email_line(emailed)
+    blocks = compose(
+        result,
+        routed_to=routed_to_ran,
+        ran=[display_name_for(result.produced_by) or spec.display_name],
+        notification=notification,
+    )
+    return blocks, [spec.display_name], result
+
+
+# Outcome -> the email kind, by the names ORCH_NOTIFY_ON and LTW_NOTIFY_ON use.
+# NOT_A_REQUIREMENT and REVIEWED are absent on purpose: an invalid request never
+# emails, and a review writes nothing a person has to act on.
+_EMAIL_KIND_FOR = {
+    Outcome.CREATED: "created",
+    Outcome.NEEDS_INFO: "clarification",
+    Outcome.ALREADY_EXISTS: "duplicates",
+    Outcome.FAILED: "failed",
+}
+
+
+def _email_details(result: AgentResult) -> list[str]:
+    """The facts a person needs from the email, without opening Jira."""
+    lines = [result.summary] if result.summary else []
+    lines += [f"Created {c.issue_type} {c.key}: {c.summary}".strip() for c in result.created]
+    lines += [f"Question: {q}" for q in result.questions]
+    lines += [f"Already exists: {d.existing_key} {d.existing_summary}" for d in result.duplicates]
+    lines += [f"Problem: {e}" for e in result.errors]
+    return lines
+
+
+def _outcome_email_line(emailed: dict[str, Any]) -> str:
+    """Only what happened. Silent when it was not wanted (ORCH_NOTIFY_ON)."""
+    if emailed.get("sent"):
+        return f"Emailed {', '.join(emailed.get('recipients') or [])}."
+    if emailed.get("suppressed_repeat"):
+        return "Not emailed again — the same email was sent a few minutes ago."
+    if emailed.get("error"):
+        return f"No email was sent — {emailed['error']}"
+    return ""
+
+
+def _admin_alert_line(notified: dict[str, Any]) -> str:
+    """What the reply may say about the admin alert — only what happened.
+
+    Keyed on ``sent``, never ``attempted``: ``notify_admins`` attempts and logs
+    but has no sender, so "Emailed the administrators" was false every time.
+    """
+    if notified.get("sent"):
+        return "Emailed the administrators."
+    if notified.get("attempted"):
+        return "Could not email the administrators — this was logged instead."
+    return ""
+
+
+def _answer_directly(
+    decision: Decision,
+) -> tuple[list[tuple[str, object]], list[str], None]:
+    """The router's own replies: help, questions, chatter, ambiguity.
+
+    No child ran, so "Handled by" names none — the router knows what it *chose*,
+    and must not claim anything *ran*. No run_id parameter — see
+    compose.handled_by for why it never reaches a rendered comment.
+    """
+    if decision.intent == "HELP":
+        return (
+            router_only(
+                "What I can do",
+                routed_to=decision.reason,
+                options=HELP_OPTIONS,
+            ),
+            [],
+            None,
+        )
+
+    if decision.intent == "CHATTER":
+        return (
+            router_only(
+                "Invalid request — this is not a work requirement",
+                routed_to=decision.reason,
+                what_happened=(
+                    "Mention the agent again with either a description of what should "
+                    "be built, or a request to review this ticket."
+                ),
+            ),
+            [],
+            None,
+        )
+
+    if decision.intent == "QUESTION":
+        # Reached only if the catalog has no BUILD-intent agent configured —
+        # classify.py always sets ``agent=by_intent("BUILD")`` for QUESTION
+        # (Bug 5), so under any valid catalog this decision dispatches instead
+        # of landing here. Kept as the fallback for a misconfigured catalog
+        # rather than letting the router crash on ``spec.display_name``.
+        return (
+            router_only(
+                "About this ticket",
+                routed_to=decision.reason,
+                what_happened=(
+                    "I can break this ticket into Jira issues, or review it for gaps. "
+                    "For anything else about it, the ticket's own description and "
+                    "comments are the best source."
+                ),
+                options=HELP_OPTIONS,
+            ),
+            [],
+            None,
+        )
+
+    # AMBIGUOUS — Layer 3. One round-trip is far cheaper than ten wrongly
+    # created stories.
+    return (
+        router_only(
+            "Which did you mean?",
+            routed_to=decision.reason,
+            what_happened="I can do either of these — reply mentioning the agent again with:",
+            options=AMBIGUOUS_OPTIONS,
+        ),
+        [],
+        None,
+    )
+
+
+# --------------------------------------------------------------------------
+# Health check — "is each configured child actually reachable?"
+# --------------------------------------------------------------------------
+#
+# agentExecutor.execute starts a Temporal CHILD WORKFLOW, and starting a child
+# workflow is a workflow-context-only operation in Temporal's own architecture
+# — it cannot be done from an activity/tool. So this cannot be a separate
+# @tool the way ingress_check or post_reply are; it has to run inside the
+# SAME running JiraOrchestration workflow, reusing the identical `dispatch`
+# callable that answers real comments. That is deliberate: a health check that
+# used a different code path could pass while the real path still fails.
+#
+# There is no "at startup" hook Temporal workflows have — a workflow only runs
+# when something invokes it. The practical equivalent is "run this on demand,
+# immediately after every publish" — see PUBLISH.md — rather than a hook that
+# does not exist on this platform.
+
+
+async def run_health_check(dispatch: Dispatch, execute: Execute) -> dict[str, Any]:
+    """Dispatch a minimal, side-effect-free payload to every catalog agent, and
+    check the Gmail login the outcome and admin emails depend on.
+
+    Invoke directly:
+
+        uv run aetherion agent JiraOrchestration '{"health_check": true}'
+
+    A misconfigured task queue or an agent that was never published shows up
+    here — this is what would have caught F22 before a user typed
+    "@Aetherion review" and got nothing.
+    """
+    from routing.catalog import CATALOG
+
+    results: dict[str, Any] = {}
+    for spec in CATALOG:
+        # issue_key "FL" alone is a real, already-observed safe no-op: both
+        # children read it as "not a real issue key, nothing to do" and return
+        # immediately without creating or reading anything. This is not a
+        # fabricated ping payload — it is the same shape a malformed webhook
+        # event already produces in production.
+        probe_payload: dict[str, Any] = {
+            "issue_key": "FL",
+            "comment_id": "healthcheck",
+            "run_id": "healthcheck",
+        }
+        probe_payload.update(spec.forced_payload)
+
+        options: dict[str, Any] = {
+            "execution_timeout": timedelta(seconds=30),
+            "workflow_id": f"healthcheck-{spec.intent.lower()}",
+            "retry_policy": RetryPolicy(maximum_attempts=1),
+        }
+        if spec.task_queue:
+            options["task_queue"] = spec.task_queue
+
+        try:
+            await dispatch(spec.agent_name, probe_payload, **options)
+            results[spec.agent_name] = {"reachable": True}
+        except Exception as exc:  # noqa: BLE001 — the point is to report, not raise
+            results[spec.agent_name] = {
+                "reachable": False,
+                "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+            }
+
+    # An app password dies silently (Google revokes it when 2-Step Verification
+    # is reset); a failed login here is a missing email caught in advance.
+    smtp = await _safe(execute, "smtp_login_check", start_to_close_timeout=_POST_TIMEOUT)
+    return {
+        "status": "health_check",
+        "agents": results,
+        "smtp": {"ok": bool(smtp.get("ok")), "error": str(smtp.get("error") or "")},
+    }

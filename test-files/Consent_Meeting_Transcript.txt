@@ -1,0 +1,13 @@
+Meeting: Consent lifecycle — decisions
+Date: 24 September 2026
+Attendees: Priya (Product), Arjun (Verification Ops), Meera (Engineering)
+
+Priya: Candidates keep asking how to take consent back. Let's decide it today.
+Arjun: They can withdraw, but only before any check has started. Once a check is running, the policy says no.
+Meera: Where do they do it?
+Priya: In the candidate portal. A "Withdraw consent" button on their profile.
+Arjun: When someone withdraws, the recruiter must be told within 1 hour.
+Meera: Every consent event — given, renewed, withdrawn, expired — gets logged with date, time and IP address.
+Priya: Agreed. Paper consent forms are out of scope for this release.
+Arjun: One thing we did not settle: whether the client should also be notified when a candidate withdraws.
+Priya: Leave that open for now.

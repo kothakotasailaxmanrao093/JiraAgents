@@ -1,0 +1,24 @@
+{
+  "agent_version": "2.2.1",
+  "conflicts": [],
+  "contract_version": "1.0",
+  "created": [],
+  "degraded": true,
+  "degraded_reason": "AI Gateway unreachable",
+  "display_name": "JiraRequirementReview",
+  "duplicates": [],
+  "email_kind": "none",
+  "email_recommended": false,
+  "errors": [
+    "AI Gateway unreachable"
+  ],
+  "findings": [],
+  "headline": "Requirement review could not run",
+  "outcome": "FAILED",
+  "produced_by": "JiraRequirementReview",
+  "questions": [],
+  "run_id": "9c03be57",
+  "sources_missing": [],
+  "sources_read": [],
+  "summary": "The review of FL-130 could not be completed."
+}

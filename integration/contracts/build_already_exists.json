@@ -1,0 +1,48 @@
+{
+  "agent_version": "4.3.0",
+  "conflicts": [],
+  "contract_version": "1.0",
+  "created": [],
+  "degraded": false,
+  "degraded_reason": "",
+  "display_name": "JiraTaskCreation",
+  "duplicates": [
+    {
+      "existing_key": "FL-9",
+      "existing_summary": "Tyre pressure logging",
+      "matched_on": "title similarity",
+      "proposed_title": "Record a tyre pressure check",
+      "score": 0.81,
+      "url": ""
+    }
+  ],
+  "email_kind": "duplicates",
+  "email_recommended": true,
+  "errors": [],
+  "findings": [],
+  "headline": "This work already exists",
+  "outcome": "ALREADY_EXISTS",
+  "produced_by": "JiraTaskCreation",
+  "questions": [],
+  "run_id": "4a81f7c2",
+  "sources_missing": [
+    {
+      "what": "Confluence: Depot Ops Runbook",
+      "what_to_do": "please grant access, or paste the relevant section into the ticket",
+      "why": "this account has no access"
+    },
+    {
+      "what": "Attachment: matrix.xlsx",
+      "what_to_do": "please re-attach it in a readable format",
+      "why": "password-protected"
+    }
+  ],
+  "sources_read": [
+    "FL-120 description",
+    "3 comment(s)",
+    "Attachment: spec_v1.pdf",
+    "1 linked work item(s)",
+    "111 existing ticket(s) in the project"
+  ],
+  "summary": "This work already exists."
+}

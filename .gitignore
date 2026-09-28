@@ -1,0 +1,15 @@
+# Tool caches — these appear at the repo root whenever a linter or test run is
+# started from here rather than from inside an agent.
+.ruff_cache/
+.pytest_cache/
+__pycache__/
+*.pyc
+
+.DS_Store
+
+# Build output. `aetherion publish` deletes its own artifact; scripts/build_package.py
+# leaves one behind on purpose so it can be inspected before shipping.
+dist/
+
+# Never commit a real environment file: it ships inside the deploy artifact.
+.env

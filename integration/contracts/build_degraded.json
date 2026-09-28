@@ -1,0 +1,58 @@
+{
+  "agent_version": "4.3.0",
+  "conflicts": [],
+  "contract_version": "1.0",
+  "created": [
+    {
+      "issue_type": "Story",
+      "key": "FL-121",
+      "summary": "Record a tyre pressure check",
+      "url": "https://example.atlassian.net/browse/FL-121"
+    },
+    {
+      "issue_type": "Sub-task",
+      "key": "FL-122",
+      "summary": "Define the rules",
+      "url": ""
+    },
+    {
+      "issue_type": "Sub-task",
+      "key": "FL-123",
+      "summary": "Implement the behaviour",
+      "url": ""
+    }
+  ],
+  "degraded": true,
+  "degraded_reason": "The model was unreachable, so the wording was generated locally.",
+  "display_name": "JiraTaskCreation",
+  "duplicates": [],
+  "email_kind": "created",
+  "email_recommended": true,
+  "errors": [],
+  "findings": [],
+  "headline": "Work breakdown created",
+  "outcome": "CREATED",
+  "produced_by": "JiraTaskCreation",
+  "questions": [],
+  "run_id": "4a81f7c2",
+  "sources_missing": [
+    {
+      "what": "Confluence: Depot Ops Runbook",
+      "what_to_do": "please grant access, or paste the relevant section into the ticket",
+      "why": "this account has no access"
+    },
+    {
+      "what": "Attachment: matrix.xlsx",
+      "what_to_do": "please re-attach it in a readable format",
+      "why": "password-protected"
+    }
+  ],
+  "sources_read": [
+    "FL-120 description",
+    "3 comment(s)",
+    "Attachment: spec_v1.pdf",
+    "1 linked work item(s)",
+    "111 existing ticket(s) in the project"
+  ],
+  "summary": "Created 1 Story and 3 Sub-tasks."
+}

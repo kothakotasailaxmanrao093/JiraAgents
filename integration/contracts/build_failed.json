@@ -1,0 +1,41 @@
+{
+  "agent_version": "4.3.0",
+  "conflicts": [],
+  "contract_version": "1.0",
+  "created": [],
+  "degraded": false,
+  "degraded_reason": "",
+  "display_name": "JiraTaskCreation",
+  "duplicates": [],
+  "email_kind": "failed",
+  "email_recommended": true,
+  "errors": [
+    "403 Forbidden creating Story in FL"
+  ],
+  "findings": [],
+  "headline": "Could not complete this request",
+  "outcome": "FAILED",
+  "produced_by": "JiraTaskCreation",
+  "questions": [],
+  "run_id": "4a81f7c2",
+  "sources_missing": [
+    {
+      "what": "Confluence: Depot Ops Runbook",
+      "what_to_do": "please grant access, or paste the relevant section into the ticket",
+      "why": "this account has no access"
+    },
+    {
+      "what": "Attachment: matrix.xlsx",
+      "what_to_do": "please re-attach it in a readable format",
+      "why": "password-protected"
+    }
+  ],
+  "sources_read": [
+    "FL-120 description",
+    "3 comment(s)",
+    "Attachment: spec_v1.pdf",
+    "1 linked work item(s)",
+    "111 existing ticket(s) in the project"
+  ],
+  "summary": "Jira rejected the write."
+}

@@ -1,0 +1,47 @@
+{
+  "agent_version": "2.2.1",
+  "conflicts": [],
+  "contract_version": "1.0",
+  "created": [],
+  "degraded": false,
+  "degraded_reason": "",
+  "display_name": "JiraRequirementReview",
+  "duplicates": [],
+  "email_kind": "none",
+  "email_recommended": false,
+  "errors": [],
+  "findings": [
+    {
+      "category": "ambiguity",
+      "description": "\"real-time\" is used with no latency target given."
+    },
+    {
+      "category": "open_question",
+      "description": "What happens when the reading is out of range?"
+    }
+  ],
+  "headline": "Requirement review \u2014 significant gaps found",
+  "outcome": "REVIEWED",
+  "produced_by": "JiraRequirementReview",
+  "questions": [
+    "What happens when the reading is out of range?"
+  ],
+  "run_id": "9c03be57",
+  "sources_missing": [
+    {
+      "what": "FL-130 has no acceptance criteria",
+      "what_to_do": "please add them, so it is testable and two developers build the same thing",
+      "why": ""
+    },
+    {
+      "what": "spec_matrix.xlsx (attached to FL-130) could not be read: password-protected",
+      "what_to_do": "please check the file opens, and re-attach it if it is corrupt or protected",
+      "why": ""
+    }
+  ],
+  "sources_read": [
+    "Target FL-130 (description)",
+    "Attachment requirements_v3.docx (on FL-130)"
+  ],
+  "summary": "Read 2 source(s). 2 item(s) could not be read or are missing from the ticket."
+}

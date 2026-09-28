@@ -1,0 +1,30 @@
+{
+  "agent_version": "2.2.1",
+  "conflicts": [],
+  "contract_version": "1.0",
+  "created": [],
+  "degraded": false,
+  "degraded_reason": "",
+  "display_name": "JiraRequirementReview",
+  "duplicates": [],
+  "email_kind": "none",
+  "email_recommended": false,
+  "errors": [
+    "no_requirement_text"
+  ],
+  "findings": [],
+  "headline": "Requirement review \u2014 nothing to review yet",
+  "outcome": "REVIEWED",
+  "produced_by": "JiraRequirementReview",
+  "questions": [],
+  "run_id": "9c03be57",
+  "sources_missing": [
+    {
+      "what": "FL-130 has no description",
+      "what_to_do": "please describe what needs to be built",
+      "why": ""
+    }
+  ],
+  "sources_read": [],
+  "summary": "FL-130 has no description, attachment or linked page that could be read."
+}

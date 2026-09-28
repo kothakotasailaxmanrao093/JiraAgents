@@ -1,0 +1,30 @@
+{
+    "name": "JiraOrchestration",
+    "version": "0.1.24",
+    "description": "One ingress for Jira comment webhooks. Filters comments that mention the agent, ignores its own replies and redelivered events, classifies what was asked for, dispatches to exactly one specialist agent, and posts the single reply — so a comment is never answered twice and never silently ignored.",
+    "config": {
+        "triggers": [
+            {
+                "name": "issue_key",
+                "type": "str",
+                "required": true,
+                "description": "The Jira issue the comment was left on (e.g. ABC-123).",
+                "friendly_name": "Jira Issue Key"
+            },
+            {
+                "name": "comment_id",
+                "type": "str",
+                "required": false,
+                "description": "The id of the comment that triggered this run. Supplied by the Jira Automation rule; the most recent comment is used if it is absent.",
+                "friendly_name": "Comment Id"
+            },
+            {
+                "name": "webhookEvent",
+                "type": "str",
+                "required": false,
+                "description": "The Jira event name, e.g. comment_created. Forms half of the idempotency key, so an edited comment counts as a new request.",
+                "friendly_name": "Webhook Event"
+            }
+        ]
+    }
+}
