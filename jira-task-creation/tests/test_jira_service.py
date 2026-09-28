@@ -353,13 +353,16 @@ async def test_configuration_status_reports_ready(jira_env):
 # children, which is the only thing that matters here.
 
 
+FL53 = {"summary": "Break this down", "description": None, "issuetype": "Story", "project": "FL"}
+
+
 async def test_asking_twice_does_not_put_the_same_subtasks_on_a_ticket_again(fake_jira, jira_env):
-    fake = fake_jira()
+    fake = fake_jira(epics={"FL-53": dict(FL53)})
 
     first = await create_jira_issues(
         breakdown=small_breakdown(),
         requirement=REQUIREMENT,
-        attach_to_key="FL-53",
+        root_key="FL-53",
         correlation_id="FL-53#10293",
     )
     after_first = len(fake.created)
@@ -369,7 +372,7 @@ async def test_asking_twice_does_not_put_the_same_subtasks_on_a_ticket_again(fak
     second = await create_jira_issues(
         breakdown=small_breakdown(),
         requirement=REQUIREMENT,
-        attach_to_key="FL-53",
+        root_key="FL-53",
         correlation_id="FL-53#10310",
     )
 
@@ -377,16 +380,16 @@ async def test_asking_twice_does_not_put_the_same_subtasks_on_a_ticket_again(fak
     assert second["created_keys"] == []
     assert second["reused_existing"] is True
     assert sorted(second["reused_keys"]) == sorted(first["created_keys"])
-    assert "already carries" in second["summary"]
+    assert "were already under it and were reused" in second["summary"]
 
 
 async def test_only_the_missing_subtasks_are_added_to_a_ticket(fake_jira, jira_env):
     """A partly-populated ticket gains only what it does not already have."""
-    fake = fake_jira()
+    fake = fake_jira(epics={"FL-53": dict(FL53)})
     await create_jira_issues(
         breakdown=small_breakdown(),
         requirement=REQUIREMENT,
-        attach_to_key="FL-53",
+        root_key="FL-53",
         correlation_id="FL-53#1",
     )
     # Drop one child, as a person deleting a sub-task in Jira would. `store` is
@@ -397,12 +400,12 @@ async def test_only_the_missing_subtasks_are_added_to_a_ticket(fake_jira, jira_e
     result = await create_jira_issues(
         breakdown=small_breakdown(),
         requirement=REQUIREMENT,
-        attach_to_key="FL-53",
+        root_key="FL-53",
         correlation_id="FL-53#2",
     )
     assert result["status"] == ResultStatus.JIRA_CREATED.value
     assert len(result["created_keys"]) == 1, "only the deleted sub-task is recreated"
-    assert "were already there" in result["summary"]
+    assert "were already under it and were reused" in result["summary"]
 
 
 # --- closed work is not a duplicate -----------------------------------------

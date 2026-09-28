@@ -624,6 +624,78 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
                 notification=notification,
             )
 
+        # ---- Gate 0d: a Sub-task cannot become the root -------------------
+        # Checked before any model call: nothing it could say changes this.
+        if source.get("ticket_is_root") and source.get("is_subtask"):
+            parent = next(
+                (
+                    link.get("key")
+                    for link in source.get("linked_issues") or []
+                    if link.get("relationship") == "parent of this issue"
+                ),
+                "",
+            )
+            reason = (
+                f"{source.get('key')} is a Sub-task, and a Sub-task cannot hold other "
+                f"tickets. Nothing was changed or created."
+            )
+            questions = [
+                f"Ask on its parent{' ' + parent if parent else ''} instead: add a comment "
+                "there that mentions the agent followed by: build"
+            ]
+            notification = await _notify(
+                NotificationKind.CLARIFICATION_REQUIRED,
+                issue_key=issue_key,
+                issue_summary=issue_summary,
+                project_key=source.get("project_key", ""),
+                situation=reason,
+                questions=questions,
+            )
+            await _report(
+                issue_key,
+                headline="Nothing created — a Sub-task cannot hold other tickets",
+                situation=reason,
+                questions=questions,
+                notification=notification,
+                answered_comment_id=trigger_comment_id,
+            )
+            return _result(
+                status=ResultStatus.CLARIFICATION_REQUIRED,
+                message=reason,
+                clarifying_questions=questions,
+                source_issue=source,
+                notification=notification,
+            )
+
+        # ---- Gate 0e: this ticket was already built as a root --------------
+        # Its description was rewritten by that build, so the request would
+        # hash differently and the idempotency label could not find it. The
+        # tickets built under it can, by the root's own label.
+        built = source.get("root_built")
+        if source.get("ticket_is_root") and built:
+            keys = built.get("reused_keys") or []
+            message = (
+                f"{source.get('key')} was already built — it is {source.get('issue_type')} "
+                f"with {len(keys)} ticket(s) under it: {', '.join(keys)}. Nothing new was "
+                "created. To add more work, add a comment that mentions the agent "
+                "followed by: build <the new part>."
+            )
+            logger.info(message)
+            await _report(
+                issue_key,
+                headline=f"{source.get('key')} was already built — nothing created again",
+                situation=message,
+                context_notes=_unreadable_notes(source),
+                answered_comment_id=trigger_comment_id,
+            )
+            return _result(
+                status=ResultStatus.JIRA_CREATED,
+                message=message,
+                headline=f"{source.get('key')} was already built — nothing created again",
+                jira_result=built,
+                source_issue=source,
+            )
+
         requirement = source.get("requirement_text") or ""
         project_key = source.get("project_key") or project_key
         project_name = project_name or source.get("project_name") or ""
@@ -977,16 +1049,24 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
         None,
         (epic_ctx or {}).get("key", ""),
         (sprint or {}).get("id"),
-        # When the request was "break THIS ticket down", the ticket is the work
-        # item. create_jira_issues attaches the sub-tasks to it instead of
-        # creating a Story that repeats it — but only when the breakdown really
-        # is one capability; several need Stories of their own.
-        issue_key if (source or {}).get("trigger_is_pointer") else "",
+        # When the ticket holds the requirement ("@Aetherion build" on it), it
+        # is the root: it takes the type its description needs and the work
+        # goes under it — no Epic or Story is created beside it that repeats it.
+        issue_key if (source or {}).get("ticket_is_root") else "",
         # The stated request, which is what identifies this piece of work.
         # Falls back to the bundle only when validation did not supply it.
         validation.get("request_text") or clean_requirement,
-        # Linked back to what is created, so the ticket shows where it went.
+        # Linked back to what is created when related, so the ticket shows
+        # where it went; otherwise the new ticket names where it was asked.
         issue_key,
+        ", ".join(
+            part
+            for part in (
+                (source or {}).get("trigger_comment_author") or "",
+                (source or {}).get("trigger_comment_created") or "",
+            )
+            if part
+        ),
         start_to_close_timeout=_JIRA_TIMEOUT,
     )
     jira_status = jira_result.get("status", ResultStatus.JIRA_CREATION_FAILED.value)
@@ -1005,17 +1085,15 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
         if ref
     ]
 
+    root = jira_result.get("root") or {}
+    headline = (
+        f"{root['key']} is now {'an' if root.get('type_after', '').lower() == 'epic' else 'a'} "
+        f"{root.get('type_after')}"
+        if root and jira_status == ResultStatus.JIRA_CREATED.value
+        else ""
+    )
     if jira_status == ResultStatus.JIRA_CREATED.value:
         message = jira_result.get("summary", "Jira issues created.")
-        attached = jira_result.get("attached_to")
-        if attached:
-            # Say plainly what was used and what was not. The old reply read
-            # "Work breakdown created" after silently ignoring half the
-            # instruction and building a duplicate ticket instead.
-            message = (
-                f"{message} The work was read from {attached}'s own description. "
-                f"Its description was not edited — only sub-tasks were added."
-            )
         if jira_result.get("sprint_error"):
             message += f" {jira_result['sprint_error']}"
         notification = await _notify(
@@ -1031,14 +1109,11 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
         )
         await _report(
             issue_key,
-            headline=(
+            headline=headline
+            or (
                 "Reused the tickets created earlier for this requirement."
                 if jira_result.get("reused_existing")
-                else (
-                    f"Sub-tasks added to {jira_result['attached_to']}"
-                    if jira_result.get("attached_to")
-                    else "Work breakdown created."
-                )
+                else "Work breakdown created."
             ),
             situation=message,
             created=created_refs,
@@ -1059,7 +1134,8 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
             )
         else:
             message = (
-                f"Jira creation did not run: {jira_result.get('failure_reason', '')} "
+                f"Jira creation did not {'complete' if root else 'run'}: "
+                f"{jira_result.get('failure_reason', '')} "
                 f"No issues were created, so re-running is safe."
             )
         notification = await _notify(
@@ -1090,6 +1166,7 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
     return _result(
         status=ResultStatus(jira_status),
         message=message,
+        headline=headline,
         classification=classification,
         analysis=breakdown.get("analysis", ""),
         epic=breakdown.get("epic"),

@@ -1,6 +1,6 @@
 {
     "name": "JiraTaskCreation",
-    "version": "4.3.37",
+    "version": "4.3.40",
     "description": "Comment-driven Jira work-breakdown agent. Someone comments '@Aetherion <requirement>' on any Jira issue; the agent reads that comment as the request and the issue (description, attachments, other comments, links, history) as context, reviews every existing ticket in the project, then creates an Epic, User Stories and Sub-tasks. It replies on the same issue signed AetherionAgent, and emails when it needs clarification or found the work already exists. It never creates duplicates.",
     "config": {
         "triggers": [

@@ -53,6 +53,7 @@ from src.prompts.templates import (
     breakdown_prompt,
     coverage_instructions,
     duplicate_adjudication_prompt,
+    related_ticket_prompt,
     triage_prompt,
 )
 
@@ -263,6 +264,24 @@ async def llm_same_work(pairs: list[tuple[str, str, str]]) -> dict[int, bool]:
                 f"({str(row.get('reason', ''))[:80]})"
             )
     return confirmed
+
+
+async def llm_related(key: str, summary: str, description: str, request: str) -> bool:
+    """Whether the ticket asked on is about the work asked for.
+
+    Related -> the new work is linked to it ("relates to"). Unrelated -> no link,
+    and the new ticket says where it was requested instead (owner decision,
+    2026-09-28): a "Test ticket" linked to an invoicing Epic reads as a relation
+    that does not exist. Raises when the model gives no usable verdict.
+    """
+    data = _parse_json_object(
+        await _chat(related_ticket_prompt(key, summary, description, request))
+    )
+    verdict = data.get("related")
+    if not isinstance(verdict, bool):
+        raise DecompositionError("Relatedness answer carried no true/false 'related'.")
+    logger.info(f"{key} related to the request: {verdict} ({str(data.get('reason', ''))[:80]})")
+    return verdict
 
 
 # --------------------------------------------------------------------------

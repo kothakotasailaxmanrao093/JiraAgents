@@ -1068,6 +1068,7 @@ source = { editable = "." }
 dependencies = [
     { name = "aetherion-sdk" },
     { name = "aiohttp" },
+    { name = "graphql-core" },
     { name = "pydantic" },
     { name = "python-docx" },
     { name = "python-dotenv" },
@@ -1086,6 +1087,7 @@ dev = [
 requires-dist = [
     { name = "aetherion-sdk", url = "https://sdk.sbox.aetherion.io/Darwin/aetherion_sdk-0.0.67-cp312-cp312-macosx_26_0_arm64.whl" },
     { name = "aiohttp", specifier = "==3.13.5" },
+    { name = "graphql-core", specifier = ">=3.2,<3.3" },
     { name = "pydantic", specifier = ">=2.7" },
     { name = "python-docx", specifier = ">=1.2.0" },
     { name = "python-dotenv", specifier = ">=1.0.1" },

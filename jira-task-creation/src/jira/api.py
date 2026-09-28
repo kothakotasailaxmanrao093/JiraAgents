@@ -13,6 +13,7 @@ missing on the worker. See :mod:`src.jira` for the full story.
 * ``adf``        - Atlassian Document Format, both directions
 * ``context``    - reading a project, its epics, boards and sprints
 * ``issues``     - creating the hierarchy, idempotently
+* ``root``       - making the ticket asked on the root of its own hierarchy
 * ``duplicates`` - recognising work that already exists
 * ``trigger``    - the webhook side: who asked and what was answered
 """
@@ -75,6 +76,7 @@ from src.jira.duplicates import (
 # Creating the Epic/Story/Sub-task hierarchy, idempotently.
 from src.jira.issues import (
     _reuse,
+    build_under_root,
     create_hierarchy,
     find_existing,
     idempotency_key,
@@ -132,6 +134,7 @@ __all__ = [
     "build_overlap_report",
     "comparable_issues",
     "containment",
+    "build_under_root",
     "create_hierarchy",
     "link_related",
     "download_attachment",

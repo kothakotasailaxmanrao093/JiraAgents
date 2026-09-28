@@ -1,6 +1,6 @@
 [project]
 name = "jira-task-creation"
-version = "4.3.37"
+version = "4.3.40"
 description = "LaxmanTicketWise — validates requirements, classifies them Small/Medium/Large, decomposes them into Epics/Stories/Subtasks, and creates the Jira hierarchy"
 authors = [{ name = "Kothakota Sai Laxman Rao", email = "kothakota.sailaxmanrao@calfus.com" }]
 readme = "README.md"
@@ -11,6 +11,10 @@ requires-python = ">=3.12.10,<3.13"
 
 
 dependencies = [
+    # graphql-core 3.3.0 (27 Sep 2026) removed graphql.execution.ExecutionContext,
+    # which strawberry 0.287.3 imports via the platform's phoenix/agent_lib: the
+    # worker pod crashed on start-up. Remove once the platform image supports 3.3.
+    "graphql-core>=3.2,<3.3",
     "aetherion-sdk @ https://sdk.sbox.aetherion.io/Darwin/aetherion_sdk-0.0.83-cp312-cp312-macosx_26_0_arm64.whl",
     # Imported directly by src/; previously satisfied only transitively via the
     # SDK, which breaks the moment the SDK drops one of them.

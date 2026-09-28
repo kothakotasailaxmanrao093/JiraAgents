@@ -1,0 +1,11 @@
+Meeting: Police clearance check — decisions
+Date: 28 September 2026
+Attendees: Priya (Product), Arjun (Verification Ops), Meera (Engineering)
+
+Arjun: We cannot send any request until the candidate uploads a signed authorisation letter.
+Priya: Agreed. And the officer can re-send a portal request at most once.
+Meera: Who can see the result?
+Arjun: Only the compliance team and the recruiter.
+Priya: Checks outside India are out of scope for this release.
+Meera: One thing we did not settle: whether the candidate is told the result.
+Priya: Leave that open for now.

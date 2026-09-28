@@ -194,6 +194,9 @@ class FakeJira:
         sprint_add_status: int = 204,
         fail_on_summary: str = "",
         reject_inline_parent: bool = False,
+        can_edit: bool = True,
+        refuse_type_change: bool = False,
+        refuse_priority: bool = False,
     ) -> None:
         self.issue_types = issue_types or ["Epic", "Story", "Sub-task"]
         self.createmeta_status = createmeta_status
@@ -212,6 +215,13 @@ class FakeJira:
         # Some company-managed projects reject `parent` inline on create; the
         # tools then create unparented and link afterwards.
         self.reject_inline_parent = reject_inline_parent
+        # The root-ticket edits: permission, a refused type change, and a
+        # project with no Priority field on its screen.
+        self.can_edit = can_edit
+        self.refuse_type_change = refuse_type_change
+        self.refuse_priority = refuse_priority
+        # (issue_key, body) for every PUT that edited an issue's own fields.
+        self.edits: list[tuple[str, dict[str, Any]]] = []
 
         self.store: list[dict[str, Any]] = []
         self.created: list[dict[str, Any]] = []
@@ -284,6 +294,11 @@ class FakeJira:
                 return _Response(self.search_status, {"errorMessages": ["search failed"]})
             return _Response(200, {"issues": self._search(kwargs.get("params", {}).get("jql", ""))})
 
+        if url == "/rest/api/3/mypermissions":
+            return _Response(
+                200, {"permissions": {"EDIT_ISSUES": {"havePermission": self.can_edit}}}
+            )
+
         if url == "/rest/api/3/field":
             return _Response(200, [{"id": "customfield_10014", "name": "Epic Link"}])
 
@@ -307,8 +322,14 @@ class FakeJira:
                     "fields": {
                         "summary": spec.get("summary", f"{key} summary"),
                         "description": spec.get("description", ""),
-                        "issuetype": {"name": spec.get("issuetype", "Epic")},
+                        "issuetype": {
+                            "name": spec.get("issuetype", "Epic"),
+                            "subtask": spec.get("subtask", False),
+                        },
                         "project": {"key": spec.get("project", key.split("-")[0])},
+                        "subtasks": [{"key": k} for k in spec.get("subtasks", [])],
+                        "labels": list(spec.get("labels", [])),
+                        "priority": {"name": spec.get("priority", "Medium")},
                     },
                 },
             )
@@ -362,6 +383,25 @@ class FakeJira:
                 if name.startswith("customfield_") and isinstance(value, str):
                     self.links.append((issue_key, value))
                     return _Response(204)
+            if "issuetype" in fields and self.refuse_type_change:
+                return _Response(
+                    400, {"errors": {"issuetype": "The issue type selected is invalid."}}
+                )
+            if "priority" in fields and self.refuse_priority:
+                return _Response(400, {"errors": {"priority": "Field 'priority' cannot be set."}})
+            self.edits.append((issue_key, body))
+            spec = self.epics.get(issue_key)
+            if spec is not None:
+                if "issuetype" in fields:
+                    spec["issuetype"] = fields["issuetype"]["name"]
+                for name in ("summary", "description"):
+                    if name in fields:
+                        spec[name] = fields[name]
+                if "priority" in fields:
+                    spec["priority"] = fields["priority"]["name"]
+                for op in (body.get("update") or {}).get("labels") or []:
+                    if "add" in op and op["add"] not in spec.setdefault("labels", []):
+                        spec["labels"].append(op["add"])
             return _Response(204)
         return _Response(404, {"errorMessages": [f"no route for {url}"]})
 

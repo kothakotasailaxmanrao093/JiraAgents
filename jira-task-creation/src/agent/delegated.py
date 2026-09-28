@@ -63,7 +63,7 @@ AGENT_DISPLAY_NAME = "JiraTaskCreation"
 # It is kept in step by scripts/publish.py, which writes all three (pyproject,
 # metadata.json and this constant) together, and by
 # tests/test_version_agreement.py, which fails if they ever diverge.
-AGENT_VERSION = "4.3.37"
+AGENT_VERSION = "4.3.40"
 
 
 def agent_version() -> str:
@@ -342,7 +342,8 @@ def to_contract(result: dict[str, Any], *, run_id: str, agent_version: str) -> A
         headline=(
             f"About {key}"
             if outcome is Outcome.ANSWERED and key
-            else _HEADLINE.get(outcome, "Nothing was created")
+            # The run's own heading when it has one ("BGV-25 is now an Epic").
+            else str(result.get("headline") or "") or _HEADLINE.get(outcome, "Nothing was created")
         ),
         # The plain message, not ``summary_text``: that is the standalone
         # run's status block ("Outcome : … / Status : JIRA_CREATED / Generated
