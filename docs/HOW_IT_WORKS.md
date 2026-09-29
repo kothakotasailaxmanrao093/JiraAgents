@@ -7,7 +7,7 @@ back under that comment.
 | Agent | Registered as | Job | Writes to Jira? |
 |---|---|---|---|
 | **Jira Orchestration** (router) | `JiraOrchestration` | Reads the comment, decides what is being asked, calls one child, posts the one reply, sends the email | the reply comment, a label |
-| **Work Breakdown** | `JiraTaskCreation` | Turns a requirement into an Epic, Stories and Sub-tasks | creates tickets |
+| **Work Breakdown** | `JiraTaskCreation` | Turns a requirement into an Epic, Stories and Sub-tasks — or makes the ticket itself the Epic/Story/Task/Bug | creates and updates tickets |
 | **Requirement Review** | `JiraRequirementReview` | Finds gaps, ambiguities and missing acceptance criteria | nothing |
 
 ---
@@ -86,14 +86,38 @@ reply · a redelivered comment is not answered twice · a failure is never silen
                         all exists → "This work already exists" with keys · part exists → says how
                         to build only the missing part · identical earlier request → reused
         │
- CREATE IN JIRA         Epic → Stories (parent = Epic) → Sub-tasks (parent = Story)
+ CREATE IN JIRA         the comment only says "build" → THE TICKET ITSELF IS THE ROOT (below)
+                        the comment carries its own requirement → new Epic → Stories → Sub-tasks
+                          linked "relates to" the ticket only if it is really related (AI check);
+                          otherwise the new ticket says "Requested in a comment on BGV-20 by …"
                         works with "Sub-task" (company-managed) and "Subtask" (team-managed)
-                        one piece of work → Sub-tasks under the asking ticket instead
-                        the asking ticket gets a "relates to" link to the new Epic/Story
         │
  RESULT                 created keys + titles · "Details I could not determine — please confirm"
                         (or "Nothing was missing — every detail came from your description")
 ```
+
+### The ticket as the root
+
+`@Aetherion build` on a ticket that holds the requirement changes **that ticket** — same key —
+instead of creating an Epic beside it that repeats it. Its description decides the type:
+
+| Description | Ticket becomes | Under it |
+|---|---|---|
+| Medium / Large — several capabilities | **Epic** | Stories, Sub-tasks under each |
+| One capability | **Story** | Sub-tasks |
+| One technical job (config, rotation, upgrade) | **Task** | Sub-tasks only for 2+ real steps |
+| Something broken **in production** for real users | **Bug**, priority **Highest** (everyone affected) or **High** | nothing |
+
+- An Epic stays an Epic. A Bug needs a failure *and* a production signal in the text, so a feature
+  request is never filed as a Bug.
+- The summary and description are rewritten; the person's own description is kept, word for word
+  (images too), under **Original request**, with the old summary. Comments, attachments, links,
+  reporter and history are never touched. Label `ltw-processed` is added once.
+- **Nothing changes** unless every check passes first: valid and not vague, not existing work,
+  the project has the types, the account may edit, the ticket is not a Sub-task, and a ticket
+  with Sub-tasks is never made an Epic. If Jira refuses the type change, nothing else is changed.
+- Asking again reuses what was built (one label for life per root); a run that stopped part-way
+  continues without creating anything twice.
 
 **No AI, no tickets:** if the AI model cannot produce the breakdown, nothing is created and the
 reply says so — there is no fallback that writes generic tickets.

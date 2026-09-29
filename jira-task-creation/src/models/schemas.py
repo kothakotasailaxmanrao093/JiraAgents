@@ -74,6 +74,20 @@ class Complexity(str, Enum):
     HIGH = "High"
 
 
+class WorkKind(str, Enum):
+    """What sort of work a Small requirement is — it decides the root's type.
+
+    Only read when the ticket asked on becomes the root (``@Aetherion build``
+    on a ticket holding the requirement): a feature is a Story, a technical
+    job with no user-facing behaviour is a Task, and something broken in
+    production is a Bug (owner decision, 2026-09-28).
+    """
+
+    FEATURE = "feature"
+    TECHNICAL = "technical"
+    DEFECT = "defect"
+
+
 NOT_SPECIFIED = "Not specified"
 NO_DEPENDENCIES = "None"
 
@@ -281,6 +295,16 @@ class Epic(_Strict):
         return [story.title for story in stories]
 
 
+class Defect(_Strict):
+    """A production problem, as the requirement states it. Becomes a Bug."""
+
+    actual: str = Field(min_length=5)
+    expected: str = Field(min_length=5)
+    impact: str = Field(min_length=5)
+    # Everyone, or a whole feature, is affected — decides Highest over High.
+    widespread: bool = False
+
+
 class WorkBreakdown(_Strict):
     """The validated decomposition: classification + optional epic + stories.
 
@@ -292,6 +316,9 @@ class WorkBreakdown(_Strict):
     analysis: str = Field(min_length=10)
     epic: Epic | None = None
     stories: list[Story] = Field(min_length=1)
+    # Decides the root's type for a Small requirement (see WorkKind).
+    work_kind: WorkKind = WorkKind.FEATURE
+    defect: Defect | None = None
     # Avoidable findings the self-review gate could not fix in its one
     # regeneration. Not part of the contract (not dumped); named in the reply.
     _quality_notes: list[str] = PrivateAttr(default_factory=list)
@@ -313,6 +340,17 @@ class WorkBreakdown(_Strict):
                     f"A {self.classification.value} requirement must produce "
                     "at least two Stories."
                 )
+        if self.work_kind is not WorkKind.FEATURE and self.classification is not (
+            Classification.SMALL
+        ):
+            raise ValueError(
+                f'work_kind "{self.work_kind.value}" is only for a Small requirement; '
+                'a Medium or Large one is "feature".'
+            )
+        if self.work_kind is WorkKind.DEFECT and self.defect is None:
+            raise ValueError(
+                'work_kind "defect" needs a "defect" object (actual, expected, impact).'
+            )
         return self
 
     def issue_count(self) -> dict[str, int]:
@@ -497,6 +535,20 @@ class JiraContext(_Strict):
     unavailable: list[str] = Field(default_factory=list)
 
 
+class RootChange(_Strict):
+    """What was done to the ticket that became the root of the hierarchy."""
+
+    key: str
+    url: str = ""
+    type_before: str = ""
+    type_after: str = ""
+    summary_before: str = ""
+    summary_after: str = ""
+    priority: str = ""
+    # A change Jira refused that did not stop the run (e.g. no Priority field).
+    notes: list[str] = Field(default_factory=list)
+
+
 class JiraResult(_Strict):
     """Outcome of the Jira write phase, including partial failures."""
 
@@ -518,9 +570,9 @@ class JiraResult(_Strict):
     sprint: SprintInfo | None = None
     sprint_error: str = ""
     placement: SprintPlacement = SprintPlacement.BACKLOG
-    # Set when sub-tasks were attached to an existing ticket rather than a new
-    # Story being created for them.
-    attached_to: str = ""
+    # Set when the ticket asked on was made the top of the hierarchy instead
+    # of a new Epic or Story being created beside it.
+    root: RootChange | None = None
 
 
 class TicketWiseResult(_Strict):
@@ -528,6 +580,9 @@ class TicketWiseResult(_Strict):
 
     status: ResultStatus
     message: str = ""
+    # Set when the run says something more specific than its status does
+    # ("BGV-25 is now an Epic"); the reply's heading otherwise.
+    headline: str = ""
     classification: Classification | None = None
     analysis: str = ""
     epic: dict[str, Any] | None = None
@@ -690,7 +745,19 @@ class SourceIssue(_Strict):
     # ticket, so the comment is the requirement and the ticket is context.
     trigger_comment_id: str = ""
     trigger_comment_author: str = ""
+    trigger_comment_created: str = ""
     trigger_comment_body: str = ""
+    # The comment only points at this ticket ("@Aetherion build") and names no
+    # page of its own, so the ticket holds the requirement and becomes the root
+    # of the hierarchy. A Confluence link in the comment keeps today's
+    # behaviour: new tickets, the one asked on left as it is.
+    ticket_is_root: bool = False
+    # A Sub-task cannot become the root of a hierarchy: it holds no children.
+    is_subtask: bool = False
+    # What an earlier "@Aetherion build" already built under this ticket as the
+    # root (a JiraResult dump), so asking again reuses it instead of building
+    # it twice. None when nothing was built here.
+    root_built: dict[str, Any] | None = None
     # True when the comment asked the agent to work from this ticket rather
     # than stating a requirement of its own.
     trigger_is_pointer: bool = False

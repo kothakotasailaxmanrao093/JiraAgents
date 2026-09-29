@@ -1,0 +1,12 @@
+Meeting: Address verification — decisions
+Date: 28 September 2026
+Attendees: Priya (Product), Arjun (Verification Ops), Meera (Engineering)
+
+Priya: Candidates complain that agents turn up without warning.
+Arjun: Then the candidate gets an SMS 1 day before the visit.
+Meera: What hours can agents visit?
+Arjun: Only between 09:00 and 18:00.
+Priya: If the result is Moved, the agent must record the new address.
+Meera: International addresses are out of scope for this release.
+Arjun: One thing we did not settle: whether a neighbour can confirm the address.
+Priya: Leave that open for now.

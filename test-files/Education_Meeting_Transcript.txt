@@ -1,0 +1,11 @@
+Meeting: Education verification — decisions
+Date: 28 September 2026
+Attendees: Priya (Product), Arjun (Verification Ops), Meera (Engineering)
+
+Priya: Candidates never hear when their education check is finished.
+Arjun: Then the candidate gets an email when the check is closed, with the result.
+Meera: Can officers explain a result?
+Arjun: Yes. The officer can add a note to each registrar result.
+Priya: Certificates sent by post are out of scope for this release.
+Meera: One thing we did not settle: whether foreign universities are supported.
+Priya: Leave that open for now.

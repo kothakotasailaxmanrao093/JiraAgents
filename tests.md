@@ -1,17 +1,18 @@
-# Live test plan — 21 test cases
+# Live test plan — 28 test cases
 
 Project: **BGV** (Praman) on jiraagentdemo.atlassian.net
-Versions under test: router **0.1.24**, Work Breakdown **4.3.37**, Requirement Review **2.2.18**
+Versions under test: router **0.1.24**, Work Breakdown **4.3.40**, Requirement Review **2.2.18**
 
 ---
 
 ## Before you start
 
 1. **Aetherion → Agents → Agent List** shows the three versions above. Do not test until it does.
-2. Every ticket you create is **Work type: Story** (never Epic or Sub-task).
+2. Every ticket you create is **Work type: Story** unless a test says **Task** (never Epic or Sub-task).
+   `@Aetherion build` on a ticket that holds the requirement **changes that ticket** into an Epic, Story, Task or Bug — so use a new ticket for every build test.
 3. Post comments in the normal **Add a comment** box unless a test says **Reply**.
 4. Wait the time given, then refresh. Builds of big requirements take 3–4 minutes.
-5. Epics are hidden in the list view — open them by key (`/browse/BGV-…`) to check or delete.
+5. Epics are hidden in the list view — open them by key (`/browse/BGV-…`) to check or delete. A ticket the agent turned into an Epic is hidden too.
 
 ## Checks on every reply
 
@@ -56,20 +57,22 @@ Before any background check starts, the candidate must give digital consent.
 **Comment:** `@Aetherion build`  **Wait:** 2–3 min
 
 **Pass:**
-- `Work breakdown created`; **Created in Jira** lists keys **with titles**
+- Headline **`BGV-… is now an Epic`** (or `a Story` if it judged this one capability); **Created in Jira** lists the child keys **with titles** — your ticket is **not** in that list
+- Your ticket's type changed, its summary may be new, and its description is structured with your own text kept under **Original request** at the end; your comment is still there
+- **No separate Epic** was created; the Stories' parent is your ticket
 - All 5 lines covered (email link, "I agree", date/time/IP, Pending/Given/Declined, blocked until Given)
 - User stories name people ("As a candidate…", "As a recruiter…"), never "As a system"
 - **Details I could not determine** lists only genuine gaps, or "Nothing was missing"
-- Your ticket shows **relates to** the new Epic. No email.
+- Your ticket has the label `ltw-processed` once. No email.
 
 ---
 
 ## 3. The same work again (duplicate)
 
-**Ticket:** new Story — Summary `Capture candidate consent`, **the same 6-line description as test 2**
+**Ticket:** new Story — Summary `Capture candidate consent`, **the same 6-line description as test 2** (after test 2 — its ticket is now the Epic)
 **Comment:** `@Aetherion build`  **Wait:** 2–3 min
 
-**Pass:** `This work already exists`, naming the test 2 tickets **by key and title**; does not name this ticket; nothing created; **one duplicates email**.
+**Pass:** `This work already exists`, naming the test 2 tickets **by key and title**; does not name this ticket; nothing created; **your ticket unchanged** (still a Story, same summary and description, no `ltw-processed`); **one duplicates email**.
 
 ---
 
@@ -78,7 +81,7 @@ Before any background check starts, the candidate must give digital consent.
 **Ticket:** new Story — Summary `Improve dashboard`, Description empty
 **Comment:** `@Aetherion build make the dashboard better`  **Wait:** 1 min
 
-**Pass:** `More information needed…`; questions are **about the dashboard** (which one, what is wrong, what "better" means), each once; never "does this differ from BGV-…"; nothing created; **clarification email**.
+**Pass:** `More information needed…`; questions are **about the dashboard** (which one, what is wrong, what "better" means), each once; never "does this differ from BGV-…"; nothing created; your ticket unchanged; **clarification email**.
 
 ---
 
@@ -150,7 +153,7 @@ https://jiraagentdemo.atlassian.net/wiki/spaces/PR/pages/3244061/BGV+Verificatio
 **Comment:** `@Aetherion let HR managers download the final verification report as a PDF with the company logo`
 **Wait:** 2–3 min
 
-**Pass:** Routed to **Layer 2** with a confidence; `Work breakdown created`; "As an HR manager…"; genuine questions only (missing logo, button placement); your ticket **relates to** the new Story; no email.
+**Pass:** Routed to **Layer 2** with a confidence; `Work breakdown created`; "As an HR manager…"; genuine questions only (missing logo, button placement); your ticket **relates to** the new Story (they are about the same thing) and is **not** converted; no email.
 
 ---
 
@@ -204,9 +207,9 @@ Clients are billed for each completed background check.
 ```
 **Comment:** `@Aetherion build`  **Wait:** 3–4 min
 
-**Pass:** Epic + several Stories, **2+ Sub-tasks each**; all 4 lines covered (30 days carried); people in every user story (no "As a billing system"); no question about anything stated (e.g. not "what format?" — PDF is stated).
+**Pass:** your ticket **is now an Epic** with several Stories under it, **2+ Sub-tasks each**, no separate Epic; all 4 lines covered (30 days carried); people in every user story (no "As a billing system"); no question about anything stated (e.g. not "what format?" — PDF is stated).
 
-> Tests 15 and 16 overlap. Run **one** of them, or delete test 15's tickets (open its Epic by key) before test 16 — otherwise 16 correctly answers "This work already exists".
+> Tests 15 and 16 overlap. Run **one** of them, or delete test 15's tickets (open its ticket, now an Epic, by key) before test 16 — otherwise 16 correctly answers "This work already exists".
 
 ---
 
@@ -308,7 +311,7 @@ Officers verify each candidate's government ID.
 ```
 **Comment:** `@Aetherion build based on the given description`  **Wait:** 2–3 min
 
-**Pass:** builds from the **description** (not the words "based on the given description"); all 4 lines covered; no false duplicate against unrelated tickets (e.g. address or employment checks).
+**Pass:** builds from the **description** (not the words "based on the given description"); your ticket **is now a Story** with the Sub-tasks under it; all 4 lines covered; no false duplicate against unrelated tickets (e.g. address or employment checks).
 
 ---
 
@@ -357,10 +360,10 @@ https://jiraagentdemo.atlassian.net/wiki/spaces/PR/pages/3178497/BGV+Candidate+C
 - **Nothing built for paper consent forms** (the transcript puts them out of scope)
 - **"Details I could not determine"** includes **whether the client is notified on withdrawal** — the meeting left it open, so it must be **asked, not invented**
 - It does **not** ask anything the four sources answer (90 days, 14 days, 72 hours, 1 hour…)
-- User stories name people (candidate, recruiter); your ticket **relates to** the new Epic; no email
+- User stories name people (candidate, recruiter); your ticket **is now the Epic** (attachments and Confluence link still on it); no email
 
 ### Step B — review a Story it created
-Open the **renewal** Story (reminders / expiry) and comment `@Aetherion review`.
+Open the **renewal** Story (reminders / expiry) under your ticket and comment `@Aetherion review`.
 
 **Pass:** Readiness **4/5 or higher**; no question about any fact above; the client-notification question is **not** repeated if it is already listed on the ticket; over-reach 0 (no SMS-gateway, API or database questions — none of the sources mention them).
 
@@ -368,6 +371,80 @@ Open the **renewal** Story (reminders / expiry) and comment `@Aetherion review`.
 Open one of that Story's Sub-tasks and comment `@Aetherion review`.
 
 **Pass:** no "has no acceptance criteria"; no repeat of the Story's open questions; over-reach 0.
+
+---
+
+## 22. One capability → the ticket becomes a Story
+
+**Ticket:** new **Task** — Summary `Referee reminder`
+**Description:**
+```
+Recruiters chase referees who have not answered.
+- If a referee has not replied 3 working days after the request, they get a reminder email
+- At most 2 reminders per referee
+- The recruiter sees "Reminder sent" with the date on the case
+```
+**Comment:** `@Aetherion build`  **Wait:** 2–3 min
+
+**Pass:** headline `BGV-… is now a Story`; "it was a Task … because it is one capability"; **Sub-tasks under your ticket**, no new Story, no Epic; description structured, your text under **Original request**; 3 working days / 2 reminders / "Reminder sent" carried.
+
+---
+
+## 23. A technical job → the ticket becomes (stays) a Task
+
+**Ticket:** new **Story** — Summary `SMTP password`
+**Description:** `Rotate the SMTP password used for candidate emails every 90 days: generate a new password in the vault, update the mail service configuration, and send one test email to confirm.`
+**Comment:** `@Aetherion build`  **Wait:** 2–3 min
+
+**Pass:** headline `BGV-… is now a Task`; Sub-tasks under it only for the real steps (2+), or "It is one step, so no Sub-tasks were needed"; no user story like "As a system".
+
+---
+
+## 24. A production problem → the ticket becomes a Bug
+
+**Ticket:** new Task — Summary `Report page broken`
+**Description:** `Since this morning's release, in production HR users cannot see the verification report. The page shows error 500. All clients are affected.`
+**Comment:** `@Aetherion build`  **Wait:** 2–3 min
+
+**Pass:** headline `BGV-… is now a Bug`; priority **Highest**; description has **What happens now / What should happen / Impact / Fixed when**, original text kept; **no children created**.
+**Also try:** description `In production, recruiters cannot download one candidate's PDF report.` → Bug, priority **High**.
+**Must not be a Bug:** description `Add a download button for verification reports.` → a Story.
+
+---
+
+## 25. Build the same ticket twice
+
+**Ticket:** the ticket from test 22 (or 2)
+**Comment:** `@Aetherion build` again  **Wait:** 1 min
+
+**Pass:** `BGV-… was already built — nothing created again`, listing the existing child keys; **no new tickets**; the description still has **one** "Original request" section; label `ltw-processed` still once.
+
+---
+
+## 26. Own requirement on an unrelated ticket → not converted, not linked
+
+**Ticket:** the ticket from test 1 (`Agent test ticket`)
+**Comment:** `@Aetherion build let HR managers export verification results to Excel with candidate name, check type, status and completion date`  **Wait:** 2–3 min
+
+**Pass:** a **new** Story (with Sub-tasks) is created; `Agent test ticket` is **not** converted and has **no link** to it; the new Story's description ends with **"Requested in a comment on BGV-… by <you>, <date>."**
+
+---
+
+## 27. Own requirement on a related ticket → linked
+
+**Ticket:** new Story — Summary `Verification exports`, Description `HR needs exports of verification results for audits.`
+**Comment:** `@Aetherion build export verification results to Excel with candidate name, check type, status and completion date`  **Wait:** 2–3 min
+
+**Pass:** a new Story is created and **relates to** your ticket; your ticket is **not** converted (the comment carried its own requirement); no "Requested in a comment" line.
+
+---
+
+## 28. A Sub-task cannot become the root
+
+**Ticket:** any Sub-task the agent created
+**Comment:** `@Aetherion build`  **Wait:** 1 min
+
+**Pass:** `Nothing created — a Sub-task cannot hold other tickets`, naming its parent to ask on instead; the Sub-task is unchanged; email (clarification).
 
 ---
 
@@ -396,6 +473,13 @@ Open one of that Story's Sub-tasks and comment `@Aetherion review`.
 | 19 | Build from description | | | – | | |
 | 20 | Mention only | | – | – | | |
 | 21 | All sources → build → review | | | | | |
+| 22 | Root → Story | | | – | | |
+| 23 | Root → Task | | | – | | |
+| 24 | Root → Bug + priority | | | – | | |
+| 25 | Build twice | | – | – | | |
+| 26 | Unrelated ticket → no link | | | – | | |
+| 27 | Related ticket → link | | | – | | |
+| 28 | Sub-task root refused | | – | – | | |
 | | **Total** | | | | | |
 
 **If a test fails:** send the ticket key, the reply (or "no reply"), and the time you commented.

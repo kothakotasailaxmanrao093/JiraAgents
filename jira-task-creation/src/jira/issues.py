@@ -42,8 +42,11 @@ from src.models.schemas import (
     JiraIssueRef,
     JiraResult,
     ResultStatus,
+    Story,
+    Subtask,
     WorkBreakdown,
 )
+from src.shared.adf import paragraph
 
 logger = setup_logger(__name__)
 
@@ -292,6 +295,206 @@ def _normalised_title(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (text or "").lower()).strip()
 
 
+def with_note(description: dict[str, Any], note: str) -> dict[str, Any]:
+    """A description with one closing line added, e.g. where it was requested."""
+    if not note:
+        return description
+    return {**description, "content": [*description["content"], paragraph(note)]}
+
+
+def _reason(exc: Exception) -> str:
+    return _http_error_text(exc) if isinstance(exc, httpx.HTTPStatusError) else str(exc)
+
+
+async def _create_story(
+    client: httpx.AsyncClient,
+    base_url: str,
+    project_key: str,
+    story_type: str,
+    story: Story,
+    labels: list[str],
+    epic_key: str,
+    note: str = "",
+) -> JiraIssueRef:
+    """One Story, under ``epic_key`` when given. Raises on failure.
+
+    A rejected inline parent usually means this project wants the classic Epic
+    Link field: the Story is then created unparented and linked.
+    """
+    description = with_note(story_description(story), note)
+    try:
+        return await create_issue(
+            client,
+            base_url,
+            project_key,
+            story_type,
+            story.title,
+            description,
+            labels,
+            parent_key=epic_key,
+        )
+    except httpx.HTTPStatusError as exc:
+        if not epic_key or exc.response.status_code not in (400, 404):
+            raise
+    ref = await create_issue(
+        client,
+        base_url,
+        project_key,
+        story_type,
+        story.title,
+        description,
+        labels,
+    )
+    mechanism = await link_story_to_epic(client, ref.key, epic_key)
+    logger.info(f"Linked {ref.key} to {epic_key} via {mechanism}")
+    return ref.model_copy(update={"parent_key": epic_key})
+
+
+async def _add_subtasks(
+    client: httpx.AsyncClient,
+    base_url: str,
+    project_key: str,
+    subtask_type: str,
+    subtasks: list[Subtask],
+    labels: list[str],
+    parent_key: str,
+    created: list[JiraIssueRef],
+) -> tuple[list[JiraIssueRef], list[JiraIssueRef]]:
+    """Sub-tasks under an existing ticket, skipping any it already carries.
+
+    Compared by title against the parent's own children: three runs of one
+    request once left FL-53 carrying nine Sub-tasks, three of each. Returns
+    ``(new, already_there)``; appends each new one to ``created`` as it goes,
+    so a failure part-way still reports what was made. Raises on failure.
+    """
+    siblings = await fetch_epic_children(client, parent_key, project_key)
+    by_title = {_normalised_title(c.summary): c for c in siblings}
+    new: list[JiraIssueRef] = []
+    kept: list[JiraIssueRef] = []
+    for subtask in subtasks:
+        existing = by_title.get(_normalised_title(subtask.title))
+        if existing is not None:
+            kept.append(
+                JiraIssueRef(
+                    key=existing.key,
+                    url=browse_url(base_url, existing.key),
+                    issue_type=existing.issue_type,
+                    summary=existing.summary,
+                    parent_key=parent_key,
+                )
+            )
+            continue
+        ref = await create_issue(
+            client,
+            base_url,
+            project_key,
+            subtask_type,
+            subtask.title,
+            subtask_description(subtask),
+            labels,
+            parent_key=parent_key,
+        )
+        created.append(ref)
+        new.append(ref)
+    return new, kept
+
+
+async def build_under_root(
+    client: httpx.AsyncClient,
+    base_url: str,
+    project_key: str,
+    breakdown: WorkBreakdown,
+    key_label: str,
+    root_key: str,
+    *,
+    create_stories: bool,
+    create_subtasks: bool,
+    types: dict[str, str],
+) -> JiraResult:
+    """The children of a ticket that has just become the root. No Epic, ever.
+
+    Safe to repeat: every level is compared by title with what the root (or
+    each Story) already holds, so a redelivered or repeated request reuses the
+    earlier tickets and a run that stopped part-way continues where it stopped.
+    """
+    labels = [key_label]
+    created: list[JiraIssueRef] = []
+    story_refs: list[JiraIssueRef] = []
+    subtask_refs: list[JiraIssueRef] = []
+    reused: list[JiraIssueRef] = []
+    step = f"Existing children of {root_key}"
+    try:
+        if create_stories:
+            children = await fetch_epic_children(client, root_key, project_key)
+            by_title = {_normalised_title(c.summary): c for c in children}
+            for story in breakdown.stories:
+                step = f"Story '{story.title}'"
+                existing = by_title.get(_normalised_title(story.title))
+                if existing is not None:
+                    story_ref = JiraIssueRef(
+                        key=existing.key,
+                        url=browse_url(base_url, existing.key),
+                        issue_type=existing.issue_type,
+                        summary=existing.summary,
+                        parent_key=root_key,
+                    )
+                    reused.append(story_ref)
+                else:
+                    story_ref = await _create_story(
+                        client, base_url, project_key, types["story"], story, labels, root_key
+                    )
+                    created.append(story_ref)
+                story_refs.append(story_ref)
+                step = f"Sub-tasks of '{story.title}'"
+                new, kept = await _add_subtasks(
+                    client,
+                    base_url,
+                    project_key,
+                    types["subtask"],
+                    story.subtasks,
+                    labels,
+                    story_ref.key,
+                    created,
+                )
+                subtask_refs += new + kept
+                reused += kept
+        elif create_subtasks:
+            step = f"Sub-tasks of {root_key}"
+            new, kept = await _add_subtasks(
+                client,
+                base_url,
+                project_key,
+                types["subtask"],
+                breakdown.stories[0].subtasks,
+                labels,
+                root_key,
+                created,
+            )
+            subtask_refs += new + kept
+            reused += kept
+    except (httpx.HTTPError, RuntimeError) as exc:
+        logger.error(f"Building under {root_key} failed at {step}: {_reason(exc)}")
+        return _failure(
+            key_label, created, step, _reason(exc), True, None, story_refs, subtask_refs
+        )
+
+    story_refs.sort(key=_key_number)
+    subtask_refs.sort(key=_key_number)
+    logger.info(
+        f"Built under {root_key}: created={[r.key for r in created] or '-'} "
+        f"reused={[r.key for r in reused] or '-'} label={key_label}"
+    )
+    return JiraResult(
+        status=ResultStatus.JIRA_CREATED,
+        stories=story_refs,
+        subtasks=subtask_refs,
+        created_keys=[r.key for r in created],
+        reused_keys=[r.key for r in reused],
+        reused_existing=bool(reused and not created),
+        idempotency_key=key_label,
+    )
+
+
 async def create_hierarchy(
     client: httpx.AsyncClient,
     base_url: str,
@@ -300,8 +503,8 @@ async def create_hierarchy(
     key_label: str,
     extra_labels: list[str] | None = None,
     existing_epic_key: str = "",
-    attach_to_key: str = "",
     types: dict[str, str] | None = None,
+    origin_note: str = "",
 ) -> JiraResult:
     """Create the Epic/Story/Subtask hierarchy for a validated breakdown.
 
@@ -310,6 +513,10 @@ async def create_hierarchy(
     and everything created so far is reported, together with whether a retry is
     safe — it is, because the idempotency label makes a re-run resolve to the
     same issues.
+
+    ``origin_note`` ends the description of the new top of the hierarchy (the
+    Epic, or each Story when there is none) — where the work was requested,
+    when that ticket was not related enough to link.
     """
     # Resolved against the project by the caller; the configured names otherwise.
     types = types or issue_type_names()
@@ -318,128 +525,6 @@ async def create_hierarchy(
     epic_ref: JiraIssueRef | None = None
     story_refs: list[JiraIssueRef] = []
     subtask_refs: list[JiraIssueRef] = []
-
-    # Someone pointed at a ticket and asked for it to be broken down, and the
-    # work turned out to be one capability. That ticket already *is* the work
-    # item — creating a Story beside it produces a copy that says the same
-    # thing, and hangs the sub-tasks off the copy instead of the ticket that
-    # was asked about. Attach directly instead.
-    if attach_to_key and len(breakdown.stories) == 1 and breakdown.epic is None:
-        story = breakdown.stories[0]
-        parent_ref = JiraIssueRef(
-            key=attach_to_key,
-            url=browse_url(base_url, attach_to_key),
-            summary=story.title,
-        )
-        logger.info(f"Attaching sub-tasks directly to {attach_to_key} (no duplicate Story)")
-
-        # What is already on this ticket. The idempotency label cannot help
-        # here: it is keyed per comment, so asking the same thing in a second
-        # comment produces a different label and a second identical set. Nor
-        # can duplicate detection — it drops Sub-tasks from comparison, because
-        # their fixed "Define the rules for:" prefixes drag every score down.
-        # Three runs of one request left FL-53 carrying nine Sub-tasks, three
-        # of each. Compare against the parent's own children instead.
-        try:
-            siblings = await fetch_epic_children(client, attach_to_key, project_key)
-        except httpx.HTTPError as exc:
-            # Without this list a repeat would duplicate silently, so stop
-            # rather than guess that the ticket is empty.
-            logger.error(f"Could not read existing sub-tasks of {attach_to_key}: {exc}")
-            return _failure(
-                key_label,
-                created,
-                f"Existing sub-tasks of {attach_to_key}",
-                str(exc),
-                True,
-                None,
-                [],
-                subtask_refs,
-            )
-        already = {_normalised_title(c.summary) for c in siblings}
-
-        skipped: list[JiraIssueRef] = []
-        for subtask in story.subtasks:
-            if _normalised_title(subtask.title) in already:
-                existing = next(
-                    c
-                    for c in siblings
-                    if _normalised_title(c.summary) == _normalised_title(subtask.title)
-                )
-                skipped.append(
-                    JiraIssueRef(
-                        key=existing.key,
-                        url=browse_url(base_url, existing.key),
-                        issue_type=existing.issue_type,
-                        summary=existing.summary,
-                        parent_key=attach_to_key,
-                    )
-                )
-                continue
-            try:
-                ref = await create_issue(
-                    client,
-                    base_url,
-                    project_key,
-                    types["subtask"],
-                    subtask.title,
-                    subtask_description(subtask),
-                    labels,
-                    parent_key=attach_to_key,
-                )
-            except httpx.HTTPError as exc:
-                reason = (
-                    _http_error_text(exc) if isinstance(exc, httpx.HTTPStatusError) else str(exc)
-                )
-                logger.error(f"Sub-task creation failed on {attach_to_key}: {reason}")
-                return _failure(
-                    key_label,
-                    created,
-                    f"Sub-task '{subtask.title}'",
-                    reason,
-                    True,
-                    None,
-                    [],
-                    subtask_refs,
-                )
-            created.append(ref)
-            subtask_refs.append(ref)
-
-        if skipped and not subtask_refs:
-            summary = (
-                f"Nothing was added. {attach_to_key} already carries all "
-                f"{len(skipped)} of these sub-tasks. Delete them first if you "
-                f"want the work broken down again."
-            )
-        elif skipped:
-            summary = (
-                f"{len(subtask_refs)} Subtask(s) added to {attach_to_key}; "
-                f"{len(skipped)} were already there and were left alone. "
-                f"No new Story was created — {attach_to_key} already describes this work."
-            )
-        else:
-            summary = (
-                f"{len(subtask_refs)} Subtask(s) added to {attach_to_key}. "
-                f"No new Story was created — {attach_to_key} already describes this work."
-            )
-
-        logger.info(
-            f"Attached to {attach_to_key} in {project_key}: "
-            f"created={[r.key for r in created] or '-'} "
-            f"skipped_as_duplicate={[r.key for r in skipped] or '-'} label={key_label}"
-        )
-        return JiraResult(
-            status=ResultStatus.JIRA_CREATED,
-            epic=None,
-            stories=[parent_ref],
-            subtasks=subtask_refs + skipped,
-            created_keys=[r.key for r in created],
-            reused_keys=[r.key for r in skipped],
-            reused_existing=bool(skipped and not subtask_refs),
-            idempotency_key=key_label,
-            attached_to=attach_to_key,
-            summary=summary,
-        )
 
     epic_reused = False
     if existing_epic_key:
@@ -461,7 +546,7 @@ async def create_hierarchy(
                 project_key,
                 types["epic"],
                 breakdown.epic.jira_summary,
-                epic_description(breakdown.epic, story_titles),
+                with_note(epic_description(breakdown.epic, story_titles), origin_note),
                 labels,
             )
             created.append(epic_ref)
@@ -481,69 +566,23 @@ async def create_hierarchy(
 
     for story in breakdown.stories:
         try:
-            story_ref = await create_issue(
+            story_ref = await _create_story(
                 client,
                 base_url,
                 project_key,
                 types["story"],
-                story.title,
-                story_description(story),
+                story,
                 labels,
-                parent_key=epic_ref.key if epic_ref else "",
+                epic_ref.key if epic_ref else "",
+                note="" if epic_ref else origin_note,
             )
-        except httpx.HTTPStatusError as exc:
-            # A rejected inline parent usually means this project wants the
-            # classic Epic Link field: create unparented, then link.
-            if epic_ref is None or exc.response.status_code not in (400, 404):
-                reason = _http_error_text(exc)
-                logger.error(f"Story creation failed: {reason}")
-                return _failure(
-                    key_label,
-                    created,
-                    f"Story '{story.title}'",
-                    reason,
-                    True,
-                    epic_ref,
-                    story_refs,
-                    subtask_refs,
-                )
-            try:
-                story_ref = await create_issue(
-                    client,
-                    base_url,
-                    project_key,
-                    types["story"],
-                    story.title,
-                    story_description(story),
-                    labels,
-                )
-                mechanism = await link_story_to_epic(client, story_ref.key, epic_ref.key)
-                story_ref = story_ref.model_copy(update={"parent_key": epic_ref.key})
-                logger.info(f"Linked {story_ref.key} to {epic_ref.key} via {mechanism}")
-            except (httpx.HTTPError, RuntimeError) as link_exc:
-                reason = (
-                    _http_error_text(link_exc)
-                    if isinstance(link_exc, httpx.HTTPStatusError)
-                    else str(link_exc)
-                )
-                logger.error(f"Story/epic linking failed: {reason}")
-                return _failure(
-                    key_label,
-                    created,
-                    f"Story '{story.title}'",
-                    reason,
-                    True,
-                    epic_ref,
-                    story_refs,
-                    subtask_refs,
-                )
-        except httpx.HTTPError as exc:
-            logger.error(f"Story creation failed: {exc}")
+        except (httpx.HTTPError, RuntimeError) as exc:
+            logger.error(f"Story creation failed: {_reason(exc)}")
             return _failure(
                 key_label,
                 created,
                 f"Story '{story.title}'",
-                str(exc),
+                _reason(exc),
                 True,
                 epic_ref,
                 story_refs,

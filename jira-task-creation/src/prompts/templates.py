@@ -126,6 +126,8 @@ Classify the incoming text into exactly one bucket and return JSON only:
 
 Judge only whether the text is a usable requirement. Never judge whether it
 repeats existing work — that is checked separately, after the breakdown.
+A report that something is broken ("users cannot see their report in
+production, the page shows error 500") is VALID: the work is to fix it.
 """
 
 BREAKDOWN_INSTRUCTIONS = """\
@@ -134,6 +136,13 @@ Decompose the requirement. Return JSON only, in exactly this shape:
 {
   "classification": "Small" | "Medium" | "Large",
   "analysis": "<2-3 sentences on why this classification>",
+  "work_kind": "feature" | "technical" | "defect",
+  "defect": {                        // only when work_kind is "defect"
+    "actual": "<what happens now, in the requirement's words>",
+    "expected": "<what should happen>",
+    "impact": "<who is affected and how badly>",
+    "widespread": true | false       // everyone, or a whole feature, is affected
+  },
   "epic": {                          // omit entirely when classification is Small
     "business_objective": "...",
     "scope": ["..."],
@@ -168,6 +177,12 @@ Decompose the requirement. Return JSON only, in exactly this shape:
 
 Rules the output is checked against, so satisfy them up front:
 - Small -> no "epic" key, exactly one story.
+- work_kind: "defect" when something that already exists is BROKEN in
+  production or for real users (an error, a page that will not load, people
+  unable to do what they could before). "technical" when it is one technical
+  job with no user-facing behaviour (rotate a password, upgrade a library,
+  change a configuration value). Otherwise "feature" — any new or changed
+  behaviour, and every Medium or Large requirement.
 - Medium/Large -> "epic" present, at least two stories.
 - Every story has at least one subtask and at least one acceptance criterion.
 - No subtask text may contain a source filename.
@@ -295,3 +310,24 @@ def duplicate_adjudication_prompt(pairs: list[tuple[str, str, str]]) -> str:
     for index, (proposed, key, summary) in enumerate(pairs):
         lines.append(f"{index}. PROPOSED: {proposed}\n" f"   EXISTING ({key}): {summary}")
     return f"{DUPLICATE_ADJUDICATION_INSTRUCTIONS}\nPAIRS:\n" + "\n".join(lines) + "\n"
+
+
+RELATED_TICKET_INSTRUCTIONS = """\
+A person asked for new work in a comment on an existing Jira ticket. Decide
+whether that ticket is RELATED to the work asked for: the request extends it, is
+part of it, follows up on it, or concerns the same feature or problem.
+
+It is UNRELATED when the ticket is about something else, or is only a place to
+type the comment ("Test ticket", "Agent test", an empty description).
+
+Return ONLY a JSON object: {"related": true|false, "reason": "<one short sentence>"}
+"""
+
+
+def related_ticket_prompt(key: str, summary: str, description: str, request: str) -> str:
+    """Build the prompt deciding whether new work is linked to the ticket asked on."""
+    return (
+        f"{RELATED_TICKET_INSTRUCTIONS}\n"
+        f"TICKET {key}: {summary}\n{(description or '(no description)')[:1500]}\n\n"
+        f"WORK ASKED FOR:\n{request[:1500]}\n"
+    )

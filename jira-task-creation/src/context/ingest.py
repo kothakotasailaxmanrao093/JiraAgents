@@ -604,6 +604,11 @@ def _quantities(text: str) -> dict[str, set[int]]:
     return found
 
 
+def has_url(text: str) -> bool:
+    """True when the text carries a link of its own."""
+    return bool(_URL_RE.search(text or ""))
+
+
 def find_unread_links(source: SourceIssue) -> list[str]:
     """Links in the request that contributed nothing.
 

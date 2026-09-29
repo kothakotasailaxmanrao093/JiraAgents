@@ -26,6 +26,7 @@ from src.classification.decompose import (
     DecompositionError,
     build_breakdown,
     explain_issue,
+    llm_related,
     llm_same_work,
     strip_section_headings,
     triage,
@@ -40,6 +41,7 @@ from src.context.ingest import (
     detect_placement,
     find_conflicts,
     find_unread_links,
+    has_url,
     is_pointer_comment,
     is_question_comment,
     request_is_only_a_pointer,
@@ -47,6 +49,7 @@ from src.context.ingest import (
     strip_trigger_mentions,
 )
 from src.jira import api as jira
+from src.jira import root as root_mod
 from src.models.schemas import (
     AttachmentText,
     CommentInfo,
@@ -59,6 +62,7 @@ from src.models.schemas import (
     NotificationKind,
     OverlapReport,
     ResultStatus,
+    RootChange,
     SourceIssue,
     SprintPlacement,
     WorkBreakdown,
@@ -664,6 +668,190 @@ def _config_failure(reason: str, key_label: str = "") -> dict[str, Any]:
     ).model_dump(mode="json")
 
 
+async def _is_related(client: httpx.AsyncClient, source_key: str, request: str) -> bool:
+    """Whether the ticket asked on is about the requested work.
+
+    The model decides; when it cannot be asked, the words do — the ticket's
+    summary appearing in the request, or the request in its description.
+    """
+    try:
+        ticket = await root_mod.read_root(client, source_key)
+    except httpx.HTTPError as exc:
+        # Linking to the ticket asked on is what always happened; unreadable is
+        # no reason to stop doing it.
+        logger.warning(f"Could not read {source_key} to judge relatedness: {exc}")
+        return True
+    description = jira._plain_text(ticket["description"])
+    try:
+        return await llm_related(source_key, ticket["summary"], description, request)
+    except Exception as exc:  # noqa: BLE001 — the words decide instead
+        related = jira.containment(ticket["summary"], request) >= 0.5 or (
+            bool(description) and jira.containment(request, description) >= 0.5
+        )
+        logger.info(f"Relatedness model unavailable ({exc}); by the words: {related}")
+        return related
+
+
+_ARTICLE = {"epic": "an", "story": "a", "task": "a", "bug": "a"}
+
+
+def _root_summary(change: RootChange, plan: root_mod.RootPlan, result: JiraResult) -> str:
+    """What happened to the root and under it, in the reply's words."""
+    made = set(result.created_keys)
+    stories = [r for r in result.stories if r.key in made]
+    subtasks = [r for r in result.subtasks if r.key in made]
+    reused = len(result.reused_keys)
+
+    changed = change.type_before.lower() != change.type_after.lower()
+    what = f"{_ARTICLE[plan.role]} {change.type_after}"
+    if change.priority:
+        what += f" with priority {change.priority}"
+    text = (
+        f"{change.key} is now {what} (it was {_ARTICLE.get(change.type_before.lower(), 'a')} "
+        f"{change.type_before}), because {plan.reason}."
+        if changed
+        else f"{change.key} stays {what}, because {plan.reason}."
+    )
+    if stories or subtasks:
+        parts = []
+        if stories:
+            parts.append(f"{len(stories)} Stor{'y' if len(stories) == 1 else 'ies'}")
+        if subtasks:
+            parts.append(f"{len(subtasks)} Sub-task{'' if len(subtasks) == 1 else 's'}")
+        text += f" Created under it: {' and '.join(parts)}."
+    elif plan.role == root_mod.BUG:
+        text += " No child tickets were needed."
+    elif plan.role == root_mod.TASK and not plan.create_subtasks:
+        text += " It is one step, so no Sub-tasks were needed."
+    if reused:
+        text += f" {reused} ticket(s) were already under it and were reused, not created again."
+    if plan.role == root_mod.EPIC:
+        text += " No separate Epic was created."
+    if change.summary_after != change.summary_before:
+        text += f' Its summary is now "{change.summary_after}".'
+    text += (
+        " Its original summary and description are kept under "
+        f'"{root_mod.ORIGINAL_HEADING}" at the end of its description.'
+    )
+    return text
+
+
+async def _build_on_root(
+    client: httpx.AsyncClient,
+    base_url: str,
+    project_key: str,
+    model: WorkBreakdown,
+    key_label: str,
+    root_key: str,
+    request: str,
+    available: list[str],
+    types: dict[str, str],
+) -> dict[str, Any]:
+    """Make ``root_key`` the top of the hierarchy and build under it.
+
+    Order: every check first (nothing written if one fails), then the type
+    change (nothing else written if Jira refuses it), then the children, then
+    the summary, description and labels — last, so a run that stops part-way
+    leaves the person's description as it was, and asking again continues.
+    """
+    try:
+        root = await root_mod.read_root(client, root_key)
+        allowed_to_edit = await root_mod.can_edit(client, project_key)
+    except httpx.HTTPError as exc:
+        return _config_failure(
+            f"{root_key} could not be read before changing it: {exc}. Nothing was changed.",
+            key_label,
+        )
+
+    plan = root_mod.plan_root(model, root["type"], request)
+    names = root_mod.type_names(available, types)
+    reason = root_mod.refusal(plan, root, names)
+    if reason:
+        return _config_failure(reason, key_label)
+    needed = ([types["story"]] if plan.create_stories else []) + (
+        [types["subtask"]] if plan.create_stories or plan.create_subtasks else []
+    )
+    missing = jira.missing_issue_types(needed, available)
+    if missing:
+        return _config_failure(
+            f"Jira project '{project_key}' does not offer the issue type(s) "
+            f"{', '.join(missing)}. {root_key} was not changed.",
+            key_label,
+        )
+    if not allowed_to_edit:
+        return _config_failure(
+            f"This account may not edit issues in {project_key}, so {root_key} was not "
+            f"changed and nothing was created.",
+            key_label,
+        )
+
+    target = names[plan.role]
+    change = RootChange(
+        key=root_key,
+        url=f"{base_url.rstrip('/')}/browse/{root_key}",
+        type_before=root["type"],
+        type_after=target,
+        summary_before=root["summary"],
+        summary_after=root["summary"],
+    )
+    if root["type"].lower() != target.lower():
+        try:
+            await root_mod.change_type(client, root_key, target)
+        except httpx.HTTPStatusError as exc:
+            return _config_failure(
+                f"Jira refused to change {root_key} from {root['type']} to {target}: "
+                f"{jira._http_error_text(exc)}. Nothing was changed. Change its type by "
+                f"hand (••• → Change type → {target}) and ask again.",
+                key_label,
+            )
+        logger.info(f"{root_key}: {root['type']} -> {target} ({plan.reason})")
+
+    result = await jira.build_under_root(
+        client,
+        base_url,
+        project_key,
+        model,
+        key_label,
+        root_key,
+        create_stories=plan.create_stories,
+        create_subtasks=plan.create_subtasks,
+        types=types,
+    )
+    result.root = change
+    if result.status is not ResultStatus.JIRA_CREATED:
+        result.failure_reason = (
+            f"{root_key} is now {_ARTICLE[plan.role]} {target}, but building under it "
+            f"stopped: {result.failure_reason} Asking again continues from there."
+        )
+        return result.model_dump(mode="json")
+
+    summary_after = root_mod.new_summary(model, plan, root["summary"])
+    try:
+        change.notes = await root_mod.rewrite(
+            client,
+            root_key,
+            summary=summary_after,
+            description=root_mod.root_description(
+                model, plan, root["description"], root["summary"]
+            ),
+            labels=[key_label, jira.processed_label()],
+            priority=plan.priority,
+        )
+    except httpx.HTTPError as exc:
+        result.status = ResultStatus.JIRA_CREATION_FAILED
+        result.failed_issue = f"Summary and description of {root_key}"
+        result.failure_reason = (
+            f"The tickets were created, but {root_key}'s summary and description could "
+            f"not be updated: {exc}. Asking again finishes it without creating anything twice."
+        )
+        return result.model_dump(mode="json")
+    change.summary_after = summary_after
+    change.priority = plan.priority if not change.notes else ""
+    result.summary = _root_summary(change, plan, result) + "".join(f" {n}." for n in change.notes)
+    logger.info(result.summary)
+    return result.model_dump(mode="json")
+
+
 @tool()
 async def create_jira_issues(
     breakdown: dict[str, Any] | None = None,
@@ -673,9 +861,10 @@ async def create_jira_issues(
     extra_labels: list[str] | None = None,
     existing_epic_key: str | None = None,
     sprint_id: int | None = None,
-    attach_to_key: str | None = None,
+    root_key: str | None = None,
     idempotency_basis: str | None = None,
     source_key: str | None = None,
+    requested_by: str | None = None,
 ) -> dict[str, Any]:
     """Create the Jira hierarchy for an already-validated breakdown.
 
@@ -684,6 +873,12 @@ async def create_jira_issues(
     issue type is unavailable in that project. Re-running with the same
     requirement finds the previous issues by idempotency label and returns them
     rather than creating duplicates.
+
+    ``root_key`` names the ticket that holds the requirement itself: it becomes
+    the top of the hierarchy (see :mod:`src.jira.root`) and no Epic is created
+    beside it. Otherwise the new work is linked to ``source_key`` only when that
+    ticket is really related; when it is not, the new ticket says where it was
+    requested (``requested_by``) instead.
     """
     logger.info("Inside the create_jira_issues tool")
 
@@ -735,7 +930,12 @@ async def create_jira_issues(
     # stated request alone, which is stable and is what actually identifies
     # the work being asked for.
     basis = normalise(idempotency_basis) or normalise(requirement) or model.analysis
-    key_label = jira.idempotency_key(basis, key, normalise(correlation_id))
+    root = normalise(root_key).upper()
+    # A root keeps one label for life: its description is rewritten on the
+    # first build, so a label hashed from the request would change with it.
+    key_label = jira.idempotency_key(
+        basis, key, root_mod.root_basis(root) if root else normalise(correlation_id)
+    )
     logger.info(f"idempotency_key : {key_label} (basis {basis[:80]!r})")
 
     try:
@@ -761,6 +961,11 @@ async def create_jira_issues(
 
             # The names THIS project uses ("Sub-task" or "Subtask").
             types = jira.resolve_issue_types(available)
+
+            if root:
+                return await _build_on_root(
+                    client, base_url, key, model, key_label, root, basis, available, types
+                )
             needed = [types["story"], types["subtask"]] + (
                 [types["epic"]] if model.epic is not None else []
             )
@@ -787,6 +992,18 @@ async def create_jira_issues(
                 logger.info(f"Found {len(existing)} existing issue(s) for {key_label}; reusing.")
                 return jira._reuse(base_url, key_label, existing).model_dump(mode="json")
 
+            # Decided before creating: an unrelated ticket gets no link, so the
+            # origin has to be written into the new ticket's description.
+            source = normalise(source_key).upper()
+            related = bool(source) and await _is_related(client, source, basis)
+            origin_note = (
+                f"Requested in a comment on {source}"
+                + (f" by {normalise(requested_by)}" if normalise(requested_by) else "")
+                + "."
+                if source and not related
+                else ""
+            )
+
             result = await jira.create_hierarchy(
                 client,
                 base_url,
@@ -795,8 +1012,8 @@ async def create_jira_issues(
                 key_label,
                 extra_labels,
                 existing_epic_key=normalise(existing_epic_key).upper(),
-                attach_to_key=normalise(attach_to_key).upper(),
                 types=types,
+                origin_note=origin_note,
             )
 
             # Sprint placement happens after creation: an issue must exist
@@ -825,9 +1042,8 @@ async def create_jira_issues(
                     )
                     logger.error(result.sprint_error)
             # Link the new top of the hierarchy back to the ticket it was asked
-            # on. Sub-tasks attached to that ticket are already its children.
-            source = normalise(source_key).upper()
-            if source and result.status is ResultStatus.JIRA_CREATED and not result.attached_to:
+            # on — only when that ticket is about this work.
+            if related and result.status is ResultStatus.JIRA_CREATED:
                 tops = (
                     [result.epic.key]
                     if result.epic and not result.epic_reused
@@ -1033,6 +1249,29 @@ async def read_jira_issue(
                         continue
                     attachments.append(await attachments_mod.extract(data, filename, mime))
 
+            # --- built here before? -------------------------------------
+            # A ticket that became a root keeps one label for life, on itself
+            # and on everything built under it. Finding children with it, on a
+            # root already marked processed, means this was asked and built.
+            root_built: dict[str, Any] | None = None
+            if matched and not processed and jira.processed_label() in labels:
+                root_label = jira.idempotency_key(
+                    "", project.get("key", ""), root_mod.root_basis(key)
+                )
+                try:
+                    built = [
+                        i
+                        for i in await jira.find_existing(
+                            client, project.get("key", ""), root_label
+                        )
+                        if i.get("key") != key
+                    ]
+                except httpx.HTTPError as exc:
+                    logger.warning(f"Could not look for tickets built under {key}: {exc}")
+                    built = []
+                if built:
+                    root_built = jira._reuse(base_url, root_label, built).model_dump(mode="json")
+
             # --- linked Confluence pages ----------------------------------
             # A team that writes its spec in Confluence and links it was, until
             # now, handing the agent a URL and nothing else.
@@ -1077,9 +1316,13 @@ async def read_jira_issue(
         requested_placement=SprintPlacement(placement_choice),
         trigger_comment_id=str(trigger.id) if trigger else "",
         trigger_comment_author=trigger.author if trigger else "",
+        trigger_comment_created=trigger.created[:10] if trigger else "",
         trigger_comment_body=trigger.body if trigger else "",
         trigger_is_pointer=bool(trigger and is_pointer_comment(trigger.body)),
+        is_subtask=bool((fields.get("issuetype") or {}).get("subtask")),
+        root_built=root_built,
     )
+    source.ticket_is_root = source.trigger_is_pointer and not has_url(source.trigger_comment_body)
 
     # Decided here, not in the agent: each of these needs the trigger keyword,
     # which is read from the environment — forbidden inside a workflow.
