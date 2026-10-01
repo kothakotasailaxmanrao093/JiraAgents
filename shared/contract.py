@@ -51,6 +51,9 @@ class Outcome(str, Enum):
     # sent as REVIEWED, so the answer appeared under "Readiness" with the
     # headline "Nothing was created" (BGV-11, 2026-09-24).
     ANSWERED = "ANSWERED"
+    # The work breakdown, generated as a PDF and attached; nothing was created
+    # or changed in Jira (GENERATE_LOCAL_PDF=true).
+    PLANNED = "PLANNED"
 
 
 class EmailKind(str, Enum):
@@ -124,6 +127,12 @@ class AgentResult:
     findings: list[dict[str, Any]] = field(default_factory=list)
     questions: list[str] = field(default_factory=list)
     duplicates: list[DuplicateRef] = field(default_factory=list)
+    # PLANNED: the items the PDF proposes, numbered ("S1 …", "S1.1 …"). None of
+    # them exists in Jira.
+    proposed: list[str] = field(default_factory=list)
+    # REVIEWED: readiness, 1-5 (0 = not scored). The router keeps it, so a later
+    # build on the same unchanged ticket knows how ready it was judged.
+    readiness_score: int = 0
 
     # Mandatory in meaning: present on every run, even when empty.
     sources_read: list[str] = field(default_factory=list)

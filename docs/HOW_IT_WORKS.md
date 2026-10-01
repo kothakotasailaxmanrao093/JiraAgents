@@ -119,6 +119,38 @@ instead of creating an Epic beside it that repeats it. Its description decides t
 - Asking again reuses what was built (one label for life per root); a run that stopped part-way
   continues without creating anything twice.
 
+### One ticket, one job at a time
+
+Every build or review is answered **at once** ("⏳ Reviewing BGV-32…"), and that reply is
+edited into the result. The ticket remembers what runs on it and its last review and build
+(issue property `aetherion-orchestration`). A second request of the same kind says "already
+reviewing"; a different one **waits its turn** and then runs on the same ticket; a review of
+an unchanged ticket is shown again without asking the AI; a build after a review below 3/5
+(`ORCH_BUILD_MIN_READINESS`) pauses and lists the review's questions, and after a good review
+carries them into "please confirm". The card shows one status label at a time.
+
+### Local PDF (`GENERATE_LOCAL_PDF=true`)
+
+The build stops before Jira: the whole breakdown becomes a PDF **emailed to `LTW_NOTIFY_EMAILS`**,
+the reply says where it went and lists the proposed items (S1, S1.1 …), and no ticket is created,
+changed or attached to.
+
+### Duplicate check against every ticket
+
+The project is held in the worker's memory, indexed by word: the first build after a restart
+reads every ticket once, later builds ask Jira only what changed (`updated >= -Nm`), and a full
+re-read every 6 h drops deleted tickets. A title is compared only with tickets sharing a word with
+it — which finds exactly what comparing all of them finds (tested on 2,000 tickets).
+
+### Speed
+
+Ticket, attachments (4 at a time), Confluence and the "built before?" check are read together,
+and so are the project's details — measured 3.3 s → 1.6 s and 1.1 s → 0.5 s on BGV-69. A clear
+requirement (3+ listed lines) skips triage, and the duplicate and repair checks ask once instead
+of twice: usually **2 AI calls** per build (was 3), at most about 5 (was 9). A requirement of 6+ lines is
+**planned first and its Stories written at the same time** (same checks; one-call fallback), and
+tickets are **created 4 at a time**. Every step logs `stage=<name> run=<id> seconds=<n>`.
+
 **No AI, no tickets:** if the AI model cannot produce the breakdown, nothing is created and the
 reply says so — there is no fallback that writes generic tickets.
 
@@ -150,6 +182,8 @@ reply says so — there is no fallback that writes generic tickets.
 | Child task queues | router `.env`: `ORCH_TASK_QUEUE_*` | `<agent id>-task-queue`, from the Temporal UI |
 | Emails | `ORCH_NOTIFY_EMAILS`, `ORCH_NOTIFY_ON`, `GMAIL_*` | outcomes: clarification, duplicates, failed |
 | AI models | `ORCH_CLASSIFIER_MODEL` (router), `LTW_LLM_MODEL` (breakdown) | via the Aetherion AI Gateway |
+| Local PDF | `GENERATE_LOCAL_PDF` (Work Breakdown) | off by default |
+| Orchestration | `ORCH_BUILD_MIN_READINESS` (3), `ORCH_STATUS_LABELS` (true), `ORCH_QUEUE_WAIT_MINUTES` (10) | router `.env` |
 | Webhook signing secret | **Jira** webhook + **Aetherion → Setup → Apps → Jira** | must be identical; the agents never see it |
 
 `.env` travels inside the published agent. `shared/` is mirrored into each agent with

@@ -58,6 +58,15 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "LTW_LLM_PROVIDER",
         "LTW_LLM_MODEL",
         "LTW_LLM_MAX_TOKENS",
+        # A deployment's .env sets these; a test sees the defaults unless it
+        # sets them itself.
+        "LTW_READ_CONCURRENCY",
+        "GENERATE_LOCAL_PDF",
+        "LTW_DUPLICATE_INDEX",
+        "LTW_LLM_FAST_MODEL",
+        "LTW_LLM_CONCURRENCY",
+        "LTW_WRITE_CONCURRENCY",
+        "LTW_INDEX_FULL_REFRESH_HOURS",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -313,6 +322,12 @@ class FakeJira:
         if url.startswith("/rest/api/3/issue/"):
             key = url.rsplit("/", 1)[-1]
             spec = self.epics.get(key)
+            stored = next((i for i in self.store if i.get("key") == key), None)
+            if spec is None and stored is not None:
+                # Any ticket the fake site holds can be read back, as in Jira.
+                fields = stored.get("fields") or {}
+                project = fields.get("project") or {"key": key.split("-")[0]}
+                return _Response(200, {"key": key, "fields": {**fields, "project": project}})
             if spec is None:
                 return _Response(404, {"errorMessages": [f"Issue does not exist: {key}"]})
             return _Response(
@@ -456,3 +471,18 @@ def _clean_email_ledger() -> None:
     from src.notifications import email as notifier
 
     notifier.forget_recent_sends()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_ticket_index() -> None:
+    """Each test reads its own fake project: the in-memory index starts empty."""
+    from src.jira import ticket_index
+
+    ticket_index.forget()
+
+
+@pytest.fixture(autouse=True)
+def _one_call_breakdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The breakdown tests stub the one-call answer; the planned (parallel)
+    path has its own tests in test_parallel_breakdown.py, which turn it on."""
+    monkeypatch.setenv("LTW_PARALLEL_BREAKDOWN", "false")

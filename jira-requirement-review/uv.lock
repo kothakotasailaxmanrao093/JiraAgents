@@ -1063,7 +1063,7 @@ wheels = [
 
 [[package]]
 name = "jira-requirement-review"
-version = "2.2.18"
+version = "2.2.22"
 source = { editable = "." }
 dependencies = [
     { name = "aetherion-sdk" },

@@ -1,13 +1,14 @@
 {
   "_logging.py": "37d42f8b9e14b297",
   "adf.py": "84d2b58d57f4d944",
-  "attachments.py": "30697ca618c51c7a",
+  "attachments.py": "37b0d1b6cbd3f249",
   "confluence_fetch.py": "902e2d4333ce129e",
   "confluence_text.py": "92744e8d3276cab8",
-  "contract.py": "341307ce7e1c34d2",
+  "contract.py": "97126b42ab8fe183",
   "keywords.py": "0388b83ee134f5cf",
-  "mailer.py": "7d55126d641eb32d",
+  "mailer.py": "3aeaee07fbaea0f4",
   "rubric.py": "a39765e5a3421ab5",
   "settings.py": "93b0c9b0fe596845",
+  "transcripts.py": "d5b0e7aa41306089",
   "transport.py": "ff58ec353cfd0d43"
 }

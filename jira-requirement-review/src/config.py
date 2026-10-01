@@ -223,7 +223,7 @@ AGENT_DISPLAY_NAME = "JiraRequirementReview"
 # Kept in step by scripts/publish.py, which writes all three (pyproject,
 # metadata.json and this constant) together, and by
 # tests/test_version_agreement.py, which fails if they ever diverge.
-AGENT_VERSION = "2.2.18"
+AGENT_VERSION = "2.2.22"
 
 
 def agent_version() -> str:

@@ -1,6 +1,6 @@
 [project]
 name = "jira-requirement-review"
-version = "2.2.18"
+version = "2.2.22"
 description = "Reviews a Jira requirement against its parent, sub-tasks, linked issues and attachments, and reports what is assumed, ambiguous or missing"
 authors = [{ name = "Kothakota Sai Laxman Rao", email = "kothakota.sailaxmanrao@calfus.com" }]
 readme = "README.md"

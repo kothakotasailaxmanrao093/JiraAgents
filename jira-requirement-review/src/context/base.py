@@ -48,7 +48,8 @@ class FetchContext:
     include_confluence: bool = True
     # Set only on the webhook path: the comment that asked for the review.
     trigger_comment_id: str | None = None
-    transcript_file_key: str | None = None
+    # Storage keys of the files uploaded on the form (transcripts, specs …).
+    transcript_file_keys: list[str] = field(default_factory=list)
     team_id: str | None = None
     # populated during gather:
     target_bundle: dict[str, Any] | None = None

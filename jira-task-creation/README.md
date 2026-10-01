@@ -150,6 +150,13 @@ ones that matter most, by group.
 | `LTW_ATTACHMENT_MAX_BYTES` | `10485760` | Largest single file (10 MB) |
 | `LTW_ATTACHMENT_MAX_CHARS` | `20000` | Text kept per file |
 | `LTW_ATTACHMENT_READ_IMAGES` | `true` | Reading images costs a model call each and slows the run |
+| `LTW_READ_CONCURRENCY` | `4` | Attachments downloaded and read at the same time (at least 1) |
+| `LTW_DUPLICATE_INDEX` | `true` | Compare against **every** ticket in the project (kept in memory; later builds read only what changed) |
+| `LTW_INDEX_FULL_REFRESH_HOURS` | `24` | Full re-read this often; a match is checked to still exist before it is reported anyway |
+| `LTW_PARALLEL_BREAKDOWN` | `true` | Plan first, then write the Stories at the same time (6+ requirement lines); same checks, one-call fallback |
+| `LTW_LLM_CONCURRENCY` | `6` | Stories written at the same time |
+| `LTW_WRITE_CONCURRENCY` | `4` | Tickets created in Jira at the same time |
+| `LTW_LLM_FAST_MODEL` | empty | A quicker model for triage and the related-ticket check only; falls back to the main model |
 
 **Supported file types:** PDF, Word (`.doc`, `.docx`), Excel (`.xls`, `.xlsx`),
 PowerPoint (`.pptx`), `.csv`, `.json`, `.jsonl`, `.txt`, `.md`, and images
@@ -174,6 +181,20 @@ truncation threw exactly those away.
 
 Only pages on the **same Atlassian site** are ever fetched. Anyone who can
 comment on a ticket can put a URL in front of this code.
+
+### Local PDF
+
+| Setting | Default | What it does |
+|---|---|---|
+| `GENERATE_LOCAL_PDF` | `false` | `true`: `@Aetherion build` makes the whole breakdown into a PDF and **emails it to `LTW_NOTIFY_EMAILS`**. The reply on the ticket says where it went and lists what it proposes. **No Jira ticket is created, converted, labelled, edited or attached to.** `false`: the tickets are built. |
+
+The PDF (`aetherion-breakdown-<KEY>-<hash>.pdf`) opens with an "At a glance" box
+and a contents list, then: card numbers, what the ticket would become, sources
+read and skipped, confirmed facts, missing information (including the
+review's), the duplicate check, every proposed ticket numbered E / S1 / S1.1
+with its full detail and criteria, risks, placement, and which ticket delivers
+each requirement line — page numbers on every page. The same breakdown is not
+emailed twice within the repeat window.
 
 ### Email
 

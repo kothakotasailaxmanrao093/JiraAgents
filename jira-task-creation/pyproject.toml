@@ -1,6 +1,6 @@
 [project]
 name = "jira-task-creation"
-version = "4.3.40"
+version = "4.3.52"
 description = "LaxmanTicketWise — validates requirements, classifies them Small/Medium/Large, decomposes them into Epics/Stories/Subtasks, and creates the Jira hierarchy"
 authors = [{ name = "Kothakota Sai Laxman Rao", email = "kothakota.sailaxmanrao@calfus.com" }]
 readme = "README.md"
@@ -22,6 +22,10 @@ dependencies = [
     "httpx>=0.28,<1.0",
     "pydantic>=2.13,<3.0",
     "python-dotenv>=1.2,<2.0",
+    # Renders the GENERATE_LOCAL_PDF breakdown (src/document/breakdown_pdf.py).
+    # The platform already installs it to read PDF attachments; pinned to that
+    # version so a platform change cannot silently remove what we use directly.
+    "pymupdf==1.26.4",
 ]
 
 [dependency-groups]

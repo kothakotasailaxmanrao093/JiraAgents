@@ -8,6 +8,7 @@ response is a caught error rather than a bad Jira Epic.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -48,12 +49,15 @@ from src.models.schemas import (
     allow_source_files_from,
     statement_reads_badly,
 )
+from src.observability.timing import stage
 from src.prompts.templates import (
     SYSTEM_PROMPT,
     breakdown_prompt,
     coverage_instructions,
     duplicate_adjudication_prompt,
+    plan_prompt,
     related_ticket_prompt,
+    story_prompt,
     triage_prompt,
 )
 
@@ -133,23 +137,56 @@ def _parse_json_object(text: str) -> dict[str, Any]:
 
 
 async def _chat(prompt: str) -> str:
+    """One gateway round-trip on the main model (LTW_LLM_MODEL)."""
+    return await _gateway_chat(prompt, _llm_settings()[1])
+
+
+def fast_model() -> str:
+    """LTW_LLM_FAST_MODEL: a quicker model for the two yes/no checks, or "".
+
+    Only "is this a requirement?" (triage) and "is the ticket asked on
+    related?" use it — short answers where a smaller model is as good. The
+    breakdown, its self-review, the duplicate second opinion and the repairs
+    stay on the main model: those decide what the tickets say (2026-09-30).
+    """
+    return os.environ.get("LTW_LLM_FAST_MODEL", "").strip()
+
+
+async def _chat_fast(prompt: str) -> str:
+    """The fast model when one is set — and the main model if it fails."""
+    model = fast_model()
+    if not model:
+        return await _chat(prompt)
+    try:
+        return await _gateway_chat(prompt, model)
+    except Exception as exc:  # noqa: BLE001 — the main model answers instead
+        logger.info(f"Fast model {model} unavailable ({exc}); asking the main model")
+        return await _chat(prompt)
+
+
+async def _gateway_chat(prompt: str, model: str) -> str:
     """One gateway round-trip. Imported lazily so tests need no gateway."""
     from agent_lib.gateway.ai import AiGatewayClient
 
-    provider, model = _llm_settings()
-    async with AiGatewayClient() as client:
-        reply = await client.chat(
-            provider=provider,
-            model_name=model,
-            prompt=prompt,
-            system_prompt=SYSTEM_PROMPT,
-            temperature=0.2,
-            # Explicit, and large: with the gateway's default a Large breakdown
-            # (an Epic, a dozen Stories, their Sub-tasks) was cut off mid-JSON,
-            # failed to parse, and silently became a heuristic breakdown.
-            max_tokens=_max_tokens(),
-        )
-    content = (reply or {}).get("content") or ""
+    provider = _llm_settings()[0]
+    # Which call this is, from the prompt's own opening words — enough to tell
+    # triage from breakdown from a retry in the log without widening _chat.
+    purpose = prompt.strip().split("\n", 1)[0][:48].replace(" ", "_")
+    with stage("llm", model=model, purpose=purpose, prompt_chars=len(prompt)) as fields:
+        async with AiGatewayClient() as client:
+            reply = await client.chat(
+                provider=provider,
+                model_name=model,
+                prompt=prompt,
+                system_prompt=SYSTEM_PROMPT,
+                temperature=0.2,
+                # Explicit, and large: with the gateway's default a Large breakdown
+                # (an Epic, a dozen Stories, their Sub-tasks) was cut off mid-JSON,
+                # failed to parse, and silently became a heuristic breakdown.
+                max_tokens=_max_tokens(),
+            )
+        content = (reply or {}).get("content") or ""
+        fields["reply_chars"] = len(content)
     if not content.strip():
         raise DecompositionError("Model returned an empty response.")
     return content
@@ -204,7 +241,7 @@ _VERDICT_TO_STATUS = {
 
 async def llm_triage(requirement: str, context: ProjectContext) -> ValidationVerdict:
     """Second-opinion triage: scope, relevance, and missing information."""
-    raw = await _chat(triage_prompt(requirement, context.as_prompt_text()))
+    raw = await _chat_fast(triage_prompt(requirement, context.as_prompt_text()))
     data = _parse_json_object(raw)
 
     verdict = str(data.get("verdict", "")).strip().upper()
@@ -275,7 +312,7 @@ async def llm_related(key: str, summary: str, description: str, request: str) ->
     that does not exist. Raises when the model gives no usable verdict.
     """
     data = _parse_json_object(
-        await _chat(related_ticket_prompt(key, summary, description, request))
+        await _chat_fast(related_ticket_prompt(key, summary, description, request))
     )
     verdict = data.get("related")
     if not isinstance(verdict, bool):
@@ -311,7 +348,14 @@ async def llm_breakdown(requirement: str, context: ProjectContext) -> WorkBreakd
     if lines:
         prompt = coverage_instructions(lines) + prompt
 
-    first, problem = await _attempt(prompt, lines, want_depth=True)
+    first, problem = None, ""
+    if parallel_breakdown() and len(lines) >= PARALLEL_MIN_LINES:
+        # Faster: a short plan, then every Story written at the same time.
+        first, problem = await _attempt_planned(requirement, context, lines)
+        if first is None:
+            logger.info(f"Planned breakdown unusable ({problem}); writing it in one call")
+    if first is None:
+        first, problem = await _attempt(prompt, lines, want_depth=True)
     findings: list[SelfFinding] = []
     if first is not None:
         findings = await review_draft(requirement, first, _chat)
@@ -349,8 +393,7 @@ async def _finish(
     """Drop answered questions, sharpen vague criteria, record what remains."""
     coverage = getattr(breakdown, "_coverage", {}) or {}
     breakdown = drop_answered_questions(breakdown, findings)
-    breakdown = await _sharpen_criteria(breakdown, requirement)
-    breakdown = await _carry_missing_details(breakdown, requirement, lines or [], coverage)
+    breakdown = await _repair(breakdown, requirement, lines or [], coverage)
     remaining = [
         f.as_instruction()
         for f in deterministic(breakdown) + findings
@@ -383,21 +426,11 @@ MISSING
 """
 
 
-async def _carry_missing_details(
-    breakdown: WorkBreakdown, requirement: str, lines: list[str], coverage: dict[str, Any]
-) -> WorkBreakdown:
-    """Put every stated fact into the Story it belongs in — guaranteed.
-
-    Asked inside the regeneration, the model left BGV-41's "Price missing",
-    "every billing contact", "30 days after the invoice date" and "only one
-    reminder" out a second time (2026-09-25). A small request for exactly
-    those criteria is followed far more reliably; each is kept only if it
-    really carries its fact. Whatever is still missing gets the requirement's
-    own sentence as a criterion — faithful by construction, never invented.
-    """
+def _carry_request(
+    breakdown: WorkBreakdown, lines: list[str], coverage: dict[str, Any]
+) -> tuple[dict[str, list[tuple[int, Detail]]], str]:
+    """Which stated facts are missing from which Story, and the request text."""
     gaps = missing_details(lines, coverage, breakdown)
-    if not gaps:
-        return breakdown
     wanted: dict[str, list[tuple[int, Detail]]] = {}
     for n, detail, _ in gaps:
         story = target_story(n, lines[n - 1], coverage, breakdown)
@@ -407,17 +440,20 @@ async def _carry_missing_details(
         + "; ".join(f'"{detail_phrase(d)}" (line {n}: {lines[n - 1]})' for n, d in facts)
         for title, facts in wanted.items()
     )
-    proposed: dict[str, list[str]] = {}
-    try:
-        raw = await _chat(_CARRY_PROMPT.format(requirement=requirement, items=items))
-        got = _parse_json_object(raw).get("criteria") or {}
-        if isinstance(got, dict):
-            proposed = {
-                _norm(k): [str(c) for c in v] for k, v in got.items() if isinstance(v, list)
-            }
-    except Exception as exc:  # noqa: BLE001 — the fallback below still carries every fact
-        logger.info(f"Carry request failed, using the requirement's own words: {exc}")
+    return wanted, items
 
+
+def _apply_carried(
+    breakdown: WorkBreakdown,
+    got: Any,
+    wanted: dict[str, list[tuple[int, Detail]]],
+    lines: list[str],
+    coverage: dict[str, Any],
+) -> WorkBreakdown:
+    """Keep each offered criterion only if it carries its fact; copy the rest."""
+    proposed: dict[str, list[str]] = {}
+    if isinstance(got, dict):
+        proposed = {_norm(k): [str(c) for c in v] for k, v in got.items() if isinstance(v, list)}
     data = breakdown.model_dump(mode="json")
     added = copied = 0
     for story in data["stories"]:
@@ -446,6 +482,30 @@ async def _carry_missing_details(
     return carried_breakdown
 
 
+async def _carry_missing_details(
+    breakdown: WorkBreakdown, requirement: str, lines: list[str], coverage: dict[str, Any]
+) -> WorkBreakdown:
+    """Put every stated fact into the Story it belongs in — guaranteed.
+
+    Asked inside the regeneration, the model left BGV-41's "Price missing",
+    "every billing contact", "30 days after the invoice date" and "only one
+    reminder" out a second time (2026-09-25). A small request for exactly
+    those criteria is followed far more reliably; each is kept only if it
+    really carries its fact. Whatever is still missing gets the requirement's
+    own sentence as a criterion — faithful by construction, never invented.
+    """
+    wanted, items = _carry_request(breakdown, lines, coverage)
+    if not wanted:
+        return breakdown
+    got: Any = {}
+    try:
+        raw = await _chat(_CARRY_PROMPT.format(requirement=requirement, items=items))
+        got = _parse_json_object(raw).get("criteria") or {}
+    except Exception as exc:  # noqa: BLE001 — the fallback still carries every fact
+        logger.info(f"Carry request failed, using the requirement's own words: {exc}")
+    return _apply_carried(breakdown, got, wanted, lines, coverage)
+
+
 async def _attempt(
     prompt: str, lines: list[str], *, want_depth: bool
 ) -> tuple[WorkBreakdown | None, str]:
@@ -454,8 +514,96 @@ async def _attempt(
     ``(breakdown, "")`` when it passes; ``(breakdown, why)`` when it is usable
     but thin; ``(None, why)`` when it cannot be used at all.
     """
-    raw = await _chat(prompt)
-    data = _parse_json_object(raw)
+    return _check(_parse_json_object(await _chat(prompt)), lines, want_depth=want_depth)
+
+
+# Below this many listed lines the requirement is one or two Stories: one call
+# writes it as fast as a plan followed by a Story would.
+PARALLEL_MIN_LINES = 6
+DEFAULT_LLM_CONCURRENCY = 6
+
+
+def parallel_breakdown() -> bool:
+    """LTW_PARALLEL_BREAKDOWN: plan first, then write the Stories in parallel."""
+    return os.environ.get("LTW_PARALLEL_BREAKDOWN", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def llm_concurrency() -> int:
+    """How many Stories are written at the same time (LTW_LLM_CONCURRENCY)."""
+    try:
+        return max(1, int(os.environ.get("LTW_LLM_CONCURRENCY", "") or DEFAULT_LLM_CONCURRENCY))
+    except ValueError:
+        return DEFAULT_LLM_CONCURRENCY
+
+
+async def _attempt_planned(
+    requirement: str, context: ProjectContext, lines: list[str]
+) -> tuple[WorkBreakdown | None, str]:
+    """A plan (Epic and Story titles), then every Story written at once.
+
+    The wait is the plan plus the slowest single Story, instead of one answer
+    holding all of them. The assembled draft is checked by ``_check`` exactly
+    like a one-call draft; ``(None, why)`` sends the caller back to that call.
+    """
+    project = context.as_prompt_text(for_breakdown=True)
+    try:
+        plan = _parse_json_object(await _chat(plan_prompt(requirement, project, lines)))
+    except Exception as exc:  # noqa: BLE001 — the one-call path takes over
+        return None, f"the plan could not be used: {exc}"
+    planned = [
+        (str(item.get("title") or "").strip(), str(item.get("focus") or "").strip())
+        for item in plan.get("stories") or []
+        if isinstance(item, dict) and str(item.get("title") or "").strip()
+    ]
+    if not planned:
+        return None, "the plan named no Stories"
+    coverage = plan.get("coverage") if isinstance(plan.get("coverage"), dict) else {}
+    gate = asyncio.Semaphore(llm_concurrency())
+
+    async def write(title: str) -> dict[str, Any]:
+        mine = [
+            lines[int(n) - 1]
+            for n, target in coverage.items()
+            if str(n).isdigit() and 0 < int(n) <= len(lines) and _norm(str(target)) == _norm(title)
+        ]
+        async with gate:
+            story = _parse_json_object(
+                await _chat(story_prompt(requirement, project, planned, title, mine))
+            )
+        story = story["story"] if isinstance(story.get("story"), dict) else story
+        story["title"] = title  # the plan's title, which "coverage" names
+        return story
+
+    try:
+        stories = await asyncio.gather(*(write(title) for title, _ in planned))
+    except Exception as exc:  # noqa: BLE001 — the one-call path takes over
+        return None, f"a Story could not be written: {exc}"
+
+    draft = {
+        k: plan[k]
+        for k in ("classification", "analysis", "work_kind", "defect", "epic")
+        if k in plan
+    }
+    draft["stories"] = list(stories)
+    draft["coverage"] = coverage
+    logger.info(f"Planned breakdown: {len(stories)} Stories written in parallel")
+    return _check(draft, lines, want_depth=True)
+
+
+def _check(
+    data: dict[str, Any], lines: list[str], *, want_depth: bool
+) -> tuple[WorkBreakdown | None, str]:
+    """Every check a draft must pass, however it was written.
+
+    Schema, every requirement line delivered, and — with ``want_depth`` — the
+    quality rules and every stated fact carried. The one-call and the planned
+    (parallel) drafts go through exactly this, so neither can be less accurate.
+    """
     coverage = data.pop("coverage", None)
     try:
         breakdown = _validated_breakdown(data)
@@ -543,28 +691,21 @@ SUB-TASKS
 """
 
 
-async def _sharpen_criteria(breakdown: WorkBreakdown, requirement: str) -> WorkBreakdown:
-    """One small request to rewrite the completion criteria nobody can check.
-
-    Asked for inside the breakdown, twice, the model still wrote "Expiry date
-    logic is implemented and tested" (BGV-92..102, 2026-09-25). A focused
-    request for just those fields is followed far more reliably. Any failure
-    keeps the breakdown as it is — it is correct, only less checkable.
-    """
+def _sharpen_request(breakdown: WorkBreakdown) -> tuple[list[tuple[Story, Subtask]], str]:
+    """The Sub-tasks whose completion criteria nobody can check, as request text."""
     vague = _vague_subtasks(breakdown)
-    if not vague:
-        return breakdown
     items = "\n".join(
         f"- {t.title} (Story: {st.title}; acceptance criteria: {'; '.join(st.acceptance_criteria)})"
         f"\n  description: {t.description}\n  current: {t.completion_criteria}"
         for st, t in vague
     )
-    try:
-        raw = await _chat(_SHARPEN_PROMPT.format(requirement=requirement, items=items))
-        rewritten = _parse_json_object(raw).get("criteria") or {}
-    except Exception as exc:  # noqa: BLE001 — a vaguer criterion beats a failed build
-        logger.info(f"Completion criteria not sharpened: {exc}")
-        return breakdown
+    return vague, items
+
+
+def _apply_sharpened(
+    breakdown: WorkBreakdown, rewritten: Any, vague: list[tuple[Story, Subtask]]
+) -> WorkBreakdown:
+    """Take each rewritten criterion that is concrete; keep the rest as they were."""
     if not isinstance(rewritten, dict):
         return breakdown
     wanted = {_norm(k): str(v).strip() for k, v in rewritten.items() if str(v).strip()}
@@ -578,10 +719,89 @@ async def _sharpen_criteria(breakdown: WorkBreakdown, requirement: str) -> WorkB
                 changed += 1
     logger.info(f"Sharpened {changed} of {len(vague)} vague completion criteria")
     try:
-        return WorkBreakdown.model_validate(data)
+        sharpened = WorkBreakdown.model_validate(data)
     except ValidationError as exc:
         logger.info(f"Sharpened criteria broke the schema, keeping the originals: {exc}")
         return breakdown
+    sharpened._coverage = getattr(breakdown, "_coverage", {}) or {}
+    return sharpened
+
+
+async def _sharpen_criteria(breakdown: WorkBreakdown, requirement: str) -> WorkBreakdown:
+    """One small request to rewrite the completion criteria nobody can check.
+
+    Asked for inside the breakdown, twice, the model still wrote "Expiry date
+    logic is implemented and tested" (BGV-92..102, 2026-09-25). A focused
+    request for just those fields is followed far more reliably. Any failure
+    keeps the breakdown as it is — it is correct, only less checkable.
+    """
+    vague, items = _sharpen_request(breakdown)
+    if not vague:
+        return breakdown
+    try:
+        raw = await _chat(_SHARPEN_PROMPT.format(requirement=requirement, items=items))
+        rewritten = _parse_json_object(raw).get("criteria") or {}
+    except Exception as exc:  # noqa: BLE001 — a vaguer criterion beats a failed build
+        logger.info(f"Completion criteria not sharpened: {exc}")
+        return breakdown
+    return _apply_sharpened(breakdown, rewritten, vague)
+
+
+_BOTH_REPAIRS = """\
+{carry_task}
+
+ALSO, in the same answer: {sharpen_task}
+
+Return JSON only, with both keys:
+{{"criteria": {{"<exact Story title>": ["Given …"]}},
+ "completion": {{"<exact Sub-task title>": "<new criterion>"}}}}
+
+REQUIREMENT
+{requirement}
+
+MISSING
+{carry_items}
+
+SUB-TASKS
+{sharpen_items}
+"""
+
+
+def _task_of(prompt: str) -> str:
+    """A repair prompt's instruction, without its own reply format and inputs."""
+    return prompt.split("Return JSON only")[0].strip()
+
+
+async def _repair(
+    breakdown: WorkBreakdown, requirement: str, lines: list[str], coverage: dict[str, Any]
+) -> WorkBreakdown:
+    """Sharpen vague criteria and carry missing facts — in one model call.
+
+    They were two calls, one after the other, whenever both were needed (L3,
+    2026-09-29). Each is still applied by its own rules, so what is kept is
+    exactly what the two separate calls kept; when only one is needed, its own
+    prompt is sent unchanged.
+    """
+    vague, sharpen_items = _sharpen_request(breakdown)
+    wanted, carry_items = _carry_request(breakdown, lines, coverage)
+    if not (vague and wanted):
+        breakdown = await _sharpen_criteria(breakdown, requirement)
+        return await _carry_missing_details(breakdown, requirement, lines, coverage)
+
+    prompt = _BOTH_REPAIRS.format(
+        carry_task=_task_of(_CARRY_PROMPT),
+        sharpen_task=_task_of(_SHARPEN_PROMPT),
+        requirement=requirement,
+        carry_items=carry_items,
+        sharpen_items=sharpen_items,
+    )
+    answer: dict[str, Any] = {}
+    try:
+        answer = _parse_json_object(await _chat(prompt))
+    except Exception as exc:  # noqa: BLE001 — each part keeps its own fallback
+        logger.info(f"Repair request failed, keeping criteria and copying facts: {exc}")
+    breakdown = _apply_sharpened(breakdown, answer.get("completion") or {}, vague)
+    return _apply_carried(breakdown, answer.get("criteria") or {}, wanted, lines, coverage)
 
 
 def _quality_problems(breakdown: WorkBreakdown) -> list[str]:

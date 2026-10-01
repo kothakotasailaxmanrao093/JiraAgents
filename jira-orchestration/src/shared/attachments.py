@@ -26,6 +26,7 @@ import json
 from dataclasses import dataclass, field
 
 from ._logging import get_logger
+from .transcripts import TRANSCRIPT_SUFFIXES, clean_transcript
 
 logger = get_logger(__name__)
 
@@ -39,6 +40,9 @@ _TEXT_LIKE = {".txt", ".md", ".log", ".rst", ".text"}
 # JSON is read as text, then pretty-printed so a one-line export does not
 # reach the model as a single unreadable 20,000-character string.
 _JSON_LIKE = {".json", ".jsonl", ".ndjson"}
+# Meeting transcripts: text, with the cue numbers and timings reduced to
+# "[00:01:12] Priya: …" so the model sees who said what, and when.
+_TRANSCRIPT_LIKE = set(TRANSCRIPT_SUFFIXES)
 _IMAGE_LIKE = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"}
 
 _DOCUMENT_LIKE = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".csv"}
@@ -205,6 +209,8 @@ def _extract_sync(data: bytes, filename: str) -> str:
     ext = suffix(filename)
     if ext in _TEXT_LIKE:
         return data.decode("utf-8", errors="replace")
+    if ext in _TRANSCRIPT_LIKE:
+        return clean_transcript(data.decode("utf-8-sig", errors="replace"))
     if ext in _JSON_LIKE:
         return _extract_json(data)
     if ext == ".pdf":
@@ -236,7 +242,7 @@ def supported(filename: str, *, read_images: bool = True) -> bool:
     ext = suffix(filename)
     if ext in _IMAGE_LIKE:
         return read_images
-    return ext in _TEXT_LIKE | _JSON_LIKE | _DOCUMENT_LIKE
+    return ext in _TEXT_LIKE | _JSON_LIKE | _TRANSCRIPT_LIKE | _DOCUMENT_LIKE
 
 
 async def extract(

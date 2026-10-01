@@ -1,6 +1,6 @@
 {
     "name": "JiraTaskCreation",
-    "version": "4.3.40",
+    "version": "4.3.52",
     "description": "Comment-driven Jira work-breakdown agent. Someone comments '@Aetherion <requirement>' on any Jira issue; the agent reads that comment as the request and the issue (description, attachments, other comments, links, history) as context, reviews every existing ticket in the project, then creates an Epic, User Stories and Sub-tasks. It replies on the same issue signed AetherionAgent, and emails when it needs clarification or found the work already exists. It never creates duplicates.",
     "config": {
         "triggers": [
@@ -33,6 +33,15 @@
                 "friendly_name": "Jira Project Key (manual mode)"
             },
             {
+                "name": "supporting_files",
+                "type": "file",
+                "required": false,
+                "multiple": true,
+                "description": "Optional. Files the requirement lives in — a spec (.docx, .pdf), a meeting transcript (.vtt keeps who spoke and when), a sheet or slides. Read like the ticket's own attachments, with or without an Issue Key. Requires object storage (TENANT_ID).",
+                "friendly_name": "Files (spec, transcript, sheet …)",
+                "accepts": ".txt,.md,.vtt,.csv,.json,.pdf,.docx,.doc,.xlsx,.xls,.pptx,.png,.jpg,.jpeg,.gif,.webp,.bmp,.tif,.tiff"
+            },
+            {
                 "name": "project_name",
                 "type": "str",
                 "required": false,
@@ -55,7 +64,7 @@
                     "backlog",
                     "current_sprint"
                 ],
-                "description": "Where new stories go. Normally read from the request itself ('Add the stories to the current sprint'); set here to override. 'current_sprint' fails before creating anything if there is no single active sprint.",
+                "description": "backlog, current_sprint",
                 "friendly_name": "Backlog or Current Sprint"
             },
             {
@@ -65,6 +74,19 @@
                 "default": true,
                 "description": "When true (default), create the Jira issues after validation succeeds. Set to false to review the breakdown without writing anything.",
                 "friendly_name": "Create Issues In Jira"
+            },
+            {
+                "name": "output",
+                "type": "dropdown",
+                "required": false,
+                "default": "use_setting",
+                "options": [
+                    "use_setting",
+                    "pdf_by_email",
+                    "create_in_jira"
+                ],
+                "description": "use_setting, pdf_by_email, create_in_jira",
+                "friendly_name": "Output (pdf_by_email = email the PDF, create nothing; create_in_jira = create tickets; use_setting = as the .env says)"
             },
             {
                 "name": "force",
@@ -78,7 +100,7 @@
                 "name": "correlation_id",
                 "type": "str",
                 "required": false,
-                "description": "Optional external id used as the idempotency key, so re-running reuses the issues already created instead of duplicating them. Defaults to '<issue key>#<comment id>'.",
+                "description": "Optional. An id of your own for this request: running again with the same id reuses the issues already created instead of duplicating them. Leave empty to use the request text itself.",
                 "friendly_name": "Correlation ID"
             }
         ]

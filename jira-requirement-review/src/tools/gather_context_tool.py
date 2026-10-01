@@ -50,7 +50,7 @@ async def gather_context(
     include_attachments: bool = True,
     include_confluence: bool = True,
     trigger_comment_id: str | None = None,
-    transcript_file_key: str | None = None,
+    transcript_file_keys: list[str] | None = None,
     team_id: str | None = None,
 ) -> dict[str, Any]:
     logger.info(
@@ -62,7 +62,7 @@ async def gather_context(
         include_linked_issues,
         include_attachments,
         include_confluence,
-        bool(transcript_file_key),
+        len(transcript_file_keys or []),
     )
 
     ctx = FetchContext(
@@ -73,7 +73,7 @@ async def gather_context(
         include_attachments=include_attachments,
         include_confluence=include_confluence,
         trigger_comment_id=trigger_comment_id,
-        transcript_file_key=transcript_file_key,
+        transcript_file_keys=list(transcript_file_keys or []),
         team_id=resolve_team_id(team_id),
     )
 

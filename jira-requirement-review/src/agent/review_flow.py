@@ -44,19 +44,19 @@ REPORT_EMAIL_ACTIVITY = "send_review_report_email"
 REPORT_EMAIL_TEMPLATE = "jira_requirement_review_report"
 
 
-def resolve_transcript_file_key(payload: dict[str, Any]) -> str | None:
-    """First non-empty transcript file key across the known payload keys.
+def resolve_transcript_file_keys(payload: dict[str, Any]) -> list[str]:
+    """Every uploaded file's storage key, from the first payload key that has any.
 
-    Tolerates a list value (some upload mechanisms pass a list of keys) by taking
-    its first element.
+    The form's upload field takes several files (a transcript and a spec, say);
+    the platform sends their keys as a list, or a comma-separated string.
     """
     for key in _TRANSCRIPT_KEYS:
         value = payload.get(key)
-        if isinstance(value, list):
-            value = value[0] if value else None
-        if value and str(value).strip():
-            return str(value).strip()
-    return None
+        items = value if isinstance(value, list) else str(value or "").split(",")
+        keys = [str(item).strip() for item in items if str(item or "").strip()]
+        if keys:
+            return list(dict.fromkeys(keys))
+    return []
 
 
 async def _review_one_issue(
@@ -69,7 +69,7 @@ async def _review_one_issue(
     include_attachments: bool,
     include_confluence: bool,
     trigger_comment_id: str | None,
-    transcript_file_key: str | None,
+    transcript_file_keys: list[str],
     team_id: str | None,
     model_id: str | None,
     post_to_jira: bool,
@@ -86,7 +86,7 @@ async def _review_one_issue(
         include_attachments,
         include_confluence,
         trigger_comment_id,
-        transcript_file_key,
+        transcript_file_keys,
         team_id,
         start_to_close_timeout=timedelta(minutes=2),
     )
@@ -258,7 +258,7 @@ async def run_review(
         include_attachments=flag(payload, "include_attachments"),
         include_confluence=flag(payload, "include_confluence"),
         trigger_comment_id=str(payload.get("comment_id") or "").strip() or None,
-        transcript_file_key=resolve_transcript_file_key(payload),
+        transcript_file_keys=resolve_transcript_file_keys(payload),
         team_id=payload.get("team_id"),
         model_id=payload.get("model_id"),
         post_to_jira=flag(payload, "post_to_jira"),

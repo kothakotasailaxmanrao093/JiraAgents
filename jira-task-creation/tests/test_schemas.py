@@ -72,6 +72,8 @@ def test_result_status_values():
         "EXPLAINED",
         "JIRA_CREATED",
         "JIRA_CREATION_FAILED",
+        # GENERATE_LOCAL_PDF: an attached PDF, nothing created.
+        "PLANNED",
     }
 
 

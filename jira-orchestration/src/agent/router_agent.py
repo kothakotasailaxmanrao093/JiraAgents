@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 # Kept in step with pyproject.toml and metadata.json by scripts/publish.py, and
 # asserted by tests/test_version_agreement.py. A constant rather than a file
 # read because a workflow may not read files.
-AGENT_VERSION = "0.1.24"
+AGENT_VERSION = "0.1.27"
 
 
 async def _dispatch(agent_name: str, payload: dict[str, Any], **options: Any) -> Any:

@@ -25,6 +25,10 @@ DEFAULT_CLASSIFIER_MODEL = "gpt-5.1"
 # attached to the issue, durable across restarts.
 ANSWERED_PROPERTY = "aetherion-answered-comments"
 
+# Where each ticket's orchestration state lives: the job running on it, and
+# the last review and build results (routing/orchestration.py).
+STATE_PROPERTY = "aetherion-orchestration"
+
 
 def trigger_keyword() -> str:
     return os.environ.get("ORCH_TRIGGER_KEYWORD", "").strip() or DEFAULT_TRIGGER_KEYWORD
@@ -134,3 +138,23 @@ def jira_credentials() -> tuple[str, str, str]:
     email = os.environ.get("JIRA_EMAIL", "").strip()
     token = os.environ.get("JIRA_API_TOKEN", "").strip()
     return base, email, token
+
+
+def build_min_readiness() -> int:
+    """A build after a review scored below this (1-5) is paused, not built.
+
+    3: a "needs major clarification" review (1-2) means the tickets would be
+    thin and someone would have to redo them. Only a review of the unchanged
+    ticket counts — edit the description and the build runs.
+    """
+    return env_int("ORCH_BUILD_MIN_READINESS", 3, minimum=0)
+
+
+def status_labels() -> bool:
+    """Show what the agent is doing on the board card, as one label at a time."""
+    return env_bool("ORCH_STATUS_LABELS", default=True)
+
+
+def queue_wait_minutes() -> int:
+    """How long a queued request waits for the job ahead of it on its ticket."""
+    return env_int("ORCH_QUEUE_WAIT_MINUTES", 10, minimum=1)

@@ -1,6 +1,6 @@
 {
     "name": "JiraOrchestration",
-    "version": "0.1.24",
+    "version": "0.1.27",
     "description": "One ingress for Jira comment webhooks. Filters comments that mention the agent, ignores its own replies and redelivered events, classifies what was asked for, dispatches to exactly one specialist agent, and posts the single reply — so a comment is never answered twice and never silently ignored.",
     "config": {
         "triggers": [

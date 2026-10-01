@@ -1,6 +1,6 @@
 # How the code works
 
-Versions: router **0.1.24** · Work Breakdown **4.3.40** · Requirement Review **2.2.18** (28 Sep 2026).
+Versions: router **0.1.26** · Work Breakdown **4.3.42** · Requirement Review **2.2.19** (29 Sep 2026).
 Line numbers are for `shared/`; each agent's copy in `<agent>/src/shared/` is about 3 lines lower.
 
 ## 1. What this system does
@@ -148,7 +148,7 @@ between the ticket and a page is reported as "Conflicting information", and that
 
 ## 7. What is not built yet
 
-- **No lock.** `lock_key` was defined but never called; the owner deleted it on 25 Sep 2026 (`ingress.py:14-19`). Two comments at the same second run in parallel. `README.md:17,35` still describe a lock.
+- **No hard lock.** Each ticket's state (`aetherion-orchestration`) sequences its jobs — a duplicate request says "already running", a different one waits its turn — but two comments in the same second can both read "idle" before either writes. `README.md:17,35` still describe the old lock.
 - **Prompt injection is untested** (`PHASES.md:342`). The comment goes straight into the classifier prompt (`tools/tools.py:260`). The limits on damage are a closed set of intents, schema validation of every AI answer, and the project allow-list.
 - **`ORCH_IDEMPOTENCY_TTL_HOURS`** is defined and never used; the `aetherion-processed` label is stamped and never checked.
 - **The D4 routing log** (why a comment went where) is not built.

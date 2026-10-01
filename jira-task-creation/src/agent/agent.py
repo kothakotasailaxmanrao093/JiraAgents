@@ -9,7 +9,7 @@ from typing import Any, Dict
 from aetherion_sdk import agent, toolExecutor
 from common_lib.utils.logger import setup_logger
 
-from src.agent.delegated import agent_version, to_contract
+from src.agent.delegated import _sources_missing, _sources_read, agent_version, to_contract
 from src.models.schemas import (
     Classification,
     NotificationKind,
@@ -711,6 +711,27 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
             f"requirement_chars={len(requirement)}"
         )
 
+    # ---- Gate 0f: files uploaded on the agent's own form ----------------
+    # Read like the ticket's own attachments, so they reach the breakdown, the
+    # sources listed and the PDF; one that cannot be read is named, with why.
+    uploads = {k: payload[k] for k in _UPLOAD_FIELDS if payload.get(k)}
+    if uploads:
+        uploaded = await toolExecutor.execute(
+            "read_uploaded_files",
+            uploads,
+            payload.get("team_id") or "",
+            start_to_close_timeout=_READ_TIMEOUT,
+        )
+        requirement = "\n\n".join(
+            part for part in (str(requirement).strip(), uploaded.get("section") or "") if part
+        )
+        source = dict(source or {"key": issue_key})
+        source["attachments"] = [
+            *(source.get("attachments") or []),
+            *(uploaded.get("files") or []),
+        ]
+        source["notes"] = [*(source.get("notes") or []), *(uploaded.get("notes") or [])]
+
     logger.info(f"requirement_length : {len(str(requirement))}")
     logger.info(f"project_key : {project_key} | epic : {existing_epic_key or '-'}")
     logger.info(f"placement : {placement} | create_in_jira : {create_in_jira}")
@@ -1005,6 +1026,34 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
             notification=notification,
         )
 
+    # What a previous review of this unchanged ticket left open (the router
+    # passes it): shown under "please confirm", never asked again.
+    review_questions = [str(q) for q in payload.get("review_questions") or [] if str(q).strip()]
+
+    # ---- Gate 3c: GENERATE_LOCAL_PDF ends here, with a PDF -----------------
+    # Before the preview check: in PDF mode nothing is ever created, so the
+    # PDF is always emailed, whatever "Create Issues In Jira" says.
+    if _output_choice(payload) is None:
+        mode = await toolExecutor.execute("delivery_mode", start_to_close_timeout=_NOTIFY_TIMEOUT)
+        local_pdf = bool(mode.get("local_pdf"))
+    else:
+        local_pdf = bool(_output_choice(payload))
+    if local_pdf:
+        return await _deliver_pdf(
+            source=source,
+            context=context,
+            breakdown_result=breakdown_result,
+            validation=validation,
+            clean_requirement=clean_requirement,
+            project_key=project.get("key") or project_key,
+            issue_key=issue_key,
+            issue_summary=issue_summary,
+            placement=placement,
+            classification=classification,
+            trigger_comment_id=trigger_comment_id,
+            review_questions=review_questions,
+        )
+
     if not create_in_jira:
         logger.info("create_in_jira is false; returning the breakdown for review.")
         review_message = (
@@ -1067,6 +1116,8 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
             )
             if part
         ),
+        # The context step already listed them; creation does not ask again.
+        project.get("issue_types") or None,
         start_to_close_timeout=_JIRA_TIMEOUT,
     )
     jira_status = jira_result.get("status", ResultStatus.JIRA_CREATION_FAILED.value)
@@ -1166,6 +1217,7 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
     return _result(
         status=ResultStatus(jira_status),
         message=message,
+        review_questions=review_questions,
         headline=headline,
         classification=classification,
         analysis=breakdown.get("analysis", ""),
@@ -1180,3 +1232,108 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
         source_issue=source,
         notification=notification,
     )
+
+
+async def _deliver_pdf(
+    *,
+    source: dict[str, Any] | None,
+    context: dict[str, Any],
+    breakdown_result: dict[str, Any],
+    validation: dict[str, Any],
+    clean_requirement: str,
+    project_key: str,
+    issue_key: str,
+    issue_summary: str,
+    placement: str,
+    classification: Classification,
+    trigger_comment_id: str,
+    review_questions: list[str],
+) -> dict:
+    """End a build with the breakdown as an attached PDF. Nothing else changes."""
+    read = {"source_issue": source, "jira_context": context}
+    related = [
+        f"{link.get('key')} — {link.get('summary')} ({link.get('relationship')})"
+        for link in (source or {}).get("linked_issues") or []
+        if link.get("key")
+    ]
+    request = {
+        "breakdown": breakdown_result["breakdown"],
+        "requirement": clean_requirement,
+        "request": validation.get("request_text") or clean_requirement,
+        "issue_key": issue_key,
+        "issue_summary": issue_summary,
+        "project_key": project_key,
+        "root_key": issue_key if (source or {}).get("ticket_is_root") else "",
+        "agent_version": agent_version(),
+        "review_questions": review_questions,
+        # The Epic named on the form, already checked by inspect_jira_context.
+        "existing_epic": context.get("epic") or {},
+        "report": {
+            "related_keys": related,
+            "sources_read": _sources_read(read),
+            "sources_missing": [m.as_sentence() for m in _sources_missing(read)],
+            "quality_notes": breakdown_result.get("quality_notes") or [],
+            "coverage": breakdown_result.get("coverage") or {},
+            "closest_match": breakdown_result.get("best_match"),
+            "placement": str(placement),
+        },
+    }
+    made = await toolExecutor.execute(
+        "generate_breakdown_pdf", request, start_to_close_timeout=_JIRA_TIMEOUT
+    )
+    breakdown = breakdown_result["breakdown"]
+    if made.get("status") != ResultStatus.PLANNED.value:
+        reason = str(made.get("reason") or "The PDF could not be made.")
+        await _report(
+            issue_key,
+            headline="The PDF could not be made — nothing was changed",
+            situation=reason,
+            errors=[reason],
+            answered_comment_id=trigger_comment_id,
+        )
+        return _result(
+            status=ResultStatus.JIRA_CREATION_FAILED,
+            message=reason,
+            validation_errors=[reason],
+            source_issue=source,
+            jira_context=context,
+        )
+
+    summary = str(made.get("summary") or "")
+    await _report(
+        issue_key,
+        headline=str(made.get("headline") or "Work breakdown ready as a PDF"),
+        situation=summary + "\n" + "\n".join(made.get("proposed") or []),
+        context_notes=_unreadable_notes(source),
+        answered_comment_id=trigger_comment_id,
+    )
+    return _result(
+        status=ResultStatus.PLANNED,
+        message=summary,
+        headline=str(made.get("headline") or ""),
+        proposed=list(made.get("proposed") or []),
+        review_questions=review_questions,
+        classification=classification,
+        analysis=breakdown.get("analysis", ""),
+        epic=breakdown.get("epic"),
+        stories=breakdown.get("stories", []),
+        quality_notes=breakdown_result.get("quality_notes") or [],
+        jira_context=context,
+        source_issue=source,
+    )
+
+
+# Where the platform puts the storage keys of files picked on the form:
+# ``uploaded_files`` (every file field's keys), or the field's own name.
+_UPLOAD_FIELDS = ("uploaded_files", "supporting_files")
+
+_OUTPUTS = {"pdf_by_email": True, "create_in_jira": False}
+
+
+def _output_choice(payload: Dict[str, Any]) -> bool | None:
+    """The form's "Output" choice: True for the PDF, False for tickets, None for the setting.
+
+    A run from the agent's own form can choose; a Jira comment (through the
+    router) never sets it, so GENERATE_LOCAL_PDF decides there.
+    """
+    return _OUTPUTS.get(str(payload.get("output") or "").strip().lower())

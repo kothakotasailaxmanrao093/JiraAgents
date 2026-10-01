@@ -30,6 +30,8 @@ class ResultStatus(str, Enum):
     EXPLAINED = "EXPLAINED"
     JIRA_CREATED = "JIRA_CREATED"
     JIRA_CREATION_FAILED = "JIRA_CREATION_FAILED"
+    # GENERATE_LOCAL_PDF: the breakdown as an attached PDF; nothing created.
+    PLANNED = "PLANNED"
 
 
 class RequestBucket(str, Enum):
@@ -583,6 +585,10 @@ class TicketWiseResult(_Strict):
     # Set when the run says something more specific than its status does
     # ("BGV-25 is now an Epic"); the reply's heading otherwise.
     headline: str = ""
+    # PLANNED: the proposed items, numbered (E, S1, S1.1 …) — none exists.
+    proposed: list[str] = Field(default_factory=list)
+    # What a previous review of the unchanged ticket left open (from the router).
+    review_questions: list[str] = Field(default_factory=list)
     classification: Classification | None = None
     analysis: str = ""
     epic: dict[str, Any] | None = None
@@ -792,6 +798,8 @@ class NotificationKind(str, Enum):
     INVALID_REQUEST = "invalid_request"
     FAILED = "failed"
     CREATED = "created"
+    # GENERATE_LOCAL_PDF: the work breakdown itself, as a PDF — always sent.
+    BREAKDOWN_PDF = "breakdown_pdf"
 
 
 class NotificationResult(_Strict):

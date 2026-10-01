@@ -331,3 +331,96 @@ def related_ticket_prompt(key: str, summary: str, description: str, request: str
         f"TICKET {key}: {summary}\n{(description or '(no description)')[:1500]}\n\n"
         f"WORK ASKED FOR:\n{request[:1500]}\n"
     )
+
+
+# --------------------------------------------------------------------------
+# The breakdown in two steps: a plan, then every Story at once (2026-09-30)
+# --------------------------------------------------------------------------
+# One call wrote the whole breakdown — Epic, every Story, every Sub-task — and
+# was the slowest step of a build (tens of seconds of output). The plan is
+# short; the Stories are then written in parallel, so the wait is one Story's,
+# not all of them. The result goes through exactly the same checks.
+
+PLAN_INSTRUCTIONS = """\
+Plan the breakdown of the requirement — the Epic and the list of Stories only,
+not the Stories' details. Return JSON only, in exactly this shape:
+
+{
+  "classification": "Small" | "Medium" | "Large",
+  "analysis": "<2-3 sentences on why this classification>",
+  "work_kind": "feature" | "technical" | "defect",
+  "defect": { ... },                 // only when work_kind is "defect", as described below
+  "epic": {                          // omit entirely when classification is Small
+    "business_objective": "...",
+    "scope": ["..."],
+    "out_of_scope": ["..."],         // ["Not specified"] when unknown
+    "priority": "Low|Medium|High|Critical",
+    "acceptance_criteria": ["..."],
+    "jira_summary": "<short title for the Jira Summary field>"
+  },
+  "stories": [
+    {"title": "<the Story's title>", "focus": "<one sentence: what this Story delivers>"}
+  ],
+  "coverage": {"<requirement line number>": "<exact title of the Story that delivers it>"}
+}
+
+Rules the output is checked against:
+- Small -> no "epic", exactly one story. Medium/Large -> "epic", at least two stories.
+- One behaviour per Story; together the Stories deliver EVERY requirement line,
+  and "coverage" maps every line number to one of the titles above.
+- "defect": {"actual": "...", "expected": "...", "impact": "...", "widespread": true|false}
+"""
+
+STORY_INSTRUCTIONS = """\
+Write ONE Story of the planned breakdown below, in full. The other Stories are
+written separately — deliver only this Story's part, and do not repeat theirs.
+Return JSON only: exactly one Story object, in this shape:
+
+{
+  "title": "<exactly the planned title>",
+  "user_story_statement": "As a ..., I want ..., so that ....",
+  "description": "...",
+  "business_value": "...",
+  "priority": "Low|Medium|High|Critical",
+  "estimated_complexity": "Low|Medium|High",
+  "dependencies": "None",
+  "acceptance_criteria": ["Given ..., when ..., then ..."],
+  "open_questions": ["<a decision the requirement leaves open>"],
+  "subtasks": [
+    {"title": "...", "description": "...", "expected_outcome": "...",
+     "dependencies": "None", "completion_criteria": "..."}
+  ]
+}
+
+Carry EVERY number, quoted name, limit and rule of the requirement lines this
+Story delivers (listed below) into its acceptance criteria or Sub-tasks.
+"""
+
+
+def plan_prompt(requirement: str, project_context: str, lines: list[str]) -> str:
+    """The first step: classification, Epic, and the Story titles."""
+    return (
+        coverage_instructions(lines) + f"{PLAN_INSTRUCTIONS}\n"
+        f"PROJECT CONTEXT:\n{project_context}\n\n"
+        f"REQUIREMENT:\n{requirement}\n"
+    )
+
+
+def story_prompt(
+    requirement: str,
+    project_context: str,
+    plan: list[tuple[str, str]],
+    title: str,
+    lines: list[str],
+) -> str:
+    """The second step, once per Story: that Story in full."""
+    others = "\n".join(f"- {t}: {focus}" for t, focus in plan)
+    mine = "\n".join(f"- {line}" for line in lines) or "- (see the requirement)"
+    return (
+        f"{STORY_INSTRUCTIONS}\n"
+        f"THE PLANNED STORIES:\n{others}\n\n"
+        f"WRITE THIS ONE: {title}\n"
+        f"THE REQUIREMENT LINES IT DELIVERS:\n{mine}\n\n"
+        f"PROJECT CONTEXT:\n{project_context}\n\n"
+        f"REQUIREMENT:\n{requirement}\n"
+    )

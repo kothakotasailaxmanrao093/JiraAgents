@@ -16,6 +16,7 @@ nothing (D0, 2026-09-25).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
@@ -32,6 +33,16 @@ from routing.compose import (
     router_only,
 )
 from routing.ingress import IngressOutcome
+from routing.orchestration import (
+    NOUN,
+    TRACKED,
+    WORKING,
+    Next,
+    Plan,
+    TicketState,
+    clock,
+    plan_next,
+)
 from shared.contract import AgentResult, Outcome
 
 logger = logging.getLogger(__name__)
@@ -45,14 +56,23 @@ _INGRESS_TIMEOUT = timedelta(minutes=2)
 _NOT_ROUTED = "Not routed — the request could not be read, so it was never classified."
 _CLASSIFY_TIMEOUT = timedelta(minutes=2)
 _POST_TIMEOUT = timedelta(minutes=2)
+# A queued request checks whether the job ahead on its ticket has finished.
+_POLL_SECONDS = 10
+# sleep(seconds) — asyncio.sleep in the workflow, where it is a durable timer.
+Sleep = Callable[[float], Awaitable[None]]
 
 
 async def run_router(
     payload: dict[str, Any],
     execute: Execute,
     dispatch: Dispatch,
+    sleep: Sleep = asyncio.sleep,
 ) -> dict[str, Any]:
-    """Handle one webhook delivery, start to finish."""
+    """Handle one webhook delivery, start to finish.
+
+    ``sleep`` is how a queued request waits its turn. In the workflow it is
+    ``asyncio.sleep``, which Temporal turns into a durable timer.
+    """
     issue_key = str(payload.get("issue_key") or "").strip().upper()
     comment_id = str(payload.get("comment_id") or "").strip()
     webhook_event = str(payload.get("webhookEvent") or payload.get("webhook_event") or "")
@@ -123,23 +143,13 @@ async def run_router(
         # AgentSpec.task_queue for why this cannot be read here directly.
         overrides = gate.get("task_queue_overrides") or {}
         agent = decision.agent.with_task_queue(overrides.get(decision.agent.agent_name))
-        blocks, ran, result = await _dispatch_and_compose(
-            agent, decision, gate, dispatch, execute, run_id, issue_key, comment_id
+        posted, ran, result = await _orchestrate(
+            agent, decision, gate, dispatch, execute, sleep, run_id, issue_key, comment_id
         )
     else:
         blocks, ran, result = _answer_directly(decision)
-
-    # --- finalise: ONE reply, whatever happened above ------------------------
-    posted = await _post(
-        execute,
-        issue_key,
-        blocks,
-        run_id,
-        comment_id,
-        str(gate.get("idempotency_key") or ""),
-        str(gate.get("processed_label") or ""),
-        str(gate.get("thread_id") or ""),
-    )
+        # --- ONE reply ------------------------------------------------------
+        posted = await _reply(execute, gate, blocks, run_id, issue_key, comment_id)
 
     return {
         "status": "answered",
@@ -154,6 +164,233 @@ async def run_router(
         "comment_id": posted.get("comment_id", ""),
         "created": [c.key for c in (result.created if result else [])],
     }
+
+
+async def _reply(
+    execute: Execute,
+    gate: dict[str, Any],
+    blocks: list[tuple[str, object]],
+    run_id: str,
+    issue_key: str,
+    comment_id: str,
+    alert: bool = True,
+) -> dict[str, Any]:
+    """THE reply to this comment, threaded under it, recorded as answered."""
+    return await _post(
+        execute,
+        issue_key,
+        blocks,
+        run_id,
+        comment_id,
+        str(gate.get("idempotency_key") or ""),
+        str(gate.get("processed_label") or ""),
+        str(gate.get("thread_id") or ""),
+        alert,
+    )
+
+
+async def _orchestrate(
+    spec: AgentSpec,
+    decision: Decision,
+    gate: dict[str, Any],
+    dispatch: Dispatch,
+    execute: Execute,
+    sleep: Sleep,
+    run_id: str,
+    issue_key: str,
+    comment_id: str,
+) -> tuple[dict[str, Any], list[str], AgentResult | None]:
+    """Sequence this request against the ticket's state, answer at once, then finish.
+
+    Still exactly one reply per comment: a job that runs is answered with a
+    "processing" reply straight away, and that same comment is edited into the
+    result when the job ends (routing/orchestration.py has the rules).
+    """
+    intent = decision.intent
+    fingerprint = str(gate.get("fingerprint") or "")
+    min_readiness = int(gate.get("build_min_readiness") or 0)
+    state = TicketState.from_dict(gate.get("orchestration"))
+    plan = plan_next(intent, state, fingerprint, min_readiness)
+
+    async def reply(blocks: list[tuple[str, object]]) -> dict[str, Any]:
+        return await _reply(execute, gate, blocks, run_id, issue_key, comment_id)
+
+    if plan.next is Next.ALREADY_RUNNING:
+        return await reply(_already_running(intent, issue_key, state, decision)), [], None
+    if plan.next is Next.REUSE_REVIEW:
+        previous = AgentResult.from_dict(plan.previous or {})
+        reused = (
+            f"{spec.display_name} — {decision.reason} The ticket has not changed since the "
+            "last review, so that review is shown again; no new review was run."
+        )
+        return (
+            await reply(compose(previous, routed_to=reused, ran=[spec.display_name])),
+            [spec.display_name],
+            previous,
+        )
+    if plan.next is Next.BUILD_PAUSED:
+        return await reply(_paused(issue_key, plan, decision, min_readiness)), [], None
+
+    # --- a job runs: answer at once, then do it -----------------------------
+    queued = plan.next is Next.WAIT
+    placeholder = await reply(_working(intent, issue_key, state, decision, queued))
+    reply_id = str(placeholder.get("comment_id") or "")
+    if not placeholder.get("posted") and not placeholder.get("read_only"):
+        # Nowhere to report to (the administrators were just told). Doing the
+        # work anyway would build tickets nobody hears about; asking again is
+        # safe, because nothing was started.
+        return placeholder, [], None
+
+    if queued:
+        state = await _wait_for_turn(execute, sleep, issue_key, gate)
+        plan = plan_next(intent, state, fingerprint, min_readiness)
+        if plan.next is Next.BUILD_PAUSED:
+            # The review ahead of this build scored the ticket too low.
+            blocks = _paused(issue_key, plan, decision, min_readiness)
+            posted = await _finish_reply(
+                execute, gate, reply_id, blocks, run_id, issue_key, comment_id
+            )
+            return posted, [], None
+        # Anything else runs now, fresh, with what the job ahead left behind.
+        plan = Plan(Next.RUN, plan.review_questions, plan.review_score)
+        await _safe(
+            execute,
+            "update_reply",
+            issue_key,
+            reply_id,
+            _working(intent, issue_key, state, decision, queued=False),
+            run_id,
+            start_to_close_timeout=_POST_TIMEOUT,
+        )
+
+    tracked = intent in TRACKED
+    if tracked:
+        await _safe(
+            execute,
+            "claim_ticket",
+            issue_key,
+            intent,
+            run_id,
+            reply_id,
+            start_to_close_timeout=_POST_TIMEOUT,
+        )
+    extra = {"review_questions": plan.review_questions} if plan.review_questions else {}
+    blocks, ran, result = await _dispatch_and_compose(
+        spec, decision, gate, dispatch, execute, run_id, issue_key, comment_id, extra
+    )
+    if tracked:
+        await _safe(
+            execute,
+            "finish_ticket",
+            issue_key,
+            intent,
+            run_id,
+            result.to_dict() if result else None,
+            fingerprint,
+            start_to_close_timeout=_POST_TIMEOUT,
+        )
+    posted = await _finish_reply(execute, gate, reply_id, blocks, run_id, issue_key, comment_id)
+    return posted, ran, result
+
+
+async def _wait_for_turn(
+    execute: Execute, sleep: Sleep, issue_key: str, gate: dict[str, Any]
+) -> TicketState:
+    """Wait until the job ahead on this ticket ends (or the wait runs out)."""
+    rounds = max(1, int(gate.get("queue_wait_minutes") or 10) * 60 // _POLL_SECONDS)
+    state = TicketState()
+    for _ in range(rounds):
+        await sleep(_POLL_SECONDS)
+        read = await _safe(execute, "ticket_state", issue_key, start_to_close_timeout=_POST_TIMEOUT)
+        state = TicketState.from_dict(read.get("state"))
+        if state.active is None:
+            return state
+    logger.warning(f"{issue_key}: the job ahead did not finish in time; running anyway")
+    return TicketState(last=state.last)
+
+
+async def _finish_reply(
+    execute: Execute,
+    gate: dict[str, Any],
+    reply_id: str,
+    blocks: list[tuple[str, object]],
+    run_id: str,
+    issue_key: str,
+    comment_id: str,
+) -> dict[str, Any]:
+    """Turn the "processing" reply into the result — or post it, if it cannot be edited."""
+    # The "processing" reply never posted, and the administrators were told
+    # then; a second failure here is the same problem, not a new one.
+    alert = bool(reply_id)
+    if reply_id:
+        edited = await _safe(
+            execute,
+            "update_reply",
+            issue_key,
+            reply_id,
+            blocks,
+            run_id,
+            start_to_close_timeout=_POST_TIMEOUT,
+        )
+        if edited.get("updated"):
+            return {"posted": True, "comment_id": reply_id, "updated": True}
+    return await _reply(execute, gate, blocks, run_id, issue_key, comment_id, alert)
+
+
+def _working(
+    intent: str, issue_key: str, state: TicketState, decision: Decision, queued: bool
+) -> list[tuple[str, object]]:
+    """The reply posted the moment a job is accepted."""
+    doing = WORKING.get(intent, "Working on")
+    if queued and state.active is not None:
+        ahead = state.active
+        return router_only(
+            f"⏳ {NOUN.get(intent, 'request').capitalize()} queued for {issue_key}",
+            routed_to=decision.reason,
+            what_happened=(
+                f"Waiting for the {NOUN.get(ahead.intent, 'job')} of {issue_key} that started "
+                f"at {clock(ahead.started)} to finish. This {NOUN.get(intent, 'request')} will "
+                f"then start by itself, on {issue_key}, and its result will replace this message."
+            ),
+        )
+    return router_only(
+        f"⏳ {doing} {issue_key}…",
+        routed_to=decision.reason,
+        what_happened=(
+            "Started. The result will replace this message — usually within "
+            f"{'4' if intent == 'BUILD' else '2'} minutes."
+        ),
+    )
+
+
+def _already_running(
+    intent: str, issue_key: str, state: TicketState, decision: Decision
+) -> list[tuple[str, object]]:
+    started = clock(state.active.started) if state.active else "earlier"
+    return router_only(
+        f"⏳ Already {WORKING.get(intent, 'working on').lower()} {issue_key}",
+        routed_to=decision.reason,
+        what_happened=(
+            f"A {NOUN.get(intent, 'request')} of {issue_key} started at {started} is still "
+            "running. Its result will appear in that reply — nothing new was started."
+        ),
+    )
+
+
+def _paused(
+    issue_key: str, plan: Plan, decision: Decision, min_readiness: int
+) -> list[tuple[str, object]]:
+    return router_only(
+        f"Build paused — the review scored {issue_key} {plan.review_score}/5",
+        routed_to=decision.reason,
+        what_happened=(
+            f"The last review of {issue_key} scored it {plan.review_score}/5, below the "
+            f"{min_readiness}/5 needed to build, and the ticket has not changed since. "
+            "Nothing was created. Answer these in the description (or attach them), then "
+            "ask again — an edited ticket builds straight away:"
+        ),
+        options=plan.review_questions or ["Add the missing details the review listed."],
+    )
 
 
 async def _safe(execute: Execute, name: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
@@ -180,8 +417,12 @@ async def _post(
     idempotency: str = "",
     label: str = "",
     thread_id: str = "",
+    alert: bool = True,
 ) -> dict[str, Any]:
     """Post THE reply; if it cannot be posted, tell the administrators.
+
+    ``alert=False`` when they were already told about this reply — the
+    "processing" message failed the same way a moment earlier.
 
     The one failure the user cannot see, because the channel for telling them
     is the thing that broke.
@@ -198,7 +439,7 @@ async def _post(
         thread_id,
         start_to_close_timeout=_POST_TIMEOUT,
     )
-    if not posted.get("posted") and not posted.get("read_only"):
+    if alert and not posted.get("posted") and not posted.get("read_only"):
         await _safe(
             execute,
             "notify_admins",
@@ -268,6 +509,7 @@ async def _dispatch_and_compose(
     run_id: str,
     issue_key: str,
     comment_id: str,
+    extra_payload: dict[str, Any] | None = None,
 ) -> tuple[list[tuple[str, object]], list[str], AgentResult | None]:
     """Call one child and turn its answer into the reply.
 
@@ -278,6 +520,9 @@ async def _dispatch_and_compose(
         "issue_key": issue_key,
         "comment_id": comment_id,
         "run_id": run_id,
+        # What the orchestrator knows that the child should use (a previous
+        # review's open questions, for a build).
+        **(extra_payload or {}),
     }
     # Forced last, so no caller and no configuration can override them.
     child_payload.update(spec.forced_payload)

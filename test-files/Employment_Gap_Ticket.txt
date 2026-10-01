@@ -1,0 +1,10 @@
+Project: BGV
+Type: Story
+Summary: Employment gap check
+
+Description:
+Candidates explain gaps in their work history, and the officer reviews them.
+Policy: <paste the Confluence page URL>
+The detailed rules are in the attached spec, and the decisions from the call are in the transcript.
+
+Attach: Employment_Gap_Spec.docx and Employment_Gap_Call.vtt

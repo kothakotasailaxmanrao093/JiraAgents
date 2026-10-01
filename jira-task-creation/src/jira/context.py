@@ -98,6 +98,26 @@ def max_context_issues() -> int:
     return max(1, value)
 
 
+EXISTING_FIELDS = "summary,issuetype,status,parent,labels,description"
+
+
+def parse_existing(item: dict[str, Any], base_url: str = "") -> ExistingIssue:
+    """One search result as the ticket duplicate detection compares against."""
+    f = item.get("fields", {})
+    key = item.get("key", "")
+    return ExistingIssue(
+        key=key,
+        summary=f.get("summary", "") or "",
+        issue_type=(f.get("issuetype") or {}).get("name", "") or "",
+        status=(f.get("status") or {}).get("name", "") or "",
+        status_category=((f.get("status") or {}).get("statusCategory") or {}).get("key", "") or "",
+        parent_key=(f.get("parent") or {}).get("key", "") or "",
+        labels=[str(x) for x in (f.get("labels") or [])],
+        description=_plain_text(f.get("description"))[:_DESCRIPTION_SNIPPET],
+        url=browse_url(base_url, key),
+    )
+
+
 async def fetch_existing_issues(
     client: httpx.AsyncClient,
     project_key: str,
@@ -118,7 +138,7 @@ async def fetch_existing_issues(
     """
     cap = max_context_issues() if limit is None else max(1, limit)
     jql = f"project = {_quote(project_key)} ORDER BY created DESC"
-    fields = "summary,issuetype,status,parent,labels,description"
+    fields = EXISTING_FIELDS
 
     issues: list[ExistingIssue] = []
     unavailable: list[str] = []
@@ -146,24 +166,7 @@ async def fetch_existing_issues(
 
         payload = resp.json()
         pages += 1
-        for item in payload.get("issues", []):
-            f = item.get("fields", {})
-            key = item.get("key", "")
-            issues.append(
-                ExistingIssue(
-                    key=key,
-                    summary=f.get("summary", "") or "",
-                    issue_type=(f.get("issuetype") or {}).get("name", "") or "",
-                    status=(f.get("status") or {}).get("name", "") or "",
-                    status_category=(
-                        ((f.get("status") or {}).get("statusCategory") or {}).get("key", "") or ""
-                    ),
-                    parent_key=(f.get("parent") or {}).get("key", "") or "",
-                    labels=[str(x) for x in (f.get("labels") or [])],
-                    description=_plain_text(f.get("description"))[:_DESCRIPTION_SNIPPET],
-                    url=browse_url(base_url, key),
-                )
-            )
+        issues.extend(parse_existing(item, base_url) for item in payload.get("issues", []))
 
         token = payload.get("nextPageToken")
         if payload.get("isLast") or not token:

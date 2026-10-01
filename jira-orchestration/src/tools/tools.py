@@ -22,7 +22,10 @@ into a helper nobody thought of as configuration.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -31,7 +34,9 @@ from common_lib.utils.logger import setup_logger
 from dotenv import load_dotenv
 
 from routing import settings
+from routing.catalog import CATALOG
 from routing.ingress import IgnoreReason, IngressOutcome, idempotency_key, screen_comment
+from routing.orchestration import FINISHED_LABEL, RUNNING_LABEL, STATUS_LABELS
 from shared.adf import blocks_to_doc, comment_text
 from shared.mailer import Delivery, check_login, deliver
 
@@ -40,7 +45,8 @@ logger = setup_logger(__name__)
 
 _TIMEOUT = 30.0
 # Fields the router needs, and no more. It routes; it does not gather context.
-_ISSUE_FIELDS = "summary,labels,project,subtasks,comment"
+# description and attachment: what a review reads, for the unchanged-ticket fingerprint.
+_ISSUE_FIELDS = "summary,labels,project,subtasks,comment,description,attachment"
 
 
 def _client() -> httpx.AsyncClient:
@@ -181,6 +187,11 @@ async def ingress_check(
                 "existing_labels": list(fields.get("labels") or []),
                 "read_only": settings.read_only(),
                 "task_queue_overrides": settings.task_queue_overrides(),
+                # The orchestrator's view of this ticket (routing/orchestration.py).
+                "fingerprint": content_fingerprint(fields),
+                "orchestration": await _live_state(client, issue_key),
+                "build_min_readiness": settings.build_min_readiness(),
+                "queue_wait_minutes": settings.queue_wait_minutes(),
             }
     except Exception as exc:  # noqa: BLE001 — a failure is reported, never dropped
         logger.error(f"run {run_id}: ingress failed on {issue_key}: {exc}", exc_info=True)
@@ -488,3 +499,180 @@ def _delivery_dict(delivery: Delivery) -> dict[str, Any]:
         "error": delivery.error,
         "suppressed_repeat": delivery.suppressed_repeat,
     }
+
+
+# --------------------------------------------------------------------------
+# Per-ticket orchestration state (routing/orchestration.py decides with it)
+# --------------------------------------------------------------------------
+
+# A stored result larger than this keeps its headline and summary only: Jira
+# caps a property value at 32,768 characters.
+_MAX_STORED_CHARS = 24_000
+
+
+def content_fingerprint(fields: dict[str, Any]) -> str:
+    """What a review reads — summary, description, attachments — as one hash.
+
+    Not the ticket's ``updated`` time: the agent's own replies and labels move
+    that, which would make every ticket look changed.
+    """
+    attachments = sorted(
+        f"{a.get('id')}:{a.get('filename')}" for a in fields.get("attachment") or []
+    )
+    material = json.dumps(
+        [fields.get("summary") or "", fields.get("description"), attachments],
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def _stale_after(intent: str) -> timedelta:
+    """A job older than its own timeout (plus margin) died with its worker."""
+    minutes = next((spec.timeout_minutes for spec in CATALOG if spec.intent == intent), 10)
+    return timedelta(minutes=minutes + 3)
+
+
+async def _read_state(client: httpx.AsyncClient, issue_key: str) -> dict[str, Any]:
+    resp = await client.get(f"/rest/api/3/issue/{issue_key}/properties/{settings.STATE_PROPERTY}")
+    if resp.status_code == 404:
+        return {}
+    resp.raise_for_status()
+    value = resp.json().get("value")
+    return value if isinstance(value, dict) else {}
+
+
+async def _write_state(client: httpx.AsyncClient, issue_key: str, state: dict[str, Any]) -> None:
+    resp = await client.put(
+        f"/rest/api/3/issue/{issue_key}/properties/{settings.STATE_PROPERTY}", json=state
+    )
+    resp.raise_for_status()
+
+
+async def _live_state(client: httpx.AsyncClient, issue_key: str) -> dict[str, Any]:
+    """The ticket's state, with a job that outlived its timeout dropped."""
+    try:
+        state = await _read_state(client, issue_key)
+    except httpx.HTTPError as exc:
+        # No state is "nothing running": the request still gets answered.
+        logger.warning(f"Could not read orchestration state on {issue_key}: {exc}")
+        return {}
+    active = state.get("active")
+    if isinstance(active, dict):
+        try:
+            started = datetime.fromisoformat(str(active.get("started")))
+        except ValueError:
+            started = datetime.min.replace(tzinfo=UTC)
+        if datetime.now(UTC) - started > _stale_after(str(active.get("intent") or "")):
+            logger.warning(f"Dropping a stale {active.get('intent')} job on {issue_key}")
+            state["active"] = None
+    return state
+
+
+async def _set_status_label(client: httpx.AsyncClient, issue_key: str, label: str) -> None:
+    """One status label on the card at a time. Never fails the run."""
+    if not settings.status_labels() or settings.read_only():
+        return
+    ops = [{"remove": other} for other in STATUS_LABELS if other != label]
+    if label:
+        ops.append({"add": label})
+    try:
+        resp = await client.put(f"/rest/api/3/issue/{issue_key}", json={"update": {"labels": ops}})
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        logger.warning(f"Could not set the status label on {issue_key}: {exc}")
+
+
+def _storable(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The result as it is kept for reuse: whole, unless too big for Jira."""
+    if not result:
+        return None
+    if len(json.dumps(result, default=str)) <= _MAX_STORED_CHARS:
+        return result
+    keep = ("outcome", "headline", "summary", "readiness_score", "questions", "produced_by")
+    return {k: result.get(k) for k in keep} | {"display_name": result.get("display_name", "")}
+
+
+@tool(name="ticket_state")
+async def ticket_state(issue_key: str) -> dict[str, Any]:
+    """The job running on a ticket now, if any (a queued request polls this)."""
+    try:
+        async with _client() as client:
+            return {"state": await _live_state(client, issue_key.strip().upper())}
+    except Exception as exc:  # noqa: BLE001 — unreadable reads as idle
+        return {"state": {}, "error": str(exc)}
+
+
+@tool(name="claim_ticket")
+async def claim_ticket(issue_key: str, intent: str, run_id: str, reply_id: str) -> dict[str, Any]:
+    """Mark the ticket as having this job running, and show it on the card."""
+    issue_key = issue_key.strip().upper()
+    started = datetime.now(UTC).isoformat(timespec="seconds")
+    try:
+        async with _client() as client:
+            state = await _live_state(client, issue_key)
+            state["active"] = {
+                "intent": intent,
+                "run_id": run_id,
+                "started": started,
+                "reply_id": reply_id,
+            }
+            await _write_state(client, issue_key, state)
+            await _set_status_label(client, issue_key, RUNNING_LABEL.get(intent, ""))
+        return {"claimed": True, "started": started}
+    except Exception as exc:  # noqa: BLE001 — the job still runs, only unrecorded
+        logger.warning(f"run {run_id}: could not claim {issue_key}: {exc}")
+        return {"claimed": False, "started": started, "error": str(exc)}
+
+
+@tool(name="finish_ticket")
+async def finish_ticket(
+    issue_key: str,
+    intent: str,
+    run_id: str,
+    result: dict[str, Any] | None,
+    fingerprint: str,
+) -> dict[str, Any]:
+    """Keep the result for reuse, free the ticket, and show the outcome on the card."""
+    issue_key = issue_key.strip().upper()
+    try:
+        async with _client() as client:
+            state = await _live_state(client, issue_key)
+            active = state.get("active") or {}
+            if active.get("run_id") == run_id:
+                state["active"] = None
+            if result:
+                state.setdefault("last", {})[intent] = {
+                    "result": _storable(result),
+                    "fingerprint": fingerprint,
+                    "finished": datetime.now(UTC).isoformat(timespec="seconds"),
+                }
+            await _write_state(client, issue_key, state)
+            outcome = str((result or {}).get("outcome") or "")
+            await _set_status_label(client, issue_key, FINISHED_LABEL.get(outcome, ""))
+        return {"finished": True}
+    except Exception as exc:  # noqa: BLE001 — a stale job expires by itself
+        logger.warning(f"run {run_id}: could not record the result on {issue_key}: {exc}")
+        return {"finished": False, "error": str(exc)}
+
+
+@tool(name="update_reply")
+async def update_reply(issue_key: str, reply_id: str, blocks: list[Any], run_id: str) -> dict:
+    """Replace the "processing" reply with the result — the same comment, edited."""
+    issue_key = issue_key.strip().upper()
+    if not reply_id:
+        return {"updated": False, "error": "no reply to update"}
+    if settings.read_only():
+        return {"updated": False, "read_only": True}
+    document = blocks_to_doc([(str(b[0]), b[1]) for b in blocks])
+    try:
+        async with _client() as client:
+            resp = await client.put(
+                f"/rest/api/3/issue/{issue_key}/comment/{reply_id}", json={"body": document}
+            )
+            resp.raise_for_status()
+        logger.info(f"run {run_id}: updated reply {reply_id} on {issue_key}")
+        return {"updated": True, "comment_id": reply_id}
+    except Exception as exc:  # noqa: BLE001 — the caller posts a new reply instead
+        logger.warning(f"run {run_id}: could not update reply {reply_id} on {issue_key}: {exc}")
+        return {"updated": False, "error": str(exc)}

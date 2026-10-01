@@ -1,0 +1,8 @@
+Title: Employment Gap Policy
+Space: PR
+
+Employment gap policy
+- A gap is time between two jobs with no employment.
+- Time after finishing education, up to 12 months, is not a gap.
+- Explanations and any proof are kept for 7 years, then deleted.
+- The client sees only the gap status (Explained or Needs proof), never the candidate's note.
