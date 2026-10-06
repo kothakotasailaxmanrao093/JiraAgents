@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import os
 import re
+from functools import lru_cache
 
 from common_lib.utils.logger import setup_logger
 
@@ -54,9 +55,17 @@ _STOPWORDS = frozenset(
 )
 
 
-def _tokens(text: str) -> set[str]:
+@lru_cache(maxsize=65_536)
+def _tokens(text: str) -> frozenset[str]:
+    """The meaningful words of a text — worked out once per distinct text.
+
+    Every rule compares a proposed title with a ticket's summary and its
+    description, so the same ticket texts are split into words again for every
+    title. Remembering the answer (tokenise once) makes that free; 65,536
+    texts is ~20 MB, a whole 18,000-ticket project with room to spare.
+    """
     words = re.findall(r"[a-z0-9]+", text.lower())
-    return {w for w in words if len(w) > 2 and w not in _STOPWORDS}
+    return frozenset(w for w in words if len(w) > 2 and w not in _STOPWORDS)
 
 
 def similarity(a: str, b: str) -> float:

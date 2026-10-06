@@ -1,7 +1,7 @@
 """Text extraction for Jira attachments — this agent's caps over the shared engine.
 
 The extraction itself (PDF, Word, Excel, PowerPoint, CSV, JSON, text, images via
-OCR, the size caps and the middle-out truncation) now lives in
+the platform's vision model, the size caps and the middle-out truncation) now lives in
 :mod:`src.shared.attachments`, so the review agent reads attachments through the
 same tested code rather than growing a second copy of it.
 
@@ -12,6 +12,12 @@ have to know that those variable names exist.
 """
 
 from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+import httpx
 
 from src.config.settings import env_bool, env_int
 from src.models.schemas import AttachmentText
@@ -40,6 +46,21 @@ def max_files() -> int:
 
 def max_chars() -> int:
     return env_int("LTW_ATTACHMENT_MAX_CHARS", DEFAULT_MAX_CHARS_PER_FILE)
+
+
+DEFAULT_READ_CONCURRENCY = 4
+
+
+def read_concurrency() -> int:
+    """How many attachments are downloaded and read at the same time.
+
+    4, and at least 1. Jira Cloud rate-limits per account, and a burst of
+    parallel downloads from one agent account is exactly what trips it; four
+    covers the usual two to five files in one round while staying well inside
+    the limit. Measured (BGV-69, 2026-09-29): a download takes 0.6-1.0 s, so
+    serial reads of four files cost about 3 s and parallel ones about 1 s.
+    """
+    return max(1, env_int("LTW_READ_CONCURRENCY", DEFAULT_READ_CONCURRENCY))
 
 
 def images_enabled() -> bool:
@@ -102,3 +123,58 @@ __all__ = [
     "max_files",
     "supported",
 ]
+
+
+async def read_all(
+    items: list[dict[str, Any]],
+    download: Callable[[str], Awaitable[bytes]],
+) -> tuple[list[AttachmentText], list[str]]:
+    """Read Jira's attachment list: capped, in parallel, never failing the run.
+
+    Returns the extracted attachments **in Jira's order** — whatever order the
+    downloads finish in — plus the notes for the reply. A file that cannot be
+    downloaded or read becomes an attachment carrying a note, exactly as when
+    they were read one at a time, so "what could not be read" is unchanged.
+    """
+    notes: list[str] = []
+    limit = max_files()
+    if len(items) > limit:
+        notes.append(f"{len(items)} attachments found; only the first {limit} were read.")
+
+    gate = asyncio.Semaphore(read_concurrency())
+
+    async def read_one(item: dict[str, Any]) -> AttachmentText | None:
+        filename = item.get("filename", "") or ""
+        mime = item.get("mimeType", "") or ""
+        url = item.get("content", "") or ""
+        if not (filename and url):
+            return None
+        if not supported(filename):
+            return await extract(b"", filename, mime)
+        async with gate:
+            try:
+                data = await download(url)
+            except httpx.HTTPError as exc:
+                return AttachmentText(
+                    filename=filename,
+                    mime_type=mime,
+                    note=f"Could not download this attachment: {exc}",
+                )
+            return await extract(data, filename, mime)
+
+    wanted = items[:limit]
+    read = await asyncio.gather(*(read_one(item) for item in wanted), return_exceptions=True)
+    out: list[AttachmentText] = []
+    for item, result in zip(wanted, read, strict=True):
+        if isinstance(result, BaseException):
+            # Anything unexpected is still one unreadable file, never a lost run.
+            out.append(
+                AttachmentText(
+                    filename=item.get("filename", "") or "attachment",
+                    mime_type=item.get("mimeType", "") or "",
+                    note=f"Could not read this attachment: {result}",
+                )
+            )
+        elif result is not None:
+            out.append(result)
+    return out, notes

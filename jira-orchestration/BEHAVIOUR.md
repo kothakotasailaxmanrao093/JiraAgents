@@ -43,6 +43,61 @@ Four rules, each load-bearing:
 
 ---
 
+## One ticket, one job at a time — answered the moment you ask
+
+Every **build** or **review** is answered at once with a "processing" reply, and
+that same comment is **edited into the result** when the job ends — still one
+reply per comment. The ticket remembers what is running on it and the last
+review and build (issue property `aetherion-orchestration`), and the card shows
+one status label at a time (`ORCH_STATUS_LABELS`): `aetherion-reviewing` →
+`aetherion-reviewed`, `aetherion-building` → `aetherion-built`,
+`aetherion-pdf-ready`, `aetherion-needs-input`.
+
+**At once, when a job starts:**
+```
+AetherionAgent · ⏳ Reviewing BGV-32…
+What happened   Started. The result will replace this message — usually within 2 minutes.
+```
+
+**A build asked while a review runs** (it waits, then runs on the same ticket and uses the review):
+```
+AetherionAgent · ⏳ Build queued for BGV-32
+What happened   Waiting for the review of BGV-32 that started at 10:00 UTC to finish. This build
+                will then start by itself, on BGV-32, and its result will replace this message.
+```
+
+**The same job asked twice** — nothing new starts:
+```
+AetherionAgent · ⏳ Already reviewing BGV-32
+What happened   A review of BGV-32 started at 10:00 UTC is still running. Its result will appear
+                in that reply — nothing new was started.
+```
+
+**A review of a ticket that has not changed** since the last review: the last
+result is shown again, with "The ticket has not changed since the last review,
+so that review is shown again; no new review was run." No model call.
+
+**A build after a poor review** (below `ORCH_BUILD_MIN_READINESS`, default 3) of
+the unchanged ticket — nothing is created:
+```
+AetherionAgent · Build paused — the review scored BGV-32 2/5
+What happened   The last review of BGV-32 scored it 2/5, below the 3/5 needed to build, and the
+                ticket has not changed since. Nothing was created. Answer these in the
+                description (or attach them), then ask again — an edited ticket builds straight away:
+                - How is the employer contacted?
+                - What results can the officer mark?
+```
+After a review of 3/5 or more, the build runs and the review's open points
+appear under "Details I could not determine — please confirm" as
+"From the review: …". "Unchanged" means the summary, description and
+attachments are the same — the agent's own replies and labels do not count.
+
+If the "processing" reply cannot be posted at all, the job is **not started**
+(the administrators are emailed): work nobody is told about is worse than
+asking again.
+
+---
+
 ## Work breakdown created
 
 ```
@@ -442,3 +497,22 @@ work-breakdown agent's `LTW_NOTIFY_ON`. Both are set to
 The email: subject `[Aetherion] <ticket> — <headline>`; body with the headline,
 a link to the ticket, the created keys / questions / existing matches / problems,
 and the run id. Admin alerts: subject `[Aetherion] ALERT — <what failed>`.
+
+## GitHub → Planning agent (2026-10-03)
+
+A run with `{"github_poll": true}` — every minute, from Aetherion's Schedule or
+`scripts/run_local.sh --poll` on a laptop — reads the organization's pull
+requests (`ORCH_GITHUB_ORG`, read-only `GITHUB_TOKEN`) and gives the Planning
+agent (`ORCH_PLANNING_AGENT`, default `planning_agent`) its one input,
+`issue_text`, for:
+
+| On GitHub | Planning gets |
+|---|---|
+| A PR merged into `ORCH_GITHUB_BRANCH` (main) | "A pull request was merged into main in org/repo …" — title, link, author, branches, description, changed files, the whole conversation |
+| New comments on a PR not merged in this check | "New comments on a pull request (open) in org/repo …" — the PR, and only the comments not given before |
+
+- **Ignored:** PRs closed without merging, merges into other branches, bot comments, archived repos, repos outside `ORCH_GITHUB_REPOS` (when set).
+- **First sight of a repo:** watched from that moment; its history is not sent.
+- **Each once:** what was sent is remembered on the Jira project `ORCH_GITHUB_STATE_PROJECT` (project properties, invisible to users).
+- **Never lost:** an event is stored before it is handed out. A failed Planning run is retried at the next check, up to `ORCH_GITHUB_MAX_TRIES` (5), then the admins are emailed.
+- **The run's result** says how many repos were checked and what was sent or failed.

@@ -25,6 +25,10 @@ DEFAULT_CLASSIFIER_MODEL = "gpt-5.1"
 # attached to the issue, durable across restarts.
 ANSWERED_PROPERTY = "aetherion-answered-comments"
 
+# Where each ticket's orchestration state lives: the job running on it, and
+# the last review and build results (routing/orchestration.py).
+STATE_PROPERTY = "aetherion-orchestration"
+
 
 def trigger_keyword() -> str:
     return os.environ.get("ORCH_TRIGGER_KEYWORD", "").strip() or DEFAULT_TRIGGER_KEYWORD
@@ -134,3 +138,76 @@ def jira_credentials() -> tuple[str, str, str]:
     email = os.environ.get("JIRA_EMAIL", "").strip()
     token = os.environ.get("JIRA_API_TOKEN", "").strip()
     return base, email, token
+
+
+def build_min_readiness() -> int:
+    """A build after a review scored below this (1-5) is paused, not built.
+
+    3: a "needs major clarification" review (1-2) means the tickets would be
+    thin and someone would have to redo them. Only a review of the unchanged
+    ticket counts — edit the description and the build runs.
+    """
+    return env_int("ORCH_BUILD_MIN_READINESS", 3, minimum=0)
+
+
+def status_labels() -> bool:
+    """Show what the agent is doing on the board card, as one label at a time."""
+    return env_bool("ORCH_STATUS_LABELS", default=True)
+
+
+def queue_wait_minutes() -> int:
+    """How long a queued request waits for the job ahead of it on its ticket."""
+    return env_int("ORCH_QUEUE_WAIT_MINUTES", 10, minimum=1)
+
+
+# --- GitHub → Planning (2026-10-03) ---------------------------------------------
+
+# Where the router remembers how far it has read GitHub, and what it has
+# already passed to the Planning agent: a property on a Jira project, so no
+# new storage is needed. Invisible to users.
+GITHUB_STATE_PROPERTY = "aetherion-github-poll"
+DEFAULT_GITHUB_BRANCH = "main"
+DEFAULT_PLANNING_AGENT = "planning_agent"
+DEFAULT_PLANNING_TIMEOUT_MINUTES = 15
+DEFAULT_GITHUB_MAX_TRIES = 5
+
+
+def github_token() -> str:
+    """A read-only, fine-grained token for the organization."""
+    return os.environ.get("GITHUB_TOKEN", "").strip()
+
+
+def github_org() -> str:
+    return os.environ.get("ORCH_GITHUB_ORG", "").strip()
+
+
+def github_branch() -> str:
+    return os.environ.get("ORCH_GITHUB_BRANCH", "").strip() or DEFAULT_GITHUB_BRANCH
+
+
+def github_repos() -> tuple[str, ...]:
+    """Repos to watch, by name; empty means every repo of the organization."""
+    return tuple(r.lower() for r in env_list("ORCH_GITHUB_REPOS"))
+
+
+def github_state_project() -> str:
+    """The Jira project holding the memory; the first allowed project by default."""
+    chosen = os.environ.get("ORCH_GITHUB_STATE_PROJECT", "").strip().upper()
+    return chosen or next(iter(allowed_project_keys()), "")
+
+
+def planning_agent() -> str:
+    return os.environ.get("ORCH_PLANNING_AGENT", "").strip() or DEFAULT_PLANNING_AGENT
+
+
+def planning_task_queue() -> str:
+    """The Planning agent's queue; empty lets the platform's agent map decide."""
+    return os.environ.get("ORCH_TASK_QUEUE_PLANNING", "").strip()
+
+
+def planning_timeout_minutes() -> int:
+    return env_int("ORCH_PLANNING_TIMEOUT_MINUTES", DEFAULT_PLANNING_TIMEOUT_MINUTES, minimum=1)
+
+
+def github_max_tries() -> int:
+    return env_int("ORCH_GITHUB_MAX_TRIES", DEFAULT_GITHUB_MAX_TRIES, minimum=1)

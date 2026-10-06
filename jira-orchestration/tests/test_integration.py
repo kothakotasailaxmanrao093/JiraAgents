@@ -31,6 +31,7 @@ import pytest
 from agent.router_flow import run_router
 from shared.contract import AgentResult, Outcome
 from shared.keywords import AGENT_FOOTER, AGENT_SIGNATURE, mentions_trigger
+from tests.fake_tools import Tools
 
 CONTRACTS = Path(__file__).resolve().parents[2] / "integration" / "contracts"
 
@@ -46,36 +47,6 @@ ALL_CONTRACTS = sorted(p.stem for p in CONTRACTS.glob("*.json")) if CONTRACTS.ex
 
 
 # --- the harness -------------------------------------------------------------
-
-
-class Tools:
-    def __init__(self, **answers: Any) -> None:
-        self.answers = answers
-        self.calls: list[tuple[str, tuple]] = []
-
-    async def execute(self, name: str, *args: Any, **kwargs: Any) -> Any:
-        self.calls.append((name, args))
-        answer = self.answers.get(name)
-        return answer if answer is not None else {}
-
-    def count(self, name: str) -> int:
-        return [n for n, _ in self.calls].count(name)
-
-    def args(self, name: str) -> tuple:
-        for called, args in self.calls:
-            if called == name:
-                return args
-        raise AssertionError(f"{name} was never called")
-
-    def reply_text(self) -> str:
-        out: list[str] = []
-        for heading, body in self.args("post_reply")[1]:
-            out.append(str(heading))
-            if isinstance(body, list):
-                out.extend(str(x) for x in body)
-            else:
-                out.append(str(body))
-        return "\n".join(out)
 
 
 class Child:
@@ -313,8 +284,11 @@ async def test_the_children_never_stamp_a_label_themselves() -> None:
 def test_every_real_contract_survives_a_json_round_trip(name: str) -> None:
     """It crosses the agent boundary as JSON, so this is the real journey."""
     original = load(name)
-    revived = AgentResult.from_dict(json.loads(json.dumps(original)))
-    assert revived.to_dict() == original
+    revived = AgentResult.from_dict(json.loads(json.dumps(original))).to_dict()
+    # Every field the child sent survives; a field added to the contract since
+    # it was captured takes its default — how an older child is still read.
+    assert {key: revived[key] for key in original} == original
+    assert revived["proposed"] == original.get("proposed", [])
 
 
 def test_both_children_are_represented() -> None:

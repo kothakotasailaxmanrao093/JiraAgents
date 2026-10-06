@@ -1027,7 +1027,7 @@ wheels = [
 
 [[package]]
 name = "jira-orchestration"
-version = "0.1.24"
+version = "0.1.27"
 source = { editable = "." }
 dependencies = [
     { name = "aetherion-sdk" },

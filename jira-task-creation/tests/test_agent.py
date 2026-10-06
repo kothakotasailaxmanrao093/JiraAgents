@@ -34,6 +34,9 @@ TOOLS = {
     "read_jira_issue": tool_module.read_jira_issue,
     "notify_email": tool_module.notify_email,
     "report_to_issue": tool_module.report_to_issue,
+    # Asked before creating: tickets, or a PDF (GENERATE_LOCAL_PDF, off here).
+    "delivery_mode": tool_module.delivery_mode,
+    "generate_breakdown_pdf": tool_module.generate_breakdown_pdf,
 }
 
 # Gate 1 always runs, so every successful pipeline starts with it.
@@ -178,6 +181,7 @@ async def test_small_requirement_creates_a_story_and_subtasks(run_agent, fake_ji
         INSPECT,
         "validate_requirement",
         "generate_work_breakdown",
+        "delivery_mode",
         "create_jira_issues",
         "notify_email",
     ]
@@ -231,7 +235,8 @@ async def test_review_mode_returns_the_breakdown_without_touching_jira(
 
     assert result["status"] == ResultStatus.READY_FOR_JIRA.value
     assert result["epic"] is not None
-    assert calls == [INSPECT, "validate_requirement", "generate_work_breakdown"]
+    # delivery_mode: with GENERATE_LOCAL_PDF on, the PDF is emailed instead of a preview.
+    assert calls == [INSPECT, "validate_requirement", "generate_work_breakdown", "delivery_mode"]
     assert fake.writes == [], "review mode must not write to Jira"
 
 

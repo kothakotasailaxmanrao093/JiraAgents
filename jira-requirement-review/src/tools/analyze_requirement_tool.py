@@ -4,7 +4,9 @@ Routes the LLM call through the **Aetherion AI Gateway** (``agent_lib.gateway.ai
 The gateway holds the provider credentials centrally, so the agent does NOT need
 an ``OPENAI_API_KEY`` (or any provider key) of its own. The provider is derived
 from the configured model id; the gateway takes provider + model_name separately
-and supports a native ``system_prompt``.
+and supports a native ``system_prompt``. Run on a laptop (no gateway), the same
+request goes to OpenAI with the key the local start script exports
+(``shared.llm``); the published agent is unchanged.
 
 Degrades gracefully: on any gateway/parse failure it returns
 ``{"findings": [], "error": ...}`` rather than raising, so the agent reports
@@ -30,6 +32,7 @@ from review.known_questions import (
 from review.llm_response import extract_json
 from review.parser import parse_findings, parse_readiness
 from review.prompt import SYSTEM_PROMPT, build_user_message
+from shared import llm
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -58,15 +61,25 @@ async def analyze_requirement(
         known = listed_open_questions(documents)
         user_message = build_user_message(issue_key, issue_summary, documents, known, is_subtask)
 
-        reply = await ai_gateway.chat(
-            provider=provider,
-            model_name=model,
-            prompt=user_message,
-            system_prompt=SYSTEM_PROMPT,
-            temperature=0.0,
-            max_tokens=MAX_OUTPUT_TOKENS,
-        )
-        content = reply.get("content", "") if isinstance(reply, dict) else str(reply)
+        if llm.direct_openai():  # a laptop run: no gateway there
+            content = await llm.openai_chat(
+                provider=provider,
+                model=model,
+                prompt=user_message,
+                system_prompt=SYSTEM_PROMPT,
+                temperature=0.0,
+                max_tokens=MAX_OUTPUT_TOKENS,
+            )
+        else:
+            reply = await ai_gateway.chat(
+                provider=provider,
+                model_name=model,
+                prompt=user_message,
+                system_prompt=SYSTEM_PROMPT,
+                temperature=0.0,
+                max_tokens=MAX_OUTPUT_TOKENS,
+            )
+            content = reply.get("content", "") if isinstance(reply, dict) else str(reply)
         raw = extract_json(content)
     except Exception as e:
         logger.error("LLM analysis failed for %s: %s", issue_key, e, exc_info=True)

@@ -290,6 +290,30 @@ belongs on the ticket, where it can be read when someone looks.
 
 ---
 
+## GENERATE_LOCAL_PDF=true — a PDF by email, and nothing changed
+
+**On the ticket:**
+```
+AetherionAgent · Work breakdown emailed as a PDF — no Jira changes made
+What happened
+  PDF only — no Jira tickets were created or changed. The breakdown proposes
+  4 Stories and 8 Sub-tasks. If built, BGV-25 would become an Epic (it is a
+  Task now). The full breakdown — every ticket, its criteria and the sources
+  read — was emailed to kothakota.sailaxmanrao@calfus.com as
+  aetherion-breakdown-BGV-25-ebbd771f.pdf.
+Proposed — not created in Jira
+  - S1  Generate Monthly Invoices for Completed Checks — Sub-tasks: S1.1 …, S1.2 …
+Details I could not determine — please confirm
+What I read
+```
+
+**The email** — subject `[Work Breakdown] BGV-25 — breakdown PDF: Monthly client invoicing`:
+a yellow "No Jira tickets were created or changed" box, the summary, the proposed
+tickets, the questions to confirm, and the PDF attached. If it cannot be sent,
+the reply says so and nothing is created — asking again is safe.
+
+---
+
 ## Delegated mode — what it says, and to whom
 
 When the router invokes this agent (`mode="delegated"`), **it says nothing to

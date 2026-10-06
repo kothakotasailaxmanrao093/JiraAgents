@@ -202,3 +202,50 @@ def test_the_reviewer_is_told_the_target_is_a_subtask() -> None:
 
     message = build_user_message("BGV-32", "Email Invoice PDF", BGV32, [], True)
     assert "THE TARGET IS A SUB-TASK" in message
+
+
+async def test_on_a_laptop_the_review_asks_openai(monkeypatch) -> None:
+    """No gateway on a laptop: the same request goes to OpenAI (2026-10-03)."""
+    from shared import llm
+
+    human = [
+        {
+            "source_label": "Target BGV-12 (description)",
+            "kind": "requirement",
+            "text": "Verify the address of the candidate quickly.",
+        }
+    ]
+    answer = {
+        "findings": [
+            {
+                "finding_type": "Ambiguity",
+                "description": "'quickly' has no measurable target.",
+                "evidence_source": "Target BGV-12 (description)",
+                "confidence": "high",
+            }
+        ],
+        "overall_readiness": "not_ready",
+        "readiness_score": 1,
+        "executive_summary": "Too vague to start.",
+    }
+    asked: list[dict[str, Any]] = []
+
+    async def openai_chat(**request: Any) -> str:
+        asked.append(request)
+        return json.dumps(answer)
+
+    import agent_lib.gateway.ai as gateway
+
+    class _NoGateway:
+        async def chat(self, **_: Any) -> Any:
+            raise AssertionError("the gateway is not called on a laptop")
+
+    monkeypatch.setattr(gateway, "ai_gateway", _NoGateway())
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("AETHERION_LOCAL_RUN", "1")
+    monkeypatch.setattr(llm, "openai_chat", openai_chat)
+    fn = getattr(tool.analyze_requirement, "__wrapped__", tool.analyze_requirement)
+    out = await fn(human, "BGV-12", "Address check")
+    assert len(out["findings"]) == 1 and out["error"] is None
+    [request] = asked
+    assert request["system_prompt"] and request["temperature"] == 0.0

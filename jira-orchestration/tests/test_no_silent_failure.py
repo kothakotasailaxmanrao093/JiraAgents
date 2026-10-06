@@ -21,6 +21,7 @@ import pytest
 from agent.router_flow import run_router
 from routing.ingress import IgnoreReason
 from shared.contract import AgentResult, Outcome
+from tests.fake_tools import Tools
 from tools import tools
 
 PAYLOAD = {"issue_key": "BGV-50", "comment_id": "10900", "webhookEvent": "comment_created"}
@@ -45,19 +46,6 @@ def _raise(exc: Exception):
         raise exc
 
     return _fn
-
-
-class Tools:
-    def __init__(self, **answers: Any) -> None:
-        self.answers = answers
-        self.calls: list[str] = []
-
-    async def execute(self, name: str, *args: Any, **_kw: Any) -> Any:
-        self.calls.append(name)
-        answer = self.answers.get(name)
-        if callable(answer):
-            return answer(*args)
-        return answer if answer is not None else {}
 
 
 def _created() -> dict[str, Any]:
@@ -152,7 +140,7 @@ REPLYING_PATHS = [
 async def test_every_non_ignored_run_attempts_exactly_one_reply(name, answers, dispatch) -> None:
     fake = Tools(**{"post_reply": POSTED, **answers})
     result = await run_router(PAYLOAD, fake.execute, dispatch)
-    assert fake.calls.count("post_reply") == 1, f"{name}: {fake.calls}"
+    assert fake.names().count("post_reply") == 1, f"{name}: {fake.names()}"
     assert result["status"] != "ignored"
 
 
@@ -160,14 +148,14 @@ async def test_every_non_ignored_run_attempts_exactly_one_reply(name, answers, d
 async def test_every_ignored_reason_stays_silent(reason: IgnoreReason) -> None:
     fake = Tools(ingress_check={"outcome": "ignored", "ignored": reason.name, "run_id": "r1"})
     result = await run_router(PAYLOAD, fake.execute, _dispatch_ok)
-    assert fake.calls == ["ingress_check"]
+    assert fake.names() == ["ingress_check"]
     assert result["status"] == "ignored"
 
 
 async def test_a_post_that_fails_alerts_the_administrators() -> None:
     fake = Tools(ingress_check=_proceed(), post_reply=_raise(TimeoutError("jira timeout")))
     await run_router(PAYLOAD, fake.execute, _dispatch_ok)
-    assert "notify_admins" in fake.calls
+    assert "notify_admins" in fake.names()
 
 
 # --- the reply itself ------------------------------------------------------
@@ -201,7 +189,7 @@ async def test_an_unreadable_ticket_gets_the_error_reply() -> None:
     assert "403 Forbidden for BGV-50" in text
     assert ("Notification", "Emailed the administrators.") in blocks
     assert result["status"] == "failed"
-    assert fake.calls.index("notify_admins") < fake.calls.index("post_reply")
+    assert fake.names().index("notify_admins") < fake.names().index("post_reply")
 
 
 # --- ingress_check, against a fake Jira ------------------------------------------

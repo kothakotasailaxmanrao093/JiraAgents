@@ -80,6 +80,8 @@ LAYOUT: dict[Outcome, tuple[str, ...]] = {
     Outcome.NOT_A_REQUIREMENT: ("what_happened", "read", "missing"),
     Outcome.FAILED: ("what_happened", "read", "missing", "problems"),
     Outcome.ANSWERED: ("answer", "read", "missing"),
+    # GENERATE_LOCAL_PDF: the breakdown as a PDF, nothing created in Jira.
+    Outcome.PLANNED: ("what_happened", "proposed", "confirm", "duplicates", "read", "missing"),
 }
 
 # Used when a child returns an outcome this build does not know. Better a plain
@@ -175,6 +177,10 @@ def _section(name: str, result: AgentResult) -> Section | None:
     if name == "missing":
         items = _missing_lines(result.sources_missing)
         return Section("What was missing or unreadable", items) if items else None
+
+    if name == "proposed":
+        items = _lines(result.proposed)
+        return Section("Proposed — not created in Jira", items) if items else None
 
     if name == "problems":
         items = _lines(result.errors)

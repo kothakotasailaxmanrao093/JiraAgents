@@ -213,6 +213,9 @@ def _to_contract(result: dict[str, Any], *, run_id: str) -> AgentResult:
         summary=summary,
         findings=findings,
         questions=_questions_from(findings),
+        # A number, so the router can hold a build back after a poor review
+        # without reading it out of the summary's wording.
+        readiness_score=_score(readiness),
         # A review never creates anything. Stated as empty rather than omitted,
         # because the router renders "Created in Jira" from this list.
         created=[],
@@ -228,6 +231,14 @@ def _to_contract(result: dict[str, Any], *, run_id: str) -> AgentResult:
         email_kind=EmailKind.NONE,
         errors=[str(result["error"])] if result.get("error") else [],
     )
+
+
+def _score(readiness: Any) -> int:
+    """Readiness 1-5, or 0 when the review produced none."""
+    try:
+        return int((readiness or {}).get("score") or 0) if isinstance(readiness, dict) else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def _questions_from(findings: list[dict[str, Any]]) -> list[str]:

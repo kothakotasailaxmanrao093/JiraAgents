@@ -1,6 +1,6 @@
 [project]
 name = "jira-requirement-review"
-version = "2.2.18"
+version = "2.2.22"
 description = "Reviews a Jira requirement against its parent, sub-tasks, linked issues and attachments, and reports what is assumed, ambiguous or missing"
 authors = [{ name = "Kothakota Sai Laxman Rao", email = "kothakota.sailaxmanrao@calfus.com" }]
 readme = "README.md"
@@ -15,7 +15,7 @@ dependencies = [
     # which strawberry 0.287.3 imports via the platform's phoenix/agent_lib: the
     # worker pod crashed on start-up. Remove once the platform image supports 3.3.
     "graphql-core>=3.2,<3.3",
-    "aetherion-sdk @ https://sdk.sbox.aetherion.io/Darwin/aetherion_sdk-0.0.67-cp312-cp312-macosx_26_0_arm64.whl",
+    "aetherion-sdk @ https://sdk.sbox.aetherion.io/Darwin/aetherion_sdk-0.0.83-cp312-cp312-macosx_26_0_arm64.whl",
     "aiohttp==3.13.5",
     "pydantic>=2.7",
     "python-dotenv>=1.0.1",

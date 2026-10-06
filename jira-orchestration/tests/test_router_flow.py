@@ -17,47 +17,7 @@ import pytest
 
 from agent.router_flow import run_router
 from shared.contract import AgentResult, CreatedIssue, EmailKind, Outcome
-
-
-class Tools:
-    """Records every activity call and replays a queued answer per tool."""
-
-    def __init__(self, **answers: Any) -> None:
-        self.answers = answers
-        self.calls: list[tuple[str, tuple]] = []
-
-    async def execute(self, name: str, *args: Any, **kwargs: Any) -> Any:
-        self.calls.append((name, args))
-        answer = self.answers.get(name)
-        if callable(answer):
-            return answer(*args)
-        return answer if answer is not None else {}
-
-    def names(self) -> list[str]:
-        return [n for n, _ in self.calls]
-
-    def count(self, name: str) -> int:
-        return self.names().count(name)
-
-    def args(self, name: str) -> tuple:
-        for called, args in self.calls:
-            if called == name:
-                return args
-        raise AssertionError(f"{name} was never called")
-
-    @property
-    def posted_blocks(self) -> list[tuple[str, object]]:
-        return list(self.args("post_reply")[1])
-
-    def reply_text(self) -> str:
-        out: list[str] = []
-        for heading, body in self.posted_blocks:
-            out.append(str(heading))
-            if isinstance(body, list):
-                out.extend(str(x) for x in body)
-            else:
-                out.append(str(body))
-        return "\n".join(out)
+from tests.fake_tools import Tools
 
 
 class Children:

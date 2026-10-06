@@ -346,3 +346,19 @@ async def test_no_readiness_falls_back_to_what_was_read() -> None:
     run = _runner([_review_result(readiness=None)])
     out = await run_delegated({"issue_key": "ABC-1", "run_id": "r1"}, _execute, run_review=run)
     assert "source" in out["summary"]
+
+
+async def test_the_readiness_score_reaches_the_router_as_a_number() -> None:
+    """The router pauses a build after a poor review of an unchanged ticket, so
+    it needs the score itself, not a sentence to read it out of (2026-09-29)."""
+    data = await run_delegated(
+        {"issue_key": "ABC-1"}, _execute, run_review=_runner([_review_result()])
+    )
+    assert AgentResult.from_dict(data).readiness_score == 2
+
+
+async def test_no_readiness_is_zero_not_a_guess() -> None:
+    data = await run_delegated(
+        {"issue_key": "ABC-1"}, _execute, run_review=_runner([_review_result(readiness=None)])
+    )
+    assert AgentResult.from_dict(data).readiness_score == 0

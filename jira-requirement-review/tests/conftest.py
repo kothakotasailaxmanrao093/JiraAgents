@@ -22,3 +22,6 @@ def _env(monkeypatch):
     # module first leaks its .env values into every later test in the session.
     monkeypatch.delenv("LLM_MODEL_ID", raising=False)
     monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    # Exported by scripts/run_local.sh; would switch model calls to OpenAI.
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("AETHERION_LOCAL_RUN", raising=False)

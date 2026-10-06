@@ -1,7 +1,7 @@
 # Questions you will be asked — and one-line answers
 
-Read `CODE.md` first. Every answer here is true of the code on 28 Sep 2026 (router 0.1.24, Work Breakdown
-4.3.40, Review 2.2.18). Say the **A:** line; use the rest only if pressed.
+Read `CODE.md` first. Every answer here is true of the code on 29 Sep 2026 (router 0.1.26, Work Breakdown
+4.3.42, Review 2.2.19). Say the **A:** line; use the rest only if pressed.
 
 ---
 
@@ -38,9 +38,8 @@ A: The router records each answered comment id on the issue and ignores a redeli
 Follow-up: "How many layers?" → "Six. They're listed in CODE.md §6."
 
 **Q: Two people comment at the same second — what happens?**
-A: They run in parallel. There is no lock: `lock_key` existed but was never called, and we deleted it on 25 Sep 2026.
-Then: "The duplicate check usually stops the second of two identical builds, but it is not a guarantee. A per-issue lock is the fix if it matters."
-⚠ Trap: don't say "Temporal prevents it". Temporal only refuses a second workflow with the *same id*, and two comments have different ids.
+A: Usually they are sequenced: each ticket records the job running on it, so the same request again says "already reviewing" and a different one waits its turn and then runs on that ticket.
+⚠ Honest gap: "It is state in a Jira issue property, not a true lock — two comments in the very same second can both see the ticket as idle. Work Breakdown's own duplicate check stops a second identical build."
 
 **Q: Your classifier is a model. What happens when it's wrong?**
 A: A wrong BUILD needs 0.80 confidence and a wrong REVIEW 0.60; below that it asks "Which did you mean?", and saying `build` or `review` first skips the model entirely.
@@ -78,7 +77,7 @@ A: The AI model calls: up to 9 per build, each seconds long, plus Jira's API rat
 A: A per-issue lock, a prompt-injection test set, metering tokens per run, moving Review to SDK 0.0.83, and deleting the dead `heuristic_breakdown` code.
 
 **Q: How many model calls in one build?**
-A: Usually three (triage, breakdown, self-review), and at most nine when it regenerates, repairs and asks for duplicate second opinions; review is one call, and routing is zero with a verb or one without.
+A: Usually two (breakdown and self-review — a clear 3+-line requirement skips triage), at most about five; review is one, routing is zero with a verb or one without, and a review of an unchanged ticket is zero (reused).
 
 **Q: Why not one agent that does everything?**
 A: Build writes to Jira and review must not; separate agents keep the permissions and failure modes apart, and a fourth agent is a catalog entry.

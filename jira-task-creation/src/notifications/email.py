@@ -18,6 +18,7 @@ tickets because a mail server hiccuped would be worse than a missed message.
 from __future__ import annotations
 
 import asyncio
+import os
 from typing import Any
 
 from common_lib.utils.logger import setup_logger
@@ -27,7 +28,7 @@ from src.models.schemas import NotificationKind, NotificationResult
 
 # Delivery is shared — one sender for every agent (shared/mailer.py). The names
 # below are kept so callers and tests that patch ``_send_sync`` keep working.
-from src.shared.mailer import explain_failure, is_repeat, remember, smtp_settings
+from src.shared.mailer import Attachment, explain_failure, is_repeat, remember, smtp_settings
 from src.shared.mailer import forget_recent_sends as forget_recent_sends  # re-exported
 from src.shared.mailer import send_sync as _send_sync
 
@@ -45,6 +46,7 @@ _SUBJECTS = {
     NotificationKind.INVALID_REQUEST: "{key} — Not a work requirement",
     NotificationKind.FAILED: "{key} — Failed: the request could not be processed",
     NotificationKind.CREATED: "{key} — Items created",
+    NotificationKind.BREAKDOWN_PDF: "{key} — breakdown PDF",
 }
 
 
@@ -489,4 +491,121 @@ async def send(
 
     _remember_send(kind, issue_key, subject)
     logger.info(f"Notification sent to {len(to)} recipient(s): {subject}")
+    return NotificationResult(attempted=True, sent=True, kind=kind, recipients=to, subject=subject)
+
+
+# --------------------------------------------------------------------------
+# GENERATE_LOCAL_PDF: the work breakdown, sent as a PDF
+# --------------------------------------------------------------------------
+
+
+def _pdf_email(
+    *,
+    issue_key: str,
+    issue_summary: str,
+    ticket_url: str,
+    summary: str,
+    proposed: list[str],
+    questions: list[str],
+    filename: str,
+) -> tuple[str, str, str]:
+    """Subject, plain text and HTML for the breakdown email. Pure."""
+    from html import escape
+
+    subject = f"{SUBJECT_PREFIX} {issue_key} — breakdown PDF: {issue_summary}".strip()
+    lines = [
+        f"Work breakdown for {issue_key} — {issue_summary}",
+        f"Ticket: {ticket_url}",
+        "",
+        "No Jira tickets were created or changed. The full breakdown is attached as a PDF.",
+        "",
+        summary,
+        "",
+        "Proposed tickets (not created):",
+        *[f"  {line}" for line in proposed],
+    ]
+    if questions:
+        lines += ["", "Please confirm:", *[f"  - {q}" for q in questions]]
+    lines += ["", f"Attached: {filename}", "", "— AetherionAgent · automated email"]
+    text = "\n".join(lines)
+
+    items = "".join(f"<li>{escape(line)}</li>" for line in proposed)
+    asks = "".join(f"<li>{escape(q)}</li>" for q in questions)
+    style = "font-family:Arial,sans-serif;font-size:14px;color:#1f2328;max-width:720px"
+    html = f"""<div style="{style}">
+<h2 style="margin:0 0 4px">Work breakdown for {escape(issue_key)}</h2>
+<p style="margin:0 0 12px;color:#57606a">{escape(issue_summary)} ·
+<a href="{escape(ticket_url)}">open the ticket</a></p>
+<p style="padding:8px 12px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px">
+<b>No Jira tickets were created or changed.</b> The full breakdown is attached as a PDF.</p>
+<p>{escape(summary)}</p>
+<h3 style="margin:16px 0 4px">Proposed tickets (not created)</h3><ul>{items}</ul>
+{f'<h3 style="margin:16px 0 4px">Please confirm</h3><ul>{asks}</ul>' if asks else ''}
+<p style="color:#57606a">Attached: <b>{escape(filename)}</b></p>
+<p style="color:#8c959f;font-size:12px">— AetherionAgent · automated email</p></div>"""
+    return subject, text, html
+
+
+async def send_breakdown_pdf(
+    *,
+    issue_key: str,
+    issue_summary: str,
+    summary: str,
+    proposed: list[str],
+    questions: list[str],
+    filename: str,
+    data: bytes,
+) -> NotificationResult:
+    """Email the breakdown PDF to LTW_NOTIFY_EMAILS. Never raises.
+
+    Always sent — it is the result itself, not a notification about one, so
+    LTW_NOTIFY_ON does not apply. The same PDF (same file name, which carries
+    its content's hash) is not sent twice within the repeat window, so a
+    redelivered request does not email again.
+    """
+    kind = NotificationKind.BREAKDOWN_PDF
+    host, port, sender, password = smtp_settings()
+    to = recipients()
+    base_url = os.environ.get("JIRA_BASE_URL", "").strip().rstrip("/")
+    subject, text, html = _pdf_email(
+        issue_key=issue_key,
+        issue_summary=issue_summary,
+        ticket_url=_issue_line(base_url, issue_key),
+        summary=summary,
+        proposed=proposed,
+        questions=questions,
+        filename=filename,
+    )
+    if _is_repeat(kind, issue_key, filename):
+        logger.info(f"Breakdown PDF {filename} already emailed within the window; not resent")
+        return NotificationResult(
+            attempted=False, sent=True, kind=kind, recipients=to, subject=subject
+        )
+    if not (sender and password):
+        return NotificationResult(
+            kind=kind, subject=subject, error="GMAIL_SENDER or GMAIL_APP_PASSWORD is not set."
+        )
+    if not to:
+        return NotificationResult(kind=kind, subject=subject, error="LTW_NOTIFY_EMAILS is empty.")
+    try:
+        await asyncio.to_thread(
+            _send_sync,
+            host,
+            port,
+            sender,
+            password,
+            to,
+            subject,
+            text,
+            html=html,
+            attachments=(Attachment(filename=filename, data=data),),
+        )
+    except Exception as exc:  # noqa: BLE001 — reported, never raised
+        reason = explain_failure(exc)
+        logger.error(reason)
+        return NotificationResult(
+            attempted=True, kind=kind, recipients=to, subject=subject, error=reason
+        )
+    _remember_send(kind, issue_key, filename)
+    logger.info(f"Breakdown PDF {filename} emailed to {len(to)} recipient(s)")
     return NotificationResult(attempted=True, sent=True, kind=kind, recipients=to, subject=subject)

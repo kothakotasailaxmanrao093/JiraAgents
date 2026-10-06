@@ -63,7 +63,7 @@ AGENT_DISPLAY_NAME = "JiraTaskCreation"
 # It is kept in step by scripts/publish.py, which writes all three (pyproject,
 # metadata.json and this constant) together, and by
 # tests/test_version_agreement.py, which fails if they ever diverge.
-AGENT_VERSION = "4.3.40"
+AGENT_VERSION = "4.3.52"
 
 
 def agent_version() -> str:
@@ -84,6 +84,8 @@ _OUTCOME_MAP = {
     # "Ready but not written" happens when creation was switched off, or the
     # event carried no issue. Nothing was made and nothing failed.
     ResultStatus.READY_FOR_JIRA: Outcome.REVIEWED,
+    # GENERATE_LOCAL_PDF: the breakdown as an attached PDF; nothing created.
+    ResultStatus.PLANNED: Outcome.PLANNED,
 }
 
 _HEADLINE = {
@@ -95,6 +97,7 @@ _HEADLINE = {
     Outcome.FAILED: "Could not complete this request",
     # Replaced by "About <KEY>" in to_contract, which knows the key.
     Outcome.ANSWERED: "About this ticket",
+    Outcome.PLANNED: "Work breakdown ready as a PDF — no Jira changes made",
 }
 
 # What the suppressed email would have been -> the contract's kind.
@@ -156,7 +159,9 @@ def _still_open(result: dict[str, Any]) -> list[str]:
         for story in result.get("stories") or []
         for q in story.get("open_questions") or []
     ]
-    return questions + [f"Please check: {note}" for note in result.get("quality_notes") or []]
+    from_review = [f"From the review: {q}" for q in result.get("review_questions") or []]
+    notes = [f"Please check: {note}" for note in result.get("quality_notes") or []]
+    return list(dict.fromkeys(questions + from_review + notes))
 
 
 def _reused(result: dict[str, Any]) -> list[DuplicateRef]:
@@ -354,9 +359,10 @@ def to_contract(result: dict[str, Any], *, run_id: str, agent_version: str) -> A
         findings=[],
         questions=(
             _still_open(result)
-            if outcome is Outcome.CREATED
+            if outcome in (Outcome.CREATED, Outcome.PLANNED)
             else list(result.get("clarifying_questions") or [])
         ),
+        proposed=list(result.get("proposed") or []),
         duplicates=duplicates,
         sources_read=_sources_read(result),
         sources_missing=_sources_missing(result),

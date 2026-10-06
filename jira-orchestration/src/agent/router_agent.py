@@ -14,14 +14,14 @@ from typing import Any, Dict
 
 from aetherion_sdk import agent, agentExecutor, toolExecutor
 
-from agent.router_flow import run_health_check, run_router
+from agent.router_flow import run_github_poll, run_health_check, run_router
 
 logger = logging.getLogger(__name__)
 
 # Kept in step with pyproject.toml and metadata.json by scripts/publish.py, and
 # asserted by tests/test_version_agreement.py. A constant rather than a file
 # read because a workflow may not read files.
-AGENT_VERSION = "0.1.24"
+AGENT_VERSION = "0.1.27"
 
 
 async def _dispatch(agent_name: str, payload: dict[str, Any], **options: Any) -> Any:
@@ -50,6 +50,11 @@ async def JiraOrchestration(payload: Dict[str, Any]) -> dict:
         # branch rather than a separate @tool.
         logger.info("mode : health_check")
         return await run_health_check(_dispatch, toolExecutor.execute)
+
+    if payload.get("github_poll"):
+        # Every minute: new merges and PR comments on GitHub, given to Planning.
+        logger.info("mode : github_poll")
+        return await run_github_poll(toolExecutor.execute, _dispatch)
 
     logger.info(
         "mode : webhook | issue_key : %s | comment_id : %s",

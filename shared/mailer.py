@@ -48,6 +48,15 @@ class Delivery:
     suppressed_repeat: bool = False
 
 
+@dataclass(frozen=True)
+class Attachment:
+    """A file sent with an email — the work-breakdown PDF, for example."""
+
+    filename: str
+    data: bytes
+    mime_type: str = "application/pdf"
+
+
 def smtp_settings() -> tuple[str, int, str, str]:
     """Host, port and the sending account, from the environment."""
     host = os.environ.get("GMAIL_SMTP_HOST", "").strip() or DEFAULT_SMTP_HOST
@@ -108,14 +117,37 @@ def forget_recent_sends() -> None:
 
 
 def send_sync(
-    host: str, port: int, sender: str, password: str, to: list[str], subject: str, body: str
+    host: str,
+    port: int,
+    sender: str,
+    password: str,
+    to: list[str],
+    subject: str,
+    body: str,
+    *,
+    html: str = "",
+    attachments: tuple[Attachment, ...] = (),
 ) -> None:
-    """Blocking SMTP send. Called from a worker thread."""
+    """Blocking SMTP send. Called from a worker thread.
+
+    ``body`` is the plain-text version every client can show; ``html``, when
+    given, is the formatted one most clients show instead.
+    """
     message = EmailMessage()
     message["From"] = sender
     message["To"] = ", ".join(to)
     message["Subject"] = subject
     message.set_content(body)
+    if html:
+        message.add_alternative(html, subtype="html")
+    for item in attachments:
+        maintype, _, subtype = item.mime_type.partition("/")
+        message.add_attachment(
+            item.data,
+            maintype=maintype,
+            subtype=subtype or "octet-stream",
+            filename=item.filename,
+        )
 
     with smtplib.SMTP(host, port, timeout=DEFAULT_TIMEOUT) as server:
         server.ehlo()
@@ -170,6 +202,8 @@ async def deliver(
     *,
     repeat_key: tuple[str, ...] | None = None,
     repeat_window_seconds: float = 0.0,
+    html: str = "",
+    attachments: tuple[Attachment, ...] = (),
 ) -> Delivery:
     """Send one message. Never raises; the result says exactly what happened."""
     host, port, sender, password = smtp_settings()
@@ -187,7 +221,9 @@ async def deliver(
         return Delivery(subject=subject, error="Email not sent: no recipients are configured.")
 
     try:
-        await asyncio.to_thread(send_sync, host, port, sender, password, to, subject, body)
+        # Only when used, so every existing sender (and stand-in) is unchanged.
+        extra = {k: v for k, v in (("html", html), ("attachments", attachments)) if v}
+        await asyncio.to_thread(send_sync, host, port, sender, password, to, subject, body, **extra)
     except Exception as exc:  # noqa: BLE001 — a mail failure must not fail the run
         reason = explain_failure(exc)
         logger.error(reason)

@@ -15,18 +15,8 @@ from src.jira import api as jira
 from src.models.schemas import ResultStatus
 from src.tools import tools as tool_module
 
-TOOLS = {
-    "inspect_jira_context": tool_module.inspect_jira_context,
-    "validate_requirement": tool_module.validate_requirement,
-    "generate_work_breakdown": tool_module.generate_work_breakdown,
-    "create_jira_issues": tool_module.create_jira_issues,
-    # Webhook-era tools. These runs are manual-mode (no issue_key), so the
-    # notifier is unconfigured and the write-back is a no-op, but the agent
-    # still dispatches them by name.
-    "read_jira_issue": tool_module.read_jira_issue,
-    "notify_email": tool_module.notify_email,
-    "report_to_issue": tool_module.report_to_issue,
-}
+# One map of tool names, shared with test_agent.py so a new tool is added once.
+from tests.test_agent import TOOLS  # noqa: E402
 
 
 @pytest.fixture
