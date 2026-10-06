@@ -7,8 +7,8 @@
             {
                 "name": "issue_key",
                 "type": "str",
-                "required": true,
-                "description": "The Jira issue the comment was left on (e.g. ABC-123).",
+                "required": false,
+                "description": "The Jira issue the comment was left on (e.g. ABC-123). Leave empty for a GitHub check.",
                 "friendly_name": "Jira Issue Key"
             },
             {
@@ -24,6 +24,14 @@
                 "required": false,
                 "description": "The Jira event name, e.g. comment_created. Forms half of the idempotency key, so an edited comment counts as a new request.",
                 "friendly_name": "Webhook Event"
+            },
+            {
+                "name": "github_poll",
+                "type": "boolean",
+                "required": false,
+                "default": false,
+                "description": "Check GitHub now: new merges into the main branch and new PR comments go to the Planning agent. Schedule this every minute.",
+                "friendly_name": "GitHub check"
             }
         ]
     }

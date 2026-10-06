@@ -37,6 +37,7 @@ from routing import settings
 from routing.catalog import CATALOG
 from routing.ingress import IgnoreReason, IngressOutcome, idempotency_key, screen_comment
 from routing.orchestration import FINISHED_LABEL, RUNNING_LABEL, STATUS_LABELS
+from shared import llm
 from shared.adf import blocks_to_doc, comment_text
 from shared.mailer import Delivery, check_login, deliver
 
@@ -277,17 +278,26 @@ async def classify_intent(comment_body: str, issue_summary: str = "") -> dict[st
         # The AI Gateway client, exactly as the two child agents call it. The
         # previous `agent_lib.llm.llm_factory` path never reached the gateway —
         # every Layer 2 decision this router made fell through to "ask".
-        from agent_lib.gateway.ai import AiGatewayClient  # activity-side only
-
-        async with AiGatewayClient() as client:
-            reply = await client.chat(
+        if llm.direct_openai():  # a laptop run: no gateway there
+            text = await llm.openai_chat(
                 provider=settings.provider_for_model(model),
-                model_name=model,
+                model=model,
                 prompt=prompt,
                 temperature=0.0,
                 max_tokens=200,
             )
-        text = (reply or {}).get("content") or ""
+        else:
+            from agent_lib.gateway.ai import AiGatewayClient  # activity-side only
+
+            async with AiGatewayClient() as client:
+                reply = await client.chat(
+                    provider=settings.provider_for_model(model),
+                    model_name=model,
+                    prompt=prompt,
+                    temperature=0.0,
+                    max_tokens=200,
+                )
+            text = (reply or {}).get("content") or ""
         scores = _parse_scores(text)
         if not scores:
             logger.warning(f"Classifier returned no usable scores: {text[:200]}")

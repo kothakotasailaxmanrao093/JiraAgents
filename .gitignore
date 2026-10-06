@@ -13,3 +13,17 @@ dist/
 
 # Never commit a real environment file: it ships inside the deploy artifact.
 .env
+
+# The Planning agent is its own repo (github.com/suhaniimittal/planning-agent),
+# cloned here to work on side by side; never commit it into this one.
+planning-agent/
+
+# Local runs (scripts/run_local.sh): the OpenAI key and the workers' logs.
+.env.local
+.local-logs/
+# Planning documents saved by scripts/show_planning_inputs.py --save
+planning-tdds/
+# Downloadable copies of the agent documents
+docs-export/
+# The Coding agent is its own repo (github.com/suhaniimittal/coding-agent); never commit it here.
+coding-agent/

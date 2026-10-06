@@ -60,6 +60,7 @@ from src.prompts.templates import (
     story_prompt,
     triage_prompt,
 )
+from src.shared import llm
 
 logger = setup_logger(__name__)
 
@@ -173,19 +174,29 @@ async def _gateway_chat(prompt: str, model: str) -> str:
     # triage from breakdown from a retry in the log without widening _chat.
     purpose = prompt.strip().split("\n", 1)[0][:48].replace(" ", "_")
     with stage("llm", model=model, purpose=purpose, prompt_chars=len(prompt)) as fields:
-        async with AiGatewayClient() as client:
-            reply = await client.chat(
+        if llm.direct_openai():  # a laptop run: no gateway there
+            content = await llm.openai_chat(
                 provider=provider,
-                model_name=model,
+                model=model,
                 prompt=prompt,
                 system_prompt=SYSTEM_PROMPT,
                 temperature=0.2,
-                # Explicit, and large: with the gateway's default a Large breakdown
-                # (an Epic, a dozen Stories, their Sub-tasks) was cut off mid-JSON,
-                # failed to parse, and silently became a heuristic breakdown.
                 max_tokens=_max_tokens(),
             )
-        content = (reply or {}).get("content") or ""
+        else:
+            async with AiGatewayClient() as client:
+                reply = await client.chat(
+                    provider=provider,
+                    model_name=model,
+                    prompt=prompt,
+                    system_prompt=SYSTEM_PROMPT,
+                    temperature=0.2,
+                    # Explicit, and large: with the gateway's default a Large breakdown
+                    # (an Epic, a dozen Stories, their Sub-tasks) was cut off mid-JSON,
+                    # failed to parse, and silently became a heuristic breakdown.
+                    max_tokens=_max_tokens(),
+                )
+            content = (reply or {}).get("content") or ""
         fields["reply_chars"] = len(content)
     if not content.strip():
         raise DecompositionError("Model returned an empty response.")

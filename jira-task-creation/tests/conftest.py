@@ -26,6 +26,9 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear every LTW/Gmail/Jira override so defaults are what is tested."""
     for name in (
+        # Exported by scripts/run_local.sh; would switch model calls to OpenAI.
+        "OPENAI_API_KEY",
+        "AETHERION_LOCAL_RUN",
         "LTW_TRIGGER_KEYWORD",
         "LTW_PROCESSED_LABEL",
         "LTW_AWAITING_LABEL",

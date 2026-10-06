@@ -829,3 +829,88 @@ async def run_health_check(dispatch: Dispatch, execute: Execute) -> dict[str, An
         "agents": results,
         "smtp": {"ok": bool(smtp.get("ok")), "error": str(smtp.get("error") or "")},
     }
+
+
+# --- GitHub → Planning (2026-10-03) -----------------------------------------------
+
+_GITHUB_SCAN_TIMEOUT = timedelta(minutes=3)
+POLL_RUN_ID = "github-poll"
+
+
+async def run_github_poll(execute: Execute, dispatch: Dispatch) -> dict[str, Any]:
+    """One check of GitHub: every new merge into the main branch, and every new
+    batch of PR comments, goes to the Planning agent as its ``issue_text``.
+
+    Started every minute (Aetherion Schedule, or scripts/run_local.sh --poll):
+
+        {"github_poll": true}
+
+    An event is recorded as sent only after Planning reports success; a failed
+    run is retried at the next check, and the admins are told when the retries
+    run out. Never raises: the result says what happened.
+    """
+    scan = await _safe(execute, "github_scan", start_to_close_timeout=_GITHUB_SCAN_TIMEOUT)
+    if not scan.get("ok"):
+        return {"status": "github_poll", "error": scan.get("error") or "scan failed", "sent": 0}
+
+    results: list[dict[str, Any]] = []
+    for event in scan.get("events") or []:
+        ok, message = await _give_to_planning(dispatch, scan, event)
+        done = await _safe(
+            execute,
+            "github_event_done",
+            event["key"],
+            ok,
+            message,
+            start_to_close_timeout=_POST_TIMEOUT,
+        )
+        if done.get("gave_up"):
+            await _safe(
+                execute,
+                "notify_admins",
+                f"PR #{event['pr_number']} in {event['repo']} could not be given to Planning",
+                f"{event['kind']} — {event['pr_url']}\nLast error: {message}\n"
+                "It will not be retried automatically.",
+                POLL_RUN_ID,
+                start_to_close_timeout=_POST_TIMEOUT,
+            )
+        results.append({"event": event["key"], "ok": ok, "message": message})
+
+    return {
+        "status": "github_poll",
+        "repos": scan.get("repos", 0),
+        "sent": sum(1 for r in results if r["ok"]),
+        "failed": sum(1 for r in results if not r["ok"]),
+        "results": results,
+        "notes": scan.get("notes") or [],
+    }
+
+
+async def _give_to_planning(
+    dispatch: Dispatch, scan: dict[str, Any], event: dict[str, Any]
+) -> tuple[bool, str]:
+    """Start the Planning agent with the event as its input; (succeeded, message)."""
+    payload = {
+        "issue_text": event["issue_text"],
+        # Not read by Planning today; there for it to use.
+        "event": event["kind"],
+        "repo": event["repo"],
+        "pr_number": event["pr_number"],
+        "pr_url": event["pr_url"],
+        "issue_key": event.get("issue_key") or "",
+    }
+    options: dict[str, Any] = {
+        "workflow_id": event["workflow_id"],
+        "execution_timeout": timedelta(minutes=int(scan.get("timeout_minutes") or 15)),
+        "retry_policy": RetryPolicy(maximum_attempts=1),  # retried by the next check
+    }
+    if scan.get("planning_queue"):
+        options["task_queue"] = scan["planning_queue"]
+    try:
+        out = await dispatch(scan["planning_agent"], payload, **options)
+    except Exception as exc:  # noqa: BLE001 — recorded and retried, never raised
+        return False, f"{type(exc).__name__}: {str(exc)[:300]}"
+    out = out if isinstance(out, dict) else {}
+    if out.get("status") == "success":
+        return True, "plan generated"
+    return False, str(out.get("message") or out.get("error") or "Planning returned no plan")[:300]

@@ -242,3 +242,38 @@ async def test_a_deleted_ticket_never_blocks_new_work(fake_jira, jira_env) -> No
     ]
     kept = await tools._still_there(matches, "ABC")
     assert [m.existing_key for m in kept] == ["ABC-7"], "ABC-9 was deleted"
+
+
+# --- a laptop run: OpenAI instead of the gateway (2026-10-03) ---------------------
+
+
+async def test_on_a_laptop_the_breakdown_asks_openai(monkeypatch) -> None:
+    import sys
+    import types
+
+    from src.shared import llm
+
+    class NoGateway:
+        async def __aenter__(self):
+            raise AssertionError("the gateway is not called on a laptop")
+
+        async def __aexit__(self, *exc):
+            return False
+
+    module = types.ModuleType("agent_lib.gateway.ai")
+    module.AiGatewayClient = NoGateway
+    monkeypatch.setitem(sys.modules, "agent_lib.gateway.ai", module)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("AETHERION_LOCAL_RUN", "1")
+    asked: list[dict[str, Any]] = []
+
+    async def openai_chat(**request: Any) -> str:
+        asked.append(request)
+        return '{"ok": true}'
+
+    monkeypatch.setattr(llm, "openai_chat", openai_chat)
+    assert await decompose._gateway_chat("Decompose the requirement", "gpt-5.1") == '{"ok": true}'
+    [request] = asked
+    assert request["model"] == "gpt-5.1"
+    assert request["system_prompt"] == decompose.SYSTEM_PROMPT
+    assert request["max_tokens"] == decompose._max_tokens()

@@ -8,8 +8,8 @@ resolution-markers = [
 
 [[package]]
 name = "aetherion-sdk"
-version = "0.0.67"
-source = { url = "https://sdk.sbox.aetherion.io/Darwin/aetherion_sdk-0.0.67-cp312-cp312-macosx_26_0_arm64.whl" }
+version = "0.0.83"
+source = { url = "https://sdk.sbox.aetherion.io/Darwin/aetherion_sdk-0.0.83-cp312-cp312-macosx_26_0_arm64.whl" }
 dependencies = [
     { name = "arize-phoenix" },
     { name = "arize-phoenix-evals" },
@@ -52,7 +52,7 @@ dependencies = [
     { name = "xlrd" },
 ]
 wheels = [
-    { url = "https://sdk.sbox.aetherion.io/Darwin/aetherion_sdk-0.0.67-cp312-cp312-macosx_26_0_arm64.whl", hash = "sha256:29e3938c49f9980992b1cdf8847d92f9da1eac2f2e45e4ff8f576052915a0586" },
+    { url = "https://sdk.sbox.aetherion.io/Darwin/aetherion_sdk-0.0.83-cp312-cp312-macosx_26_0_arm64.whl", hash = "sha256:9c032b29fa795383a79998893b0a20ba865a2238dcf9ca6654177e31ddb9634e" },
 ]
 
 [package.metadata]
@@ -1085,7 +1085,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aetherion-sdk", url = "https://sdk.sbox.aetherion.io/Darwin/aetherion_sdk-0.0.67-cp312-cp312-macosx_26_0_arm64.whl" },
+    { name = "aetherion-sdk", url = "https://sdk.sbox.aetherion.io/Darwin/aetherion_sdk-0.0.83-cp312-cp312-macosx_26_0_arm64.whl" },
     { name = "aiohttp", specifier = "==3.13.5" },
     { name = "graphql-core", specifier = ">=3.2,<3.3" },
     { name = "pydantic", specifier = ">=2.7" },

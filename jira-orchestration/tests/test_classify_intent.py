@@ -104,3 +104,24 @@ def test_the_provider_is_inferred_from_the_model(model: str, provider: str, monk
 def test_an_explicit_provider_wins(monkeypatch) -> None:
     monkeypatch.setenv("ORCH_CLASSIFIER_PROVIDER", "bedrock")
     assert settings.provider_for_model("gpt-5.1") == "bedrock"
+
+
+async def test_on_a_laptop_the_classifier_asks_openai(monkeypatch, fake_gateway) -> None:
+    """No gateway on a laptop: the same question goes to OpenAI (2026-10-03)."""
+    from shared import llm
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("AETHERION_LOCAL_RUN", "1")
+    asked: list[dict[str, Any]] = []
+
+    async def openai_chat(**request: Any) -> str:
+        asked.append(request)
+        return '{"BUILD": 0.9, "REVIEW": 0.05, "QUESTION": 0.03, "CHATTER": 0.02}'
+
+    monkeypatch.setattr(llm, "openai_chat", openai_chat)
+    result = await tools.classify_intent("@Aetherion make the tickets", "Referee reminders")
+    assert result["scores"]["BUILD"] == 0.9
+    assert fake_gateway.calls == [], "the gateway is not called on a laptop"
+    [request] = asked
+    assert request["model"] == settings.classifier_model()
+    assert request["temperature"] == 0.0 and request["max_tokens"] == 200
