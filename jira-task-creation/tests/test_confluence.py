@@ -204,7 +204,7 @@ async def test_a_missing_title_lookup_names_the_page_it_wanted() -> None:
 async def test_a_long_page_is_truncated_and_says_that_it_was(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LTW_CONFLUENCE_MAX_CHARS", "500")
+    monkeypatch.setenv("TASK_CONFLUENCE_MAX_CHARS", "500")
     body = "<p>" + ("word " * 5000) + "</p>"
     async with client_returning(lambda r: httpx.Response(200, json=page_payload(body))) as c:
         page = await C.fetch_page(c, ref(f"{SITE}/wiki/spaces/FL/pages/131181/X"), SITE)
@@ -241,7 +241,7 @@ async def test_an_unreadable_page_is_reported_rather_than_passed_over() -> None:
 async def test_more_pages_than_the_cap_are_capped_and_said_out_loud(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LTW_CONFLUENCE_MAX_PAGES", "2")
+    monkeypatch.setenv("TASK_CONFLUENCE_MAX_PAGES", "2")
     text = " ".join(f"{SITE}/wiki/spaces/FL/pages/{i}/P" for i in range(1, 6))
     async with client_returning(lambda r: httpx.Response(200, json=page_payload())) as c:
         pages, notes = await C.fetch_linked_pages(c, [text], SITE)
@@ -253,7 +253,7 @@ async def test_more_pages_than_the_cap_are_capped_and_said_out_loud(
 async def test_nothing_is_fetched_when_the_feature_is_switched_off(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LTW_CONFLUENCE_ENABLED", "false")
+    monkeypatch.setenv("TASK_CONFLUENCE_ENABLED", "false")
 
     def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
         raise AssertionError("Confluence must not be called when disabled")
@@ -466,7 +466,7 @@ async def test_an_unsupported_page_attachment_is_never_downloaded() -> None:
 
 @pytest.mark.asyncio
 async def test_page_attachments_can_be_switched_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LTW_CONFLUENCE_READ_ATTACHMENTS", "false")
+    monkeypatch.setenv("TASK_CONFLUENCE_READ_ATTACHMENTS", "false")
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:

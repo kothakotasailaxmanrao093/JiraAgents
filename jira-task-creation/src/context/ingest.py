@@ -26,7 +26,12 @@ from src.models.schemas import SourceIssue
 
 logger = setup_logger(__name__)
 
-DEFAULT_MAX_CHARS = 24_000
+# A safety ceiling only (2026-10-06). Fitting the requirement to the model is
+# done afterwards by src/context/condense.py, which condenses instead of
+# dropping; this used to be the model budget (24,000) and dropped a whole
+# transcript to meet it. Now it stops only a pathological card (megabytes).
+DEFAULT_MAX_CHARS = 1_000_000
+CEILING_ENV = "TASK_ASSEMBLY_MAX_CHARS"
 
 # Lowest value first: this is the order sections are dropped in when the
 # assembled text does not fit. The description is never dropped.
@@ -45,13 +50,12 @@ _DROP_ORDER = (
 
 
 def max_context_chars() -> int:
-    raw = os.environ.get("LTW_CONTEXT_MAX_CHARS", "").strip()
+    """``TASK_ASSEMBLY_MAX_CHARS``: the most a card is assembled to (a ceiling)."""
+    raw = os.environ.get(CEILING_ENV, "").strip()
     try:
         value = int(raw) if raw else DEFAULT_MAX_CHARS
     except ValueError:
-        logger.warning(
-            f"LTW_CONTEXT_MAX_CHARS is not an integer ({raw!r}); using {DEFAULT_MAX_CHARS}"
-        )
+        logger.warning(f"{CEILING_ENV} is not an integer ({raw!r}); using {DEFAULT_MAX_CHARS}")
         value = DEFAULT_MAX_CHARS
     return max(1_000, value)
 
@@ -174,6 +178,38 @@ def requirement_core(text: str) -> str:
     if not kept:
         return text
     return "\n\n".join(f"## {block.strip()}" for block in kept)
+
+
+# Material the request points at — files, linked pages, what the discussion
+# ruled out. It feeds the breakdown, but it is not what the person asked.
+SUPPORTING_HEADINGS = (
+    HEADING_ATTACHMENTS,
+    HEADING_CONFLUENCE,
+    HEADING_EXCLUSIONS,
+    "Uploaded on the Aetherion form",
+)
+
+
+def stated_request(text: str) -> str:
+    """Only what the person asked: the requirement without anything around it.
+
+    Judging whether a request is a requirement, or whether it is too long, by
+    the request plus its attachments failed on KS-17185 (2026-10-06): an
+    18,000-character meeting transcript made the request "longer than the
+    supported 20000 characters" and the card was refused. The attachments are
+    supporting material and are dealt with by size elsewhere.
+    """
+    if "## " not in (text or ""):
+        return text
+    # Text before the first heading is a typed (manual) requirement: no heading.
+    lead, *blocks = re.split(r"(?m)^## ", text)
+    parts = [lead.strip()] if lead.strip() else []
+    parts += [
+        f"## {b.strip()}"
+        for b in blocks
+        if b.strip() and not b.startswith(CONTEXT_HEADINGS + SUPPORTING_HEADINGS)
+    ]
+    return "\n\n".join(parts) or text
 
 
 # --- where the stories should land -----------------------------------------

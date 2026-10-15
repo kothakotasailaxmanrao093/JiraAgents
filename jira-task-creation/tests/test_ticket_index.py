@@ -1,6 +1,6 @@
 """Duplicate detection sees every ticket, fast (2026-09-30).
 
-It read only the newest 300 (LTW_MAX_CONTEXT_ISSUES): in an 18,000-ticket
+It read only the newest 300 (TASK_MAX_CONTEXT_ISSUES): in an 18,000-ticket
 project 17,700 were never compared. The index holds the whole project in
 memory, asks Jira only what changed, and compares a title only with tickets
 that share a word with it — which must find exactly what comparing with every
@@ -171,7 +171,7 @@ async def test_the_first_build_reads_everything_and_later_ones_only_what_changed
 async def test_a_full_re_read_drops_deleted_tickets(monkeypatch) -> None:
     now = [1_000_000.0]
     monkeypatch.setattr(ticket_index.time, "time", lambda: now[0])
-    monkeypatch.setenv("LTW_INDEX_FULL_REFRESH_HOURS", "6")
+    monkeypatch.setenv("TASK_INDEX_FULL_REFRESH_HOURS", "6")
     fake = Jira([raw("BGV-1", "Send invoice"), raw("BGV-2", "Upload report")])
     await ticket_index.up_to_date(fake, "BGV", "")
 
@@ -192,6 +192,6 @@ async def test_jira_unreadable_falls_back_to_the_newest_tickets(monkeypatch, jir
 
 
 async def test_the_index_can_be_switched_off(monkeypatch, jira_env) -> None:
-    monkeypatch.setenv("LTW_DUPLICATE_INDEX", "false")
+    monkeypatch.setenv("TASK_DUPLICATE_INDEX", "false")
     newest = [ExistingIssue(key="BGV-9", summary="Send invoice", issue_type="Story")]
     assert await tools._every_ticket("BGV", ["Send invoice"], "", newest) == newest

@@ -35,18 +35,26 @@ DEFAULT_TRIGGER_KEYWORD = "Aetherion"
 # footer it appends must never come back as a fresh request.
 AGENT_SIGNATURE = "AetherionAgent"
 AGENT_FOOTER = f"— {AGENT_SIGNATURE} · automated reply"
+# How the system's own comments are told apart: every one has the name followed
+# by " · " (title and footer). Never the name alone — see is_agent_comment.
+_OWN_SIGNATURE = re.compile(rf"{AGENT_SIGNATURE}\s*·")
 
 
 def mentions_trigger(*texts: str, keyword: str = DEFAULT_TRIGGER_KEYWORD) -> bool:
-    """True when the trigger keyword appears in any of ``texts``.
+    """True when the agent is explicitly addressed: "@" + the keyword.
 
-    Whole-word and case-insensitive, so "aetherion" fires but "aetherionx"
-    does not — a substring match would trip on unrelated wording.
+    Only the mention counts (2026-10-06). The bare word used to: a colleague's
+    note "here is the report created by Aetherion Agent" (KS-17185) was taken
+    as a request and answered on a real team's ticket. Naming the agent is not
+    asking it — "@Aetherion build …" is.
+
+    Whole-word and case-insensitive: "@aetherion" fires, "@aetherionx" does
+    not, and an e-mail address ("bot@aetherion.io") is not a mention.
 
     ``keyword`` is passed in rather than read from the environment here, because
     each agent names its own override variable and this module must stay pure.
     """
-    pattern = re.compile(rf"(?<![\w]){re.escape(keyword)}(?![\w])", re.IGNORECASE)
+    pattern = re.compile(rf"(?<![\w])@{re.escape(keyword)}(?![\w])", re.IGNORECASE)
     return any(pattern.search(text or "") for text in texts)
 
 
@@ -56,5 +64,11 @@ def is_agent_comment(body: str) -> bool:
     Identity cannot answer this: an agent usually runs as the same Jira account
     as the people using it, so "who wrote it" is the same for both. The
     signature can, and it is a string no person would type by accident.
+
+    The signature is "AetherionAgent ·" — the name followed by the dot every
+    reply has in its title and footer — not the bare name (2026-10-15): the
+    organisation is called AetherionAgentDemo, and "@Aetherion code in
+    AetherionAgentDemo/bank-transfer-service" used to be skipped as the
+    system's own comment, with no reply at all.
     """
-    return AGENT_SIGNATURE in (body or "")
+    return _OWN_SIGNATURE.search(body or "") is not None

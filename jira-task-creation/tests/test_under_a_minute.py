@@ -34,7 +34,7 @@ LINES = [
 REQ = "- " + "\n- ".join(LINES)
 TITLES = ["Generate Monthly Invoices", "Send Invoice Reminders"]
 PLAN = {
-    "classification": "Medium",
+    "classification": "Large",
     "analysis": "Invoicing and reminders are two capabilities.",
     "epic": {
         "business_objective": "Bill clients every month.",
@@ -103,7 +103,7 @@ class Model:
 
 @pytest.fixture
 def model(monkeypatch) -> Model:
-    monkeypatch.setenv("LTW_PARALLEL_BREAKDOWN", "true")
+    monkeypatch.setenv("TASK_PARALLEL_BREAKDOWN", "true")
     fake = Model()
     monkeypatch.setattr(decompose, "_chat", fake.chat)
     return fake
@@ -122,7 +122,7 @@ async def test_a_plan_then_every_story_written_at_the_same_time(model) -> None:
 
 
 async def test_an_unusable_plan_falls_back_to_the_one_call_breakdown(monkeypatch) -> None:
-    monkeypatch.setenv("LTW_PARALLEL_BREAKDOWN", "true")
+    monkeypatch.setenv("TASK_PARALLEL_BREAKDOWN", "true")
     fake = Model(plan={"classification": "Medium", "stories": []})
     monkeypatch.setattr(decompose, "_chat", fake.chat)
     breakdown = await llm_breakdown(REQ, ProjectContext())
@@ -132,7 +132,7 @@ async def test_an_unusable_plan_falls_back_to_the_one_call_breakdown(monkeypatch
 
 async def test_a_plan_missing_a_line_is_not_accepted(monkeypatch) -> None:
     """Accuracy first: a line no Story delivers sends it back to the one call."""
-    monkeypatch.setenv("LTW_PARALLEL_BREAKDOWN", "true")
+    monkeypatch.setenv("TASK_PARALLEL_BREAKDOWN", "true")
     gap = {**PLAN, "coverage": {k: v for k, v in PLAN["coverage"].items() if k != "6"}}
     fake = Model(plan=gap)
     monkeypatch.setattr(decompose, "_chat", fake.chat)
@@ -153,7 +153,7 @@ async def test_a_short_requirement_keeps_the_single_call(model) -> None:
 
 
 async def test_the_fast_model_answers_only_triage_and_relatedness(monkeypatch) -> None:
-    monkeypatch.setenv("LTW_LLM_FAST_MODEL", "gpt-4o-mini")
+    monkeypatch.setenv("TASK_LLM_FAST_MODEL", "gpt-4o-mini")
     used: list[tuple[str, str]] = []
 
     async def gateway(prompt: str, model: str) -> str:
@@ -169,7 +169,7 @@ async def test_the_fast_model_answers_only_triage_and_relatedness(monkeypatch) -
 
 
 async def test_a_failing_fast_model_hands_over_to_the_main_one(monkeypatch) -> None:
-    monkeypatch.setenv("LTW_LLM_FAST_MODEL", "no-such-model")
+    monkeypatch.setenv("TASK_LLM_FAST_MODEL", "no-such-model")
     used: list[str] = []
 
     async def gateway(prompt: str, model: str) -> str:

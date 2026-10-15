@@ -49,7 +49,8 @@ def _not_configured() -> str:
         name
         for name, value in (
             ("GITHUB_TOKEN", settings.github_token()),
-            ("ORCH_GITHUB_ORG", settings.github_org()),
+            # An organization to watch, or the repositories Planning designs against.
+            ("ORCH_GITHUB_ORG", settings.github_org() or settings.planning_repos()),
             ("ORCH_GITHUB_STATE_PROJECT", settings.github_state_project()),
         )
         if not value
@@ -103,13 +104,23 @@ async def _pages(client: httpx.AsyncClient, url: str, params: dict[str, Any]) ->
 
 
 async def _org_repos(client: httpx.AsyncClient) -> list[str]:
-    repos = await _pages(client, f"/orgs/{settings.github_org()}/repos", {"type": "all"})
-    wanted = settings.github_repos()
-    return sorted(
-        r["full_name"]
-        for r in repos
-        if not r.get("archived") and (not wanted or r["name"].lower() in wanted)
-    )
+    """The organization's repositories, and every one Planning designs against.
+
+    Planning's own repositories may live outside the organization (a personal
+    account); a merge into any of them must still refresh the graph.
+    """
+    found: set[str] = set()
+    if settings.github_org():
+        repos = await _pages(client, f"/orgs/{settings.github_org()}/repos", {"type": "all"})
+        wanted = settings.github_repos()
+        found = {
+            r["full_name"]
+            for r in repos
+            if not r.get("archived") and (not wanted or r["name"].lower() in wanted)
+        }
+    known = {f.lower() for f in found}
+    found |= {s for s in gh.repo_slugs(settings.planning_repos()) if s.lower() not in known}
+    return sorted(found)
 
 
 async def _comments(
@@ -197,34 +208,150 @@ async def github_scan() -> dict[str, Any]:
                 except httpx.HTTPError as exc:
                     notes.append(f"{repo}: not read this time ({exc})")  # cursor stays put
                     continue
-                for event in found:
-                    if event.key not in pending:
-                        event_dict = {**event.as_dict(), "workflow_id": _workflow_id(event.key)}
-                        await _put(jira, pending_property(event.key), event_dict)
-                        pending[event.key] = 0
+                await _store(jira, found, pending)
 
             memory["sent"] = sent
-            memory["pending"] = pending
-            await _put(jira, settings.GITHUB_STATE_PROPERTY, memory)
-            events = []
-            for key, tries in pending.items():
-                stored = await _get(jira, pending_property(key))
-                if stored:
-                    events.append({**stored, "tries": tries})
+            events = await _save_and_list(jira, memory, pending)
     except (httpx.HTTPError, ValueError) as exc:
         logger.error(f"GitHub scan failed: {exc}", exc_info=True)
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "events": []}
 
     logger.info(f"GitHub scan: {len(repos)} repo(s), {len(events)} event(s) to send")
+    return _scan_result(events, len(repos), notes)
+
+
+async def _store(jira: httpx.AsyncClient, found: list[gh.Event], pending: dict[str, int]) -> None:
+    """Each new event saved as waiting before it is handed out, so none is lost."""
+    for event in found:
+        if event.key not in pending:
+            event_dict = {**event.as_dict(), "workflow_id": _workflow_id(event.key)}
+            await _put(jira, pending_property(event.key), event_dict)
+            pending[event.key] = 0
+
+
+async def _save_and_list(
+    jira: httpx.AsyncClient, memory: dict[str, Any], pending: dict[str, int]
+) -> list[dict[str, Any]]:
+    """Save the memory; every waiting event — new ones and retries — to send now."""
+    memory["pending"] = pending
+    await _put(jira, settings.GITHUB_STATE_PROPERTY, memory)
+    events = []
+    for key, tries in pending.items():
+        stored = await _get(jira, pending_property(key))
+        if stored:
+            events.append({**stored, "tries": tries})
+    return events
+
+
+def _scan_result(events: list[dict[str, Any]], repos: int, notes: list[str]) -> dict[str, Any]:
     return {
         "ok": True,
         "events": events,
-        "repos": len(repos),
+        "repos": repos,
         "notes": notes,
         "planning_agent": settings.planning_agent(),
         "planning_queue": settings.planning_task_queue(),
+        # Which service each repository is, for Planning's graph.
+        "repos_text": settings.planning_repos(),
         "timeout_minutes": settings.planning_timeout_minutes(),
     }
+
+
+# A pushed comment's kind -> where GitHub keeps that one comment.
+_COMMENT_URLS = {
+    "issue": "/repos/{repo}/issues/comments/{id}",
+    "line": "/repos/{repo}/pulls/comments/{id}",
+    "review": "/repos/{repo}/pulls/{number}/reviews/{id}",
+}
+_COMMENT_KINDS = {
+    "issue_comment": "issue",
+    "pull_request_review_comment": "line",
+    "pull_request_review": "review",
+}
+
+
+async def _pushed_events(
+    client: httpx.AsyncClient, fields: dict[str, Any], sent: dict[str, str]
+) -> tuple[list[gh.Event], str]:
+    """(the events one pushed GitHub webhook stands for, or why there are none).
+
+    The webhook only says what happened; the pull request, its files and its
+    comments are read from GitHub, exactly as a scan reads them."""
+    repo = str(fields.get("github_repo") or "")
+    kind = str(fields.get("github_event") or "")
+    action = str(fields.get("github_action") or "")
+    number = int(fields.get("pr_number") or 0)
+    if not repo or not number:
+        return [], "not about a pull request"
+    watched = {r.lower() for r in await _org_repos(client)}
+    if repo.lower() not in watched:
+        return [], f"{repo} is not a watched repository"
+
+    resp = await client.get(f"/repos/{repo}/pulls/{number}")
+    resp.raise_for_status()
+    pr = resp.json()
+    projects = settings.allowed_project_keys()
+
+    if kind == "pull_request":
+        branch = settings.github_branch()
+        if action != "closed" or not pr.get("merged_at"):
+            return [], f"pull request {action or 'event'} is not a merge"
+        if (pr.get("base") or {}).get("ref") != branch:
+            return [], f"merged into {(pr.get('base') or {}).get('ref')}, not {branch}"
+        if gh.merge_key(repo, pr) in sent:
+            return [], "this merge was already sent"
+        files = await _pages(client, f"/repos/{repo}/pulls/{number}/files", {})
+        comments = await _comments(client, repo, number, None)
+        return [gh.merged_event(repo, pr, files, comments, projects)], ""
+
+    comment_kind = _COMMENT_KINDS.get(kind)
+    comment_id = str(fields.get("github_comment_id") or "")
+    if comment_kind is None or not comment_id:
+        return [], f"{kind or 'an event'} is not handled"
+    if action not in ("created", "submitted"):
+        return [], f"a comment {action} is not new"
+    url = _COMMENT_URLS[comment_kind].format(repo=repo, id=comment_id, number=number)
+    resp = await client.get(url)
+    resp.raise_for_status()
+    raw = resp.json()
+    found = gh.comments_from(
+        [raw] if comment_kind == "issue" else [],
+        [raw] if comment_kind == "line" else [],
+        [raw] if comment_kind == "review" else [],
+    )
+    new = [c for c in found if gh.comment_key(repo, number, c) not in sent]
+    if not new:
+        return [], "a bot's, empty or already sent comment"
+    return [gh.comments_event(repo, pr, new, projects)], ""
+
+
+@tool(name="github_event")
+async def github_event(fields: dict[str, Any]) -> dict[str, Any]:
+    """One GitHub webhook event, pushed as it happened (2026-10-14): the same
+    result as github_scan — its events, plus any still waiting for a retry —
+    so the router sends both the same way. ``fields`` are the webhook's flat
+    ones: github_event, github_action, github_repo, pr_number, github_comment_id."""
+    problem = _not_configured()
+    if problem:
+        return {"ok": False, "error": problem, "events": []}
+    now = datetime.now(UTC)
+    try:
+        async with _client() as jira, _github() as client:
+            memory = await _get(jira, settings.GITHUB_STATE_PROPERTY)
+            sent = gh.prune(memory.get("sent") or {}, now)
+            pending: dict[str, int] = memory.get("pending") or {}
+            found, skipped = await _pushed_events(client, fields, sent)
+            await _store(jira, found, pending)
+            memory["sent"] = sent
+            events = await _save_and_list(jira, memory, pending)
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.error(f"GitHub event failed: {exc}", exc_info=True)
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "events": []}
+
+    logger.info(f"GitHub event: {len(found)} new, {len(events)} to send; {skipped or 'taken'}")
+    result = _scan_result(events, 1, [skipped] if skipped else [])
+    result["skipped"] = skipped
+    return result
 
 
 def _workflow_id(key: str) -> str:

@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -24,9 +25,13 @@ from aetherion_sdk import tool
 from common_lib.utils.logger import setup_logger
 from pydantic import ValidationError
 
+from src.classification import plan_cache
 from src.classification.decompose import (
+    GENERATOR_LLM,
     DecompositionError,
+    _llm_settings,
     build_breakdown,
+    condense_chat,
     explain_issue,
     llm_related,
     llm_same_work,
@@ -40,6 +45,7 @@ from src.config.settings import env_bool
 from src.confluence import client as confluence_mod
 from src.context import attachments as attachments_mod
 from src.context import uploads as uploads_mod
+from src.context.condense import budget_chars, fit_requirement
 from src.context.ingest import (
     assemble_requirement,
     describe_issue,
@@ -54,11 +60,14 @@ from src.context.ingest import (
     strip_trigger_mentions,
 )
 from src.document import breakdown_pdf as pdf
+from src.document.kept import keep_document
+from src.document.local_copy import save_local
 from src.jira import api as jira
 from src.jira import root as root_mod
 from src.jira import ticket_index
 from src.models.schemas import (
     AttachmentText,
+    Classification,
     CommentInfo,
     ConfluencePage,
     DuplicateMatch,
@@ -77,6 +86,7 @@ from src.models.schemas import (
 )
 from src.notifications import email as notifier
 from src.observability.timing import stage
+from src.shared import llm
 
 logger = setup_logger(__name__)
 
@@ -101,10 +111,15 @@ def _context_from(payload: dict[str, Any] | None) -> ProjectContext:
             for i in data.get("existing_issues") or []
             if not own or str(i.get("key") or "").upper() != own
         ]
-        return ProjectContext.from_jira(
+        context = ProjectContext.from_jira(
             project,
             existing,
             name_override=normalise(data.get("project_name")),
+        )
+        return replace(
+            context,
+            card_key=normalise(data.get("card_key")).upper(),
+            card_type=normalise(data.get("card_type")),
         )
     overrides = {
         k: normalise(v)
@@ -213,7 +228,7 @@ async def _inspect_jira_context(
         return _context_failure(
             f"Project '{key}' is not on this deployment's allowed list "
             f"({', '.join(allowed)}). No Jira issues were created. Ask an "
-            f"administrator to add it to LTW_ALLOWED_PROJECT_KEYS."
+            f"administrator to add it to TASK_ALLOWED_PROJECT_KEYS."
         )
 
     notes: list[str] = []
@@ -541,7 +556,7 @@ async def _validate_requirement(
 
     try:
         llm_verdict, generator = await triage(request, context)
-    except Exception as exc:  # only reachable when LTW_REQUIRE_LLM is set
+    except Exception as exc:  # only reachable when TASK_REQUIRE_LLM is set
         logger.error(f"Triage failed and the LLM is marked required: {exc}", exc_info=True)
         return {
             # A system failure, not a verdict on the request. VALIDATION_ERROR
@@ -708,8 +723,37 @@ async def _generate_work_breakdown(
             "error": "No requirement text supplied to generate_work_breakdown.",
         }
 
+    # Same input, same plan: an identical requirement (files included), project
+    # and model get the plan already written, with no model call (plan_cache).
+    plan_key = plan_cache.fingerprint(
+        text,
+        project_key=context.jira_project_key,
+        project_name=context.name,
+        model=_llm_settings()[1],
+        card=f"{context.card_key}:{context.card_type}",
+    )
+    kept = plan_cache.get(plan_key)
     try:
-        breakdown, generator = await build_breakdown(text, context)
+        if kept:
+            with allow_source_files_from(text):
+                breakdown = WorkBreakdown.model_validate(kept["breakdown"])
+            breakdown._quality_notes = list(kept.get("quality_notes") or [])
+            breakdown._coverage = dict(kept.get("coverage") or {})
+            generator = str(kept.get("generator") or GENERATOR_LLM)
+            logger.info(f"Plan reused: same input as a run in the last hours ({plan_key[:12]})")
+        else:
+            breakdown, generator = await build_breakdown(text, context)
+            if generator == GENERATOR_LLM:
+                plan_cache.put(
+                    plan_key,
+                    breakdown.model_dump(mode="json"),
+                    generator,
+                    quality_notes=list(getattr(breakdown, "_quality_notes", []) or []),
+                    coverage={
+                        str(k): str(v)
+                        for k, v in (getattr(breakdown, "_coverage", {}) or {}).items()
+                    },
+                )
     except (DecompositionError, ValidationError) as exc:
         logger.error(f"Decomposition failed: {exc}")
         return {
@@ -801,6 +845,7 @@ async def _generate_work_breakdown(
         "classification": breakdown.classification.value,
         "counts": counts,
         "generator": generator,
+        "plan_reused": bool(kept),
         # What the self-review gate could not fix in its one regeneration.
         "quality_notes": list(getattr(breakdown, "_quality_notes", []) or []),
         # Requirement line -> the ticket that delivers it (for the PDF).
@@ -863,21 +908,16 @@ _ARTICLE = {"epic": "an", "story": "a", "task": "a", "bug": "a"}
 
 
 def _root_summary(change: RootChange, plan: root_mod.RootPlan, result: JiraResult) -> str:
-    """What happened to the root and under it, in the reply's words."""
+    """What was built under the card, in the reply's words. The card is unchanged."""
     made = set(result.created_keys)
     stories = [r for r in result.stories if r.key in made]
     subtasks = [r for r in result.subtasks if r.key in made]
     reused = len(result.reused_keys)
 
-    changed = change.type_before.lower() != change.type_after.lower()
-    what = f"{_ARTICLE[plan.role]} {change.type_after}"
-    if change.priority:
-        what += f" with priority {change.priority}"
+    article = _ARTICLE.get(change.type_after.lower(), "a")
     text = (
-        f"{change.key} is now {what} (it was {_ARTICLE.get(change.type_before.lower(), 'a')} "
-        f"{change.type_before}), because {plan.reason}."
-        if changed
-        else f"{change.key} stays {what}, because {plan.reason}."
+        f"{change.key} stays {article} {change.type_after}; its summary and description "
+        f"were not changed."
     )
     if stories or subtasks:
         parts = []
@@ -886,20 +926,12 @@ def _root_summary(change: RootChange, plan: root_mod.RootPlan, result: JiraResul
         if subtasks:
             parts.append(f"{len(subtasks)} Sub-task{'' if len(subtasks) == 1 else 's'}")
         text += f" Created under it: {' and '.join(parts)}."
-    elif plan.role == root_mod.BUG:
-        text += " No child tickets were needed."
-    elif plan.role == root_mod.TASK and not plan.create_subtasks:
+    elif not (plan.create_stories or plan.create_subtasks):
         text += " It is one step, so no Sub-tasks were needed."
     if reused:
         text += f" {reused} ticket(s) were already under it and were reused, not created again."
     if plan.role == root_mod.EPIC:
         text += " No separate Epic was created."
-    if change.summary_after != change.summary_before:
-        text += f' Its summary is now "{change.summary_after}".'
-    text += (
-        " Its original summary and description are kept under "
-        f'"{root_mod.ORIGINAL_HEADING}" at the end of its description.'
-    )
     return text
 
 
@@ -914,25 +946,21 @@ async def _build_on_root(
     available: list[str],
     types: dict[str, str],
 ) -> dict[str, Any]:
-    """Make ``root_key`` the top of the hierarchy and build under it.
+    """Build under ``root_key`` — the card itself, kept exactly as it is.
 
-    Order: every check first (nothing written if one fails), then the type
-    change (nothing else written if Jira refuses it), then the children, then
-    the summary, description and labels — last, so a run that stops part-way
-    leaves the person's description as it was, and asking again continues.
+    2026-10-07 (owner decision): the card's type decides what goes under it
+    (:func:`src.jira.root.plan_root`), and its type, summary and description
+    are never changed. Every check runs before the first write.
     """
     try:
         root = await root_mod.read_root(client, root_key)
-        allowed_to_edit = await root_mod.can_edit(client, project_key)
     except httpx.HTTPError as exc:
         return _config_failure(
-            f"{root_key} could not be read before changing it: {exc}. Nothing was changed.",
-            key_label,
+            f"{root_key} could not be read: {exc}. Nothing was created.", key_label
         )
 
-    plan = root_mod.plan_root(model, root["type"], request)
-    names = root_mod.type_names(available, types)
-    reason = root_mod.refusal(plan, root, names)
+    plan = root_mod.plan_root(model, root["type"])
+    reason = root_mod.refusal(plan, root, root_mod.type_names(available, types))
     if reason:
         return _config_failure(reason, key_label)
     needed = ([types["story"]] if plan.create_stories else []) + (
@@ -942,37 +970,18 @@ async def _build_on_root(
     if missing:
         return _config_failure(
             f"Jira project '{project_key}' does not offer the issue type(s) "
-            f"{', '.join(missing)}. {root_key} was not changed.",
-            key_label,
-        )
-    if not allowed_to_edit:
-        return _config_failure(
-            f"This account may not edit issues in {project_key}, so {root_key} was not "
-            f"changed and nothing was created.",
+            f"{', '.join(missing)}. Nothing was created under {root_key}.",
             key_label,
         )
 
-    target = names[plan.role]
     change = RootChange(
         key=root_key,
         url=f"{base_url.rstrip('/')}/browse/{root_key}",
         type_before=root["type"],
-        type_after=target,
+        type_after=root["type"],
         summary_before=root["summary"],
         summary_after=root["summary"],
     )
-    if root["type"].lower() != target.lower():
-        try:
-            await root_mod.change_type(client, root_key, target)
-        except httpx.HTTPStatusError as exc:
-            return _config_failure(
-                f"Jira refused to change {root_key} from {root['type']} to {target}: "
-                f"{jira._http_error_text(exc)}. Nothing was changed. Change its type by "
-                f"hand (••• → Change type → {target}) and ask again.",
-                key_label,
-            )
-        logger.info(f"{root_key}: {root['type']} -> {target} ({plan.reason})")
-
     result = await jira.build_under_root(
         client,
         base_url,
@@ -987,34 +996,11 @@ async def _build_on_root(
     result.root = change
     if result.status is not ResultStatus.JIRA_CREATED:
         result.failure_reason = (
-            f"{root_key} is now {_ARTICLE[plan.role]} {target}, but building under it "
-            f"stopped: {result.failure_reason} Asking again continues from there."
+            f"Building under {root_key} stopped: {result.failure_reason} "
+            f"Asking again continues from there."
         )
         return result.model_dump(mode="json")
-
-    summary_after = root_mod.new_summary(model, plan, root["summary"])
-    try:
-        change.notes = await root_mod.rewrite(
-            client,
-            root_key,
-            summary=summary_after,
-            description=root_mod.root_description(
-                model, plan, root["description"], root["summary"]
-            ),
-            labels=[key_label, jira.processed_label()],
-            priority=plan.priority,
-        )
-    except httpx.HTTPError as exc:
-        result.status = ResultStatus.JIRA_CREATION_FAILED
-        result.failed_issue = f"Summary and description of {root_key}"
-        result.failure_reason = (
-            f"The tickets were created, but {root_key}'s summary and description could "
-            f"not be updated: {exc}. Asking again finishes it without creating anything twice."
-        )
-        return result.model_dump(mode="json")
-    change.summary_after = summary_after
-    change.priority = plan.priority if not change.notes else ""
-    result.summary = _root_summary(change, plan, result) + "".join(f" {n}." for n in change.notes)
+    result.summary = _root_summary(change, plan, result)
     logger.info(result.summary)
     return result.model_dump(mode="json")
 
@@ -1053,7 +1039,7 @@ async def create_jira_issues(
         project=normalise(project_key).upper() or "-",
         root=normalise(root_key).upper() or "-",
     ):
-        return await _create_jira_issues(
+        result = await _create_jira_issues(
             breakdown,
             requirement,
             project_key,
@@ -1067,6 +1053,56 @@ async def create_jira_issues(
             requested_by,
             available_types,
         )
+    saved_to = _keep_created_copy(
+        breakdown, requirement, result, project_key, root_key or source_key
+    )
+    if saved_to:
+        result = {**result, "saved_to": saved_to}
+    return result
+
+
+def _keep_created_copy(
+    breakdown: dict[str, Any] | None,
+    requirement: str | None,
+    result: dict[str, Any],
+    project_key: str | None,
+    issue_key: str | None,
+) -> str:
+    """On a laptop run, a "Created in Jira" PDF of what was just created.
+
+    The same document a PDF run emails, with the real keys, kept in
+    docs-export. Drawn from the breakdown already written: no model call, no
+    tokens. Anywhere else, or if anything goes wrong, nothing happens.
+    """
+    if os.environ.get(llm.LOCAL_RUN_FLAG) != "1":
+        return ""
+    if result.get("status") != ResultStatus.JIRA_CREATED.value or not breakdown:
+        return ""
+    try:
+        with allow_source_files_from(str(requirement or "")):
+            model = WorkBreakdown.model_validate(breakdown)
+        refs = [result.get("epic"), *(result.get("stories") or []), *(result.get("subtasks") or [])]
+        created = [
+            f"{r.get('key')} · {r.get('issue_type') or 'ticket'} · {r.get('summary') or ''}".strip()
+            for r in refs
+            if isinstance(r, dict) and r.get("key")
+        ]
+        project = normalise(project_key).upper()
+        key = normalise(issue_key).upper() or (f"{project}-REQUEST" if project else "REQUEST")
+        doc = pdf.BreakdownDocument(
+            issue_key=key,
+            issue_summary="",
+            project_key=project,
+            generated_at=f"{datetime.now(UTC):%Y-%m-%d %H:%M} UTC",
+            agent_version="",
+            breakdown=model,
+            created=created,
+        )
+        name = pdf.file_name(key, model).replace("aetherion-breakdown-", "aetherion-created-")
+        return save_local(name, pdf.render_pdf(doc))
+    except Exception as exc:  # noqa: BLE001 — a missing copy must never fail a creation
+        logger.warning(f"Created-tickets document not saved: {exc}")
+        return ""
 
 
 async def _create_jira_issues(
@@ -1088,7 +1124,7 @@ async def _create_jira_issues(
 
     if jira.read_only():
         return _config_failure(
-            "This deployment is in read-only mode (LTW_READ_ONLY). The work "
+            "This deployment is in read-only mode (TASK_READ_ONLY). The work "
             "breakdown was produced but no Jira issues were created."
         )
 
@@ -1171,7 +1207,12 @@ async def _create_jira_issues(
                 return await _build_on_root(
                     client, base_url, key, model, key_label, root, basis, available, types
                 )
-            needed = [types["story"], types["subtask"]] + (
+            # Small is one Task, Medium one Story, Large an Epic with Stories.
+            # A project with no Task type gets a Story instead of a failure.
+            small = model.classification is Classification.SMALL and model.epic is None
+            if small and jira.missing_issue_types([types["task"]], available):
+                types = {**types, "task": types["story"]}
+            needed = [types["task"] if small else types["story"], types["subtask"]] + (
                 [types["epic"]] if model.epic is not None else []
             )
             missing = jira.missing_issue_types(needed, available)
@@ -1281,7 +1322,7 @@ async def jira_configuration_status() -> dict[str, Any]:
         "token_set": bool(token),
         "project_key": key,
         "issue_types": jira.issue_type_names(),
-        "llm_model": os.environ.get("LTW_LLM_MODEL", "gpt-4o"),
+        "llm_model": os.environ.get("TASK_LLM_MODEL", "gpt-4o"),
         "allowed_project_keys": list(jira.allowed_project_keys()) or ["<any>"],
         "read_only": jira.read_only(),
         "ready": bool(base_url and email and token and key),
@@ -1569,7 +1610,13 @@ async def _read_jira_issue(
         is_subtask=bool((fields.get("issuetype") or {}).get("subtask")),
         root_built=root_built,
     )
-    source.ticket_is_root = source.trigger_is_pointer and not has_url(source.trigger_comment_body)
+    # The card is built on when "@Aetherion build" points at it, and when the
+    # run was started by hand with no comment at all: then the card's own
+    # description is the request (2026-10-07). A comment with its own text, or
+    # a link, still asks for new tickets.
+    source.ticket_is_root = (
+        source.trigger_is_pointer and not has_url(source.trigger_comment_body)
+    ) or not source.trigger_comment_body
 
     # Decided here, not in the agent: each of these needs the trigger keyword,
     # which is read from the environment — forbidden inside a workflow.
@@ -1628,6 +1675,36 @@ async def read_uploaded_files(
         "notes": notes,
         "section": uploads_mod.section(files),
     }
+
+
+@tool()
+async def run_environment() -> dict[str, Any]:
+    """Where this run is: a laptop run (scripts/run_local.sh) or Aetherion.
+
+    A laptop has no webhook, so every run there is started by hand, and its
+    replies would land on a real ticket from a test. The flow asks once.
+    """
+    return {"local_run": os.environ.get(llm.LOCAL_RUN_FLAG) == "1"}
+
+
+@tool()
+async def condense_requirement(requirement: str | None = None) -> dict[str, Any]:
+    """Make a requirement of any length fit the model (see src/context/condense.py).
+
+    Returns ``{"requirement": text, "notes": [...]}``. Within the budget the text
+    comes back unchanged and no model call is made.
+    """
+    text = str(requirement or "")
+    budget = budget_chars()
+    kept = plan_cache.get_fitted(text, budget) if len(text) > budget else None
+    if kept:
+        logger.info("Condensed requirement reused: same input as an earlier run")
+        return {"requirement": kept["requirement"], "notes": list(kept.get("notes") or [])}
+    with stage("condense_requirement", chars=len(text)):
+        fitted, notes = await fit_requirement(text, chat=condense_chat, budget=budget)
+    if notes:
+        plan_cache.put_fitted(text, budget, fitted, notes)
+    return {"requirement": fitted, "notes": notes}
 
 
 # --------------------------------------------------------------------------
@@ -1706,29 +1783,38 @@ async def _generate_breakdown_pdf(request: dict[str, Any]) -> dict[str, Any]:
                 closest_match=report.get("closest_match"),
                 placement=str(report.get("placement") or "backlog"),
                 existing_epic=existing_epic,
+                already_exist=list(report.get("already_exist") or []),
             )
             name = pdf.file_name(issue_key, model)
     except httpx.HTTPError as exc:
         return failed(f"{issue_key} could not be read for the PDF: {exc}. Nothing was changed.")
 
     root_is_epic = bool(root and root.type_after.lower() == "epic")
-    proposed = pdf.numbered(model, root_is_epic=root_is_epic, existing_epic=existing_epic)
+    proposed = pdf.numbered(
+        model, root_is_epic=root_is_epic, existing_epic=existing_epic, card=root or None
+    )
     counts = model.issue_count()
-    becomes = (
-        f" If built, {root.key} would become {_ARTICLE.get(root.type_after.lower(), 'a')} "
-        f"{root.type_after} (it is {_ARTICLE.get(root.type_before.lower(), 'a')} "
-        f"{root.type_before} now)."
-        if root and root.type_after.lower() != root.type_before.lower()
-        else ""
-    )
-    what = (
-        f"The breakdown proposes {counts['stories']} "
-        f"Stor{'y' if counts['stories'] == 1 else 'ies'} and {counts['subtasks']} "
-        f"Sub-task{'' if counts['subtasks'] == 1 else 's'}.{becomes}"
-    )
+    if root:
+        article = _ARTICLE.get(root.type_after.lower(), "a")
+        what = (
+            f"If built, {root.children} would go under {root.key}, which stays {article} "
+            f"{root.type_after} (its summary and description are not changed)."
+            if root.children
+            else f"{root.key} stays {article} {root.type_after}; it is one step, so "
+            f"nothing would go under it."
+        )
+    else:
+        what = (
+            f"The breakdown proposes {counts['stories']} "
+            f"Stor{'y' if counts['stories'] == 1 else 'ies'} and {counts['subtasks']} "
+            f"Sub-task{'' if counts['subtasks'] == 1 else 's'}."
+        )
     questions = [f"{st.title}: {q}" for st in model.stories for q in st.open_questions] + [
         f"From the review: {q}" for q in request.get("review_questions") or []
     ]
+    data = pdf.render_pdf(doc)
+    # On a laptop run, also kept in docs-export (no tokens: already drawn).
+    saved_to = save_local(name, data)
     emailed = await notifier.send_breakdown_pdf(
         issue_key=issue_key,
         issue_summary=doc.issue_summary,
@@ -1736,22 +1822,43 @@ async def _generate_breakdown_pdf(request: dict[str, Any]) -> dict[str, Any]:
         proposed=proposed,
         questions=questions,
         filename=name,
-        data=pdf.render_pdf(doc),
+        data=data,
+        # No ticket: a person ran the form, and wants the email every time.
+        by_hand=not normalise(request.get("issue_key")),
     )
-    if not emailed.sent:
+    # Kept for the next agent (Review reads it) when the orchestrator asks.
+    file_key = keep_document(name, data) if request.get("keep") else ""
+    email_is_off = emailed.error == notifier.OFF
+    if not emailed.sent and not file_key and not email_is_off:
         return failed(
             f"The breakdown PDF could not be emailed: {emailed.error}. No Jira tickets were "
             "created or changed; asking again is safe."
         )
     to = ", ".join(emailed.recipients)
+    # Held back as a repeat (same PDF, same ticket, within the window): say so
+    # rather than claim it was just emailed.
+    if email_is_off:
+        delivery = f"was made as {name}; it was not emailed (email is turned off)"
+    elif not emailed.sent:
+        delivery = f"is kept for review as {name} (it could not be emailed: {emailed.error})"
+    elif emailed.attempted:
+        delivery = f"was emailed to {to} as {name}"
+    else:
+        delivery = f"was already emailed to {to} a few minutes ago as {name}, so it was not resent"
     return {
         "status": ResultStatus.PLANNED.value,
-        "headline": "Work breakdown emailed as a PDF — no Jira changes made",
+        "headline": (
+            "Work breakdown emailed as a PDF — no Jira changes made"
+            if emailed.sent
+            else "Work breakdown ready as a PDF — no Jira changes made"
+        ),
         "emailed_to": emailed.recipients,
         "attachment": name,
+        "saved_to": saved_to,
+        "file_key": file_key,
         "summary": (
             f"{pdf.MODE_LINE}. {what} The full breakdown — every ticket, its criteria and the "
-            f"sources read — was emailed to {to} as {name}."
+            f"sources read — {delivery}."
         ),
         "proposed": proposed,
     }
@@ -1779,18 +1886,28 @@ async def _root_preview(
     project_key = normalise(request.get("project_key")).upper()
     available = await jira.available_issue_types(client, project_key)
     names = root_mod.type_names(available, jira.resolve_issue_types(available))
-    plan = root_mod.plan_root(model, root["type"], str(request.get("request") or ""))
+    plan = root_mod.plan_root(model, root["type"])
     refusal = root_mod.refusal(plan, root, names)
     if refusal:
         return refusal
+    # The card is never changed (2026-10-07): only what would go under it.
+    counts = model.issue_count()
+    if plan.create_stories:
+        children = f"{counts['stories']} Stor{'y' if counts['stories'] == 1 else 'ies'}" + (
+            " with their Sub-tasks" if counts["subtasks"] else ""
+        )
+    elif plan.create_subtasks:
+        children = f"{counts['subtasks']} Sub-task{'' if counts['subtasks'] == 1 else 's'}"
+    else:
+        children = ""
     return pdf.RootPreview(
         key=root_key,
         type_before=root["type"],
-        type_after=names[plan.role],
+        type_after=root["type"],
         summary_before=root["summary"],
-        summary_after=root_mod.new_summary(model, plan, root["summary"]),
-        priority=plan.priority,
+        summary_after=root["summary"],
         reason=plan.reason,
+        children=children,
     )
 
 
@@ -1836,6 +1953,8 @@ async def notify_email(
         requirement=normalise(requirement),
         remaining=remaining or [],
         counts=counts or {},
+        # No ticket: a person ran the form, and wants the email every time.
+        by_hand=not normalise(issue_key),
     )
     if result.error:
         logger.error(result.error)

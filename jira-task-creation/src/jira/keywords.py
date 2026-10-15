@@ -35,24 +35,24 @@ DEFAULT_AWAITING_LABEL = "ltw-awaiting-input"
 
 def trigger_keyword() -> str:
     """The word that makes this agent act on an issue."""
-    return os.environ.get("LTW_TRIGGER_KEYWORD", "").strip() or DEFAULT_TRIGGER_KEYWORD
+    return os.environ.get("TASK_TRIGGER_KEYWORD", "").strip() or DEFAULT_TRIGGER_KEYWORD
 
 
 def processed_label() -> str:
     """Label stamped on an issue once a run has finished with it."""
-    return os.environ.get("LTW_PROCESSED_LABEL", "").strip() or DEFAULT_PROCESSED_LABEL
+    return os.environ.get("TASK_PROCESSED_LABEL", "").strip() or DEFAULT_PROCESSED_LABEL
 
 
 def awaiting_label() -> str:
     """Label stamped when the agent asked a question and is waiting for answers."""
-    return os.environ.get("LTW_AWAITING_LABEL", "").strip() or DEFAULT_AWAITING_LABEL
+    return os.environ.get("TASK_AWAITING_LABEL", "").strip() or DEFAULT_AWAITING_LABEL
 
 
 def mentions_trigger(*texts: str) -> bool:
     """True when this agent's trigger keyword appears in any of ``texts``.
 
     The matching rule is shared; the keyword is this agent's, because only this
-    agent reads ``LTW_TRIGGER_KEYWORD``.
+    agent reads ``TASK_TRIGGER_KEYWORD``.
     """
     return _mentions_trigger(*texts, keyword=trigger_keyword())
 

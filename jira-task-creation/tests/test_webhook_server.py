@@ -42,7 +42,7 @@ TEST_SECRET = "test-webhook-secret"
 
 @pytest.fixture(autouse=True)
 def _configured_deployment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LTW_WEBHOOK_SECRET", TEST_SECRET)
+    monkeypatch.setenv("TASK_WEBHOOK_SECRET", TEST_SECRET)
 
 
 @pytest.fixture
@@ -248,7 +248,7 @@ def test_different_issues_are_not_debounced_against_each_other(
 def test_the_debounce_window_is_configurable(
     client: TestClient, _no_real_runs: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("LTW_WEBHOOK_DEBOUNCE_SECONDS", "0")
+    monkeypatch.setenv("TASK_WEBHOOK_DEBOUNCE_SECONDS", "0")
     client.post("/jira/webhook", json=issue_event())
     client.post("/jira/webhook", json=issue_event())
     assert len(_no_real_runs) == 2
@@ -260,7 +260,7 @@ def test_the_debounce_window_is_configurable(
 def test_a_secret_is_required_when_configured(
     raw_client: TestClient, _no_real_runs: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("LTW_WEBHOOK_SECRET", "s3cret")
+    monkeypatch.setenv("TASK_WEBHOOK_SECRET", "s3cret")
     assert raw_client.post("/jira/webhook", json=issue_event()).status_code == 401
     assert _no_real_runs == []
 
@@ -268,7 +268,7 @@ def test_a_secret_is_required_when_configured(
 def test_the_right_secret_is_accepted_in_a_header(
     raw_client: TestClient, _no_real_runs: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("LTW_WEBHOOK_SECRET", "s3cret")
+    monkeypatch.setenv("TASK_WEBHOOK_SECRET", "s3cret")
     resp = raw_client.post("/jira/webhook", json=issue_event(), headers={"X-LTW-Secret": "s3cret"})
     assert resp.status_code == 200
     assert _no_real_runs == ["ORD-1"]
@@ -277,7 +277,7 @@ def test_the_right_secret_is_accepted_in_a_header(
 def test_the_secret_also_works_as_a_query_parameter(
     raw_client: TestClient, _no_real_runs: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("LTW_WEBHOOK_SECRET", "s3cret")
+    monkeypatch.setenv("TASK_WEBHOOK_SECRET", "s3cret")
     resp = raw_client.post("/jira/webhook?secret=s3cret", json=issue_event())
     assert resp.status_code == 200
 
@@ -285,7 +285,7 @@ def test_the_secret_also_works_as_a_query_parameter(
 def test_a_wrong_secret_is_refused(
     raw_client: TestClient, _no_real_runs: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("LTW_WEBHOOK_SECRET", "s3cret")
+    monkeypatch.setenv("TASK_WEBHOOK_SECRET", "s3cret")
     resp = raw_client.post("/jira/webhook", json=issue_event(), headers={"X-LTW-Secret": "wrong"})
     assert resp.status_code == 401
 
@@ -355,7 +355,7 @@ def test_malformed_signature_headers_are_refused(header: str) -> None:
 def test_a_system_webhook_with_a_valid_signature_is_accepted(
     raw_client: TestClient, _no_real_runs: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("LTW_JIRA_WEBHOOK_SECRET", "jira-generated-secret")
+    monkeypatch.setenv("TASK_JIRA_WEBHOOK_SECRET", "jira-generated-secret")
     body = _json.dumps(issue_event()).encode()
 
     resp = raw_client.post(
@@ -374,7 +374,7 @@ def test_a_system_webhook_with_a_valid_signature_is_accepted(
 def test_a_system_webhook_with_a_bad_signature_is_refused(
     raw_client: TestClient, _no_real_runs: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("LTW_JIRA_WEBHOOK_SECRET", "jira-generated-secret")
+    monkeypatch.setenv("TASK_JIRA_WEBHOOK_SECRET", "jira-generated-secret")
     body = _json.dumps(issue_event()).encode()
 
     resp = raw_client.post(
@@ -394,8 +394,8 @@ def test_either_style_is_accepted_when_both_are_configured(
     raw_client: TestClient, _no_real_runs: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """One deployment can serve an Automation rule and a System Webhook."""
-    monkeypatch.setenv("LTW_WEBHOOK_SECRET", "header-style")
-    monkeypatch.setenv("LTW_JIRA_WEBHOOK_SECRET", "signature-style")
+    monkeypatch.setenv("TASK_WEBHOOK_SECRET", "header-style")
+    monkeypatch.setenv("TASK_JIRA_WEBHOOK_SECRET", "signature-style")
 
     # the Automation style
     assert (
@@ -428,8 +428,8 @@ def test_health_reports_which_secret_styles_are_configured(
 ) -> None:
     # This deployment uses the signature style only, so the header style that
     # the rest of these tests configure has to be taken away.
-    monkeypatch.delenv("LTW_WEBHOOK_SECRET", raising=False)
-    monkeypatch.setenv("LTW_JIRA_WEBHOOK_SECRET", "signature-style")
+    monkeypatch.delenv("TASK_WEBHOOK_SECRET", raising=False)
+    monkeypatch.setenv("TASK_JIRA_WEBHOOK_SECRET", "signature-style")
     body = client.get("/health").json()
     assert body["secret_required"] is True
     assert body["jira_signature_configured"] is True
@@ -462,8 +462,8 @@ def test_an_unconfigured_deployment_refuses_every_delivery(
     misconfiguration into an open write endpoint that anyone who found the URL
     could drive.
     """
-    monkeypatch.delenv("LTW_WEBHOOK_SECRET", raising=False)
-    monkeypatch.delenv("LTW_JIRA_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("TASK_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("TASK_JIRA_WEBHOOK_SECRET", raising=False)
 
     resp = raw_client.post("/jira/webhook", json=issue_event())
 

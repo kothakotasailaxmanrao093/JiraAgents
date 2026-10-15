@@ -33,19 +33,26 @@ from src.shared.attachments import supported as _shared_supported
 
 # Named in the note a user reads when an image was skipped, so the message can
 # tell them which variable to change without the shared engine knowing it.
-IMAGES_OFF_HINT = " (set LTW_ATTACHMENT_READ_IMAGES=true to read it)"
+IMAGES_OFF_HINT = " (set TASK_ATTACHMENT_READ_IMAGES=true to read it)"
 
 
 def max_file_bytes() -> int:
-    return env_int("LTW_ATTACHMENT_MAX_BYTES", DEFAULT_MAX_FILE_BYTES)
+    return env_int("TASK_ATTACHMENT_MAX_BYTES", DEFAULT_MAX_FILE_BYTES)
 
 
 def max_files() -> int:
-    return env_int("LTW_ATTACHMENT_MAX_FILES", DEFAULT_MAX_FILES)
+    return env_int("TASK_ATTACHMENT_MAX_FILES", DEFAULT_MAX_FILES)
+
+
+# A file is read in full (2026-10-06): an hour-long transcript is ~60,000
+# characters and was cut at 20,000, losing the end of the meeting. What does not
+# fit the model is condensed afterwards (src/context/condense.py), not cut here.
+# The byte limit (TASK_ATTACHMENT_MAX_BYTES) still guards against huge files.
+FULL_FILE_CHARS = 1_000_000
 
 
 def max_chars() -> int:
-    return env_int("LTW_ATTACHMENT_MAX_CHARS", DEFAULT_MAX_CHARS_PER_FILE)
+    return env_int("TASK_ATTACHMENT_MAX_CHARS", FULL_FILE_CHARS)
 
 
 DEFAULT_READ_CONCURRENCY = 4
@@ -60,7 +67,7 @@ def read_concurrency() -> int:
     the limit. Measured (BGV-69, 2026-09-29): a download takes 0.6-1.0 s, so
     serial reads of four files cost about 3 s and parallel ones about 1 s.
     """
-    return max(1, env_int("LTW_READ_CONCURRENCY", DEFAULT_READ_CONCURRENCY))
+    return max(1, env_int("TASK_READ_CONCURRENCY", DEFAULT_READ_CONCURRENCY))
 
 
 def images_enabled() -> bool:
@@ -72,9 +79,9 @@ def images_enabled() -> bool:
 
     It is not free: each image costs a vision call and adds seconds to the run,
     so a ticket with a dozen screenshots is noticeably slower. Set
-    ``LTW_ATTACHMENT_READ_IMAGES=false`` to turn it off.
+    ``TASK_ATTACHMENT_READ_IMAGES=false`` to turn it off.
     """
-    return env_bool("LTW_ATTACHMENT_READ_IMAGES", default=True)
+    return env_bool("TASK_ATTACHMENT_READ_IMAGES", default=True)
 
 
 def limits() -> Limits:

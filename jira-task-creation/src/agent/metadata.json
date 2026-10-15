@@ -1,6 +1,6 @@
 {
     "name": "JiraTaskCreation",
-    "version": "4.3.52",
+    "version": "4.3.54",
     "description": "Comment-driven Jira work-breakdown agent. Someone comments '@Aetherion <requirement>' on any Jira issue; the agent reads that comment as the request and the issue (description, attachments, other comments, links, history) as context, reviews every existing ticket in the project, then creates an Epic, User Stories and Sub-tasks. It replies on the same issue signed AetherionAgent, and emails when it needs clarification or found the work already exists. It never creates duplicates.",
     "config": {
         "triggers": [
@@ -87,6 +87,19 @@
                 ],
                 "description": "use_setting, pdf_by_email, create_in_jira",
                 "friendly_name": "Output (pdf_by_email = email the PDF, create nothing; create_in_jira = create tickets; use_setting = as the .env says)"
+            },
+            {
+                "name": "reply_on_ticket",
+                "type": "dropdown",
+                "required": false,
+                "default": "auto",
+                "options": [
+                    "auto",
+                    "yes",
+                    "no"
+                ],
+                "description": "auto, yes, no",
+                "friendly_name": "Reply on the ticket (auto = yes on Aetherion, no on a laptop run; no = read the ticket, write nothing back to it)"
             },
             {
                 "name": "force",

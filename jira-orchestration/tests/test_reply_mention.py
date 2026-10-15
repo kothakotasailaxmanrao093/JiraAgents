@@ -18,7 +18,10 @@ def _reply(*inline):
     }
 
 
-MENTION = {"type": "mention", "attrs": {"id": "712020:x", "text": "@Kothakota Sai Laxman Rao"}}
+MENTION = {
+    "type": "mention",
+    "attrs": {"id": "712020:x", "text": "@Kothakota Sai Laxman Rao"},
+}
 
 
 def test_the_prefilled_mention_is_dropped_so_the_verb_leads() -> None:

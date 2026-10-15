@@ -6,7 +6,7 @@ Found in wf.sbox, never locally, because only the real sandbox enforces it:
     workflow.
       agent.py:428   is_question_comment(trigger_body)
       ingest.py:405    strip_trigger_mentions(body, trigger_keyword())
-      keywords.py:39     os.environ.get("LTW_TRIGGER_KEYWORD", ...)
+      keywords.py:39     os.environ.get("TASK_TRIGGER_KEYWORD", ...)
 
 Anything needing configuration has to be decided in an **activity** — a @tool —
 and handed to the agent as data. These tests fail the moment the agent module

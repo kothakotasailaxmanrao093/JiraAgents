@@ -88,7 +88,11 @@ def reviewed_contract(**over: Any) -> dict[str, Any]:
     return AgentResult(**base).to_dict()
 
 
-PAYLOAD = {"issue_key": "FL-120", "comment_id": "10501", "webhookEvent": "comment_created"}
+PAYLOAD = {
+    "issue_key": "FL-120",
+    "comment_id": "10501",
+    "webhookEvent": "comment_created",
+}
 
 
 # --- exactly one reply, on every path ----------------------------------------
@@ -168,7 +172,11 @@ async def test_an_ignored_comment_posts_nothing_and_dispatches_nothing(reason) -
 async def test_a_redelivered_comment_is_not_answered_twice() -> None:
     """Jira redelivers. The whole point of gate 3."""
     tools = Tools(
-        ingress_check={"outcome": "ignored", "ignored": "DUPLICATE", "run_id": "4a81f7c2"}
+        ingress_check={
+            "outcome": "ignored",
+            "ignored": "DUPLICATE",
+            "run_id": "4a81f7c2",
+        }
     )
     children = Children()
 
@@ -291,7 +299,8 @@ async def test_the_child_is_forced_into_delegated_mode() -> None:
 
 async def test_the_review_child_is_additionally_forced_draft_only() -> None:
     tools = Tools(
-        ingress_check=gate(comment_body="@Aetherion review this"), post_reply={"posted": True}
+        ingress_check=gate(comment_body="@Aetherion review this"),
+        post_reply={"posted": True},
     )
     children = Children(result=created_contract(outcome=Outcome.REVIEWED, created=[]))
 
@@ -504,7 +513,11 @@ async def test_a_dispatch_failure_names_the_real_error_in_problems() -> None:
             "Could not email the administrators — this was logged instead.",
             "Emailed the administrators.",
         ),
-        ({"attempted": True, "sent": True}, "Emailed the administrators.", "Could not email"),
+        (
+            {"attempted": True, "sent": True},
+            "Emailed the administrators.",
+            "Could not email",
+        ),
     ],
     ids=["logged only", "really sent"],
 )
@@ -527,7 +540,9 @@ async def test_a_dispatch_failure_with_no_admin_configured_has_no_notification_l
     """notify_admins itself reports attempted=False when no ORCH_NOTIFY_EMAILS
     is configured; the reply must not claim an email went out that did not."""
     tools = Tools(
-        ingress_check=gate(), post_reply={"posted": True}, notify_admins={"attempted": False}
+        ingress_check=gate(),
+        post_reply={"posted": True},
+        notify_admins={"attempted": False},
     )
     children = Children(raises=RuntimeError("not deployed"))
 
@@ -601,7 +616,10 @@ async def test_health_check_reports_the_smtp_login() -> None:
     dead = Tools(smtp_login_check={"ok": False, "error": "Gmail rejected the credentials (535)."})
     report = await run_health_check(Children(result={}).dispatch, dead.execute)
 
-    assert report["smtp"] == {"ok": False, "error": "Gmail rejected the credentials (535)."}
+    assert report["smtp"] == {
+        "ok": False,
+        "error": "Gmail rejected the credentials (535).",
+    }
 
 
 async def test_a_raising_smtp_check_is_reported_not_raised() -> None:
@@ -687,10 +705,16 @@ async def test_each_actionable_outcome_sends_exactly_one_email(outcome, kind) ->
     tools = Tools(
         ingress_check=gate(),
         post_reply={"posted": True},
-        send_outcome_email={"attempted": True, "sent": True, "recipients": ["lead@example.com"]},
+        send_outcome_email={
+            "attempted": True,
+            "sent": True,
+            "recipients": ["lead@example.com"],
+        },
     )
     await run_router(
-        PAYLOAD, tools.execute, Children(result=created_contract(outcome=outcome)).dispatch
+        PAYLOAD,
+        tools.execute,
+        Children(result=created_contract(outcome=outcome)).dispatch,
     )
 
     assert tools.count("send_outcome_email") == 1
@@ -702,7 +726,9 @@ async def test_each_actionable_outcome_sends_exactly_one_email(outcome, kind) ->
 async def test_an_invalid_request_or_a_review_never_emails(outcome) -> None:
     tools = Tools(ingress_check=gate(), post_reply={"posted": True})
     await run_router(
-        PAYLOAD, tools.execute, Children(result=created_contract(outcome=outcome)).dispatch
+        PAYLOAD,
+        tools.execute,
+        Children(result=created_contract(outcome=outcome)).dispatch,
     )
 
     assert tools.count("send_outcome_email") == 0
@@ -735,7 +761,10 @@ async def test_an_email_skipped_by_configuration_says_nothing() -> None:
     tools = Tools(
         ingress_check=gate(),
         post_reply={"posted": True},
-        send_outcome_email={"sent": False, "skipped": "created is not in ORCH_NOTIFY_ON"},
+        send_outcome_email={
+            "sent": False,
+            "skipped": "created is not in ORCH_NOTIFY_ON",
+        },
     )
     await run_router(PAYLOAD, tools.execute, Children(result=created_contract()).dispatch)
     assert "Notification" not in tools.reply_text()

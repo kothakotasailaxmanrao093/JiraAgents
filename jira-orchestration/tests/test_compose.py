@@ -26,7 +26,13 @@ from routing.compose import (
     handled_by,
     router_only,
 )
-from shared.contract import AgentResult, CreatedIssue, DuplicateRef, MissingSource, Outcome
+from shared.contract import (
+    AgentResult,
+    CreatedIssue,
+    DuplicateRef,
+    MissingSource,
+    Outcome,
+)
 from shared.keywords import AGENT_FOOTER, AGENT_SIGNATURE, mentions_trigger
 
 
@@ -48,7 +54,7 @@ def text_of(blocks: list[tuple[str, object]]) -> str:
     out: list[str] = []
     for heading, body in blocks:
         out.append(str(heading))
-        out.extend(str(x) for x in body) if isinstance(body, list) else out.append(str(body))
+        (out.extend(str(x) for x in body) if isinstance(body, list) else out.append(str(body)))
     return "\n".join(out)
 
 

@@ -75,7 +75,7 @@ async def test_every_page_of_existing_work_is_read() -> None:
 
 
 async def test_paging_stops_at_the_configured_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LTW_MAX_CONTEXT_ISSUES", "10")
+    monkeypatch.setenv("TASK_MAX_CONTEXT_ISSUES", "10")
     pages = [[issue(f"ORD-{n}", f"Story {n}") for n in range(10)]]
     client = FakeClient({"/search/jql": paged(pages)})
 

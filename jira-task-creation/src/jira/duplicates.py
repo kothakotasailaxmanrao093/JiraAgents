@@ -90,7 +90,7 @@ _DEFAULT_DUPLICATE_THRESHOLD = 0.75
 
 
 def duplicate_threshold() -> float:
-    value = env_float("LTW_DUPLICATE_THRESHOLD", _DEFAULT_DUPLICATE_THRESHOLD)
+    value = env_float("TASK_DUPLICATE_THRESHOLD", _DEFAULT_DUPLICATE_THRESHOLD)
     return min(max(value, 0.0), 1.0)
 
 
@@ -126,9 +126,9 @@ def compare_closed_work() -> bool:
     layer, so a request matching an abandoned ticket was answered with "this
     already exists" and nothing was created.
 
-    Set ``LTW_MATCH_CLOSED_WORK=true`` to go back to comparing everything.
+    Set ``TASK_MATCH_CLOSED_WORK=true`` to go back to comparing everything.
     """
-    return env_bool("LTW_MATCH_CLOSED_WORK")
+    return env_bool("TASK_MATCH_CLOSED_WORK")
 
 
 def comparable_issues(
@@ -222,7 +222,7 @@ _DEFAULT_DESCRIPTION_THRESHOLD = 0.85
 
 
 def description_threshold() -> float:
-    raw = os.environ.get("LTW_DESCRIPTION_MATCH_THRESHOLD", "").strip()
+    raw = os.environ.get("TASK_DESCRIPTION_MATCH_THRESHOLD", "").strip()
     try:
         value = float(raw) if raw else _DEFAULT_DESCRIPTION_THRESHOLD
     except ValueError:
@@ -244,7 +244,7 @@ _DEFAULT_REQUIREMENT_THRESHOLD = 0.80
 
 
 def requirement_threshold() -> float:
-    raw = os.environ.get("LTW_REQUIREMENT_MATCH_THRESHOLD", "").strip()
+    raw = os.environ.get("TASK_REQUIREMENT_MATCH_THRESHOLD", "").strip()
     try:
         value = float(raw) if raw else _DEFAULT_REQUIREMENT_THRESHOLD
     except ValueError:
@@ -353,13 +353,13 @@ MAX_ADJUDICATED_PAIRS = 10
 
 
 def adjudication_floor() -> float:
-    value = env_float("LTW_DUPLICATE_ADJUDICATE_FLOOR", _DEFAULT_ADJUDICATION_FLOOR)
+    value = env_float("TASK_DUPLICATE_ADJUDICATE_FLOOR", _DEFAULT_ADJUDICATION_FLOOR)
     return min(max(value, 0.0), 1.0)
 
 
 def adjudication_enabled() -> bool:
     """Semantic second opinion on near misses. On by default."""
-    return env_bool("LTW_DUPLICATE_ADJUDICATE", True)
+    return env_bool("TASK_DUPLICATE_ADJUDICATE", True)
 
 
 def find_near_misses(

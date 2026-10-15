@@ -22,9 +22,15 @@ from shared.settings import mask as _mask
 # ---------------------------------------------------------------------------
 MAX_SUBTASKS = 15
 MAX_LINKED_ISSUES = 15
-MAX_COMMENTS_PER_ISSUE = 20
-MAX_CHARS_PER_COMMENT = 1000
-MAX_DESC_CHARS = 8000
+# Comments and the description are read in full (2026-10-15): a comment used to
+# be cut at 1,000 characters, so a long answer to the review's questions lost its
+# second half and the same questions were asked again. What remains is one
+# safety net per issue, far above any normal ticket, so the whole context stays
+# under the engine's message limit below.
+MAX_COMMENTS_PER_ISSUE = 100
+# All of an issue's comments together; past it the OLDEST are left out (and said so).
+MAX_COMMENTS_CHARS = 60000
+MAX_DESC_CHARS = 60000
 MAX_TRANSCRIPT_CHARS = 24000
 # Cap on issues reviewed per JQL/Sprint batch run — each issue gets the full
 # per-issue pipeline (parent + subtasks + linked issues + an LLM call), so this
@@ -223,7 +229,7 @@ AGENT_DISPLAY_NAME = "JiraRequirementReview"
 # Kept in step by scripts/publish.py, which writes all three (pyproject,
 # metadata.json and this constant) together, and by
 # tests/test_version_agreement.py, which fails if they ever diverge.
-AGENT_VERSION = "2.2.22"
+AGENT_VERSION = "2.2.24"
 
 
 def agent_version() -> str:

@@ -138,7 +138,7 @@ LINES = [
 def _two_stories(send_criteria: list[str]) -> WorkBreakdown:
     return WorkBreakdown.model_validate(
         {
-            "classification": "Medium",
+            "classification": "Large",
             "analysis": "Sending and overdue handling.",
             "epic": {
                 "business_objective": "Bill clients monthly.",

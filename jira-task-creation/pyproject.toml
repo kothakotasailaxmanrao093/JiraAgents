@@ -1,6 +1,6 @@
 [project]
 name = "jira-task-creation"
-version = "4.3.52"
+version = "4.3.54"
 description = "LaxmanTicketWise — validates requirements, classifies them Small/Medium/Large, decomposes them into Epics/Stories/Subtasks, and creates the Jira hierarchy"
 authors = [{ name = "Kothakota Sai Laxman Rao", email = "kothakota.sailaxmanrao@calfus.com" }]
 readme = "README.md"

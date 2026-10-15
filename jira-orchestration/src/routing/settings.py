@@ -12,12 +12,13 @@ variables this agent has and what they default to.
 from __future__ import annotations
 
 import os
+import re
+from typing import Any
 
-from shared.settings import env_bool, env_int, env_list
+from shared.settings import env_bool, env_int, env_list, secret
 
 DEFAULT_TRIGGER_KEYWORD = "Aetherion"
 DEFAULT_PROCESSED_LABEL = "aetherion-processed"
-DEFAULT_IDEMPOTENCY_TTL_HOURS = 24
 DEFAULT_CLASSIFIER_MODEL = "gpt-5.1"
 
 # Where the router remembers which comments it has already answered. A Jira
@@ -36,10 +37,6 @@ def trigger_keyword() -> str:
 
 def processed_label() -> str:
     return os.environ.get("ORCH_PROCESSED_LABEL", "").strip() or DEFAULT_PROCESSED_LABEL
-
-
-def idempotency_ttl_hours() -> int:
-    return env_int("ORCH_IDEMPOTENCY_TTL_HOURS", DEFAULT_IDEMPOTENCY_TTL_HOURS, minimum=1)
 
 
 def classifier_model() -> str:
@@ -82,12 +79,22 @@ def notify_emails() -> tuple[str, ...]:
 
 
 # The outcomes that email, by the same names the work-breakdown agent uses in
-# LTW_NOTIFY_ON, so one list means the same thing in both deployments.
+# TASK_NOTIFY_ON, so one list means the same thing in both deployments.
 NOTIFY_KINDS = ("created", "clarification", "duplicates", "failed")
+
+
+def email_off() -> bool:
+    """``ORCH_NOTIFY_ON=none``: no email at all — replies on the ticket only (2026-10-08).
+
+    Outcome emails and the administrators' alerts both stop; alerts are still logged.
+    """
+    return "none" in {k.lower() for k in env_list("ORCH_NOTIFY_ON")}
 
 
 def notify_on() -> tuple[str, ...]:
     """``ORCH_NOTIFY_ON``, or all four. Unknown names are ignored, not guessed."""
+    if email_off():
+        return ()
     chosen = tuple(k.lower() for k in env_list("ORCH_NOTIFY_ON") if k.lower() in NOTIFY_KINDS)
     return chosen or NOTIFY_KINDS
 
@@ -136,7 +143,8 @@ def task_queue_overrides() -> dict[str, str]:
 def jira_credentials() -> tuple[str, str, str]:
     base = os.environ.get("JIRA_BASE_URL", "").strip().rstrip("/")
     email = os.environ.get("JIRA_EMAIL", "").strip()
-    token = os.environ.get("JIRA_API_TOKEN", "").strip()
+    # A secret: a mounted file in production, the variable on a laptop (2026-10-15).
+    token = secret("JIRA_API_TOKEN")
     return base, email, token
 
 
@@ -173,8 +181,8 @@ DEFAULT_GITHUB_MAX_TRIES = 5
 
 
 def github_token() -> str:
-    """A read-only, fine-grained token for the organization."""
-    return os.environ.get("GITHUB_TOKEN", "").strip()
+    """A fine-grained token for the organization's repositories."""
+    return secret("GITHUB_TOKEN")
 
 
 def github_org() -> str:
@@ -211,3 +219,218 @@ def planning_timeout_minutes() -> int:
 
 def github_max_tries() -> int:
     return env_int("ORCH_GITHUB_MAX_TRIES", DEFAULT_GITHUB_MAX_TRIES, minimum=1)
+
+
+# --- After a build: Review -> Planning -> Coding (2026-10-08) -----------------------
+
+PIPELINE_STEPS = ("review", "plan", "code")
+DEFAULT_CODING_AGENT = "coding-agent"
+# Coding's own limit is 30 minutes (its change, then up to 10 for the PR's CI).
+DEFAULT_CODING_TIMEOUT_MINUTES = 35
+DEFAULT_CODING_ATTEMPTS = 2
+
+
+def build_pipeline() -> tuple[str, ...]:
+    """What follows a build, in order: some of review, plan, code (empty = nothing).
+
+    Coding implements Planning's design, so "code" without "plan" is dropped.
+    """
+    chosen = {s.lower() for s in env_list("ORCH_BUILD_PIPELINE")}
+    steps = tuple(s for s in PIPELINE_STEPS if s in chosen)
+    return tuple(s for s in steps if s != "code" or "plan" in steps)
+
+
+def planning_repos() -> str:
+    """The services Planning designs against, one "name: org/repo[@branch]" per line.
+
+    One environment line, so entries may also be separated by ";" or ",".
+    """
+    raw = os.environ.get("ORCH_PLANNING_REPOS", "")
+    entries = [e.strip() for e in re.split(r"[\n;,]", raw) if e.strip()]
+    return "\n".join(entries)
+
+
+def coding_agent() -> str:
+    return os.environ.get("ORCH_CODING_AGENT", "").strip() or DEFAULT_CODING_AGENT
+
+
+def coding_task_queue() -> str:
+    """The Coding agent's queue; empty lets the platform's agent map decide."""
+    return os.environ.get("ORCH_TASK_QUEUE_CODING", "").strip()
+
+
+def coding_timeout_minutes() -> int:
+    return env_int("ORCH_CODING_TIMEOUT_MINUTES", DEFAULT_CODING_TIMEOUT_MINUTES, minimum=1)
+
+
+def coding_attempts() -> int:
+    """Coding runs at most this often; each retry first sends its failure back to Planning."""
+    return env_int("ORCH_CODING_ATTEMPTS", DEFAULT_CODING_ATTEMPTS, minimum=1)
+
+
+def plan_min_readiness() -> int:
+    """Planning waits when the review scored below this (1-5); 0 never waits."""
+    return env_int("ORCH_PLAN_MIN_READINESS", 0, minimum=0)
+
+
+def storage_bucket() -> str:
+    """The storage the agents share, where Planning keeps its designs (set by the platform)."""
+    return os.environ.get("TENANT_ID", "").strip() or os.environ.get("STORAGE_AGENTS_BUCKET", "")
+
+
+def pipeline() -> dict[str, object]:
+    """Everything the workflow needs to run the steps after a build, as data."""
+    return {
+        "steps": list(build_pipeline()),
+        "repos": planning_repos(),
+        "planning_agent": planning_agent(),
+        "planning_queue": planning_task_queue(),
+        "planning_timeout_minutes": planning_timeout_minutes(),
+        "coding_agent": coding_agent(),
+        "coding_queue": coding_task_queue(),
+        "coding_timeout_minutes": coding_timeout_minutes(),
+        "coding_attempts": coding_attempts(),
+        "plan_min_readiness": plan_min_readiness(),
+    }
+
+
+# --- A request from the orchestrator's own form (2026-10-08) -------------------------
+
+DEFAULT_REQUEST_MIN_READINESS = 4
+
+
+def request_project() -> str:
+    """The Jira project a form request is checked against for duplicates (read only).
+
+    ``ORCH_REQUEST_PROJECT``, else the first allowed project.
+    """
+    chosen = os.environ.get("ORCH_REQUEST_PROJECT", "").strip().upper()
+    return chosen or next(iter(allowed_project_keys()), "")
+
+
+def request_min_readiness() -> int:
+    """The review score a form request needs before Planning (the form may set it)."""
+    return env_int("ORCH_REQUEST_MIN_READINESS", DEFAULT_REQUEST_MIN_READINESS, minimum=0)
+
+
+def local_document_dir() -> str:
+    """Where a laptop run keeps a copy of each design (set by scripts/run_local.sh)."""
+    return os.environ.get("ORCH_DOCUMENT_DIR", "").strip()
+
+
+def local_run() -> bool:
+    """True only on a laptop run (set by scripts/local_worker.py, never in a .env)."""
+    return os.environ.get("AETHERION_LOCAL_RUN", "") == "1"
+
+
+# --- Confluence: the TDD and its discussion (2026-10-08) -----------------------------
+
+DEFAULT_TDD_LABEL = "aetherion-tdd"
+TDD_PROPERTY = "aetherion-tdd"  # on the Jira story: which page is its TDD
+STORY_PROPERTY = "aetherion-story"  # on the Confluence page: which story it designs
+ANSWERED_PAGE_PROPERTY = "aetherion-answered-comments"  # on the page: comments answered
+CODE_PLAN_PROPERTY = "aetherion-code-plan"  # on the page: branches proposed / confirmed
+
+
+def confluence_base() -> str:
+    """Confluence's address: ``ORCH_CONFLUENCE_URL``, else the Jira site's ``/wiki``."""
+    chosen = os.environ.get("ORCH_CONFLUENCE_URL", "").strip().rstrip("/")
+    if chosen:
+        return chosen
+    base, _, _ = jira_credentials()
+    return f"{base}/wiki" if base else ""
+
+
+def confluence_credentials() -> tuple[str, str]:
+    """The Confluence login: its own when set, else the Jira login (same Atlassian site)."""
+    _, email, token = jira_credentials()
+    return (
+        os.environ.get("CONFLUENCE_EMAIL", "").strip() or email,
+        secret("CONFLUENCE_API_TOKEN") or token,
+    )
+
+
+def confluence_spaces() -> dict[str, str]:
+    """``ORCH_CONFLUENCE_SPACES``: project -> space key, e.g. "BGV:PR,FL:FL".
+
+    Unset projects use the space whose key is the project key or whose name is
+    the project's name, and get a new space when there is none.
+    """
+    out: dict[str, str] = {}
+    for item in env_list("ORCH_CONFLUENCE_SPACES"):
+        project, _, space = item.partition(":")
+        if project.strip() and space.strip():
+            out[project.strip().upper()] = space.strip()
+    return out
+
+
+def tdd_label() -> str:
+    return os.environ.get("ORCH_TDD_LABEL", "").strip() or DEFAULT_TDD_LABEL
+
+
+def tdd_min_readiness() -> int:
+    """The review score (1-5) a story needs before its TDD is written."""
+    return env_int("ORCH_TDD_MIN_READINESS", 4, minimum=0)
+
+
+def commands() -> dict[str, object]:
+    """What the TDD, design and code commands run with, as data for the workflow."""
+    return {
+        "repos": planning_repos(),
+        "planning_agent": planning_agent(),
+        "planning_queue": planning_task_queue(),
+        "planning_timeout_minutes": planning_timeout_minutes(),
+        "coding_agent": coding_agent(),
+        "coding_queue": coding_task_queue(),
+        "coding_timeout_minutes": coding_timeout_minutes(),
+        "coding_attempts": coding_attempts(),
+        "tdd_min_readiness": tdd_min_readiness(),
+        "task_queue_overrides": task_queue_overrides(),
+    }
+
+
+# --- the webhooks that push events here (2026-10-15) -----------------------------
+
+# What each webhook needs to be live, besides its URL (WORKFLOW.md, "Webhooks").
+WEBHOOK_CHECKS = {
+    "jira": "Jira webhook → comments on stories (works today)",
+    "confluence": "Confluence Automation rule → comments on TDD pages (replaces the poll)",
+    "github": "GitHub webhook → merges and PR comments (replaces the poll)",
+}
+
+
+def webhook_urls() -> dict[str, str]:
+    """Where Jira, Confluence and GitHub post their events — or {} until the
+    platform's webhook address is known.
+
+    ORCH_WEBHOOK_BASE_URL  e.g. https://wh.sbox.aetherion.io/webhooks/v2
+    ORCH_WEBHOOK_TENANT_ID the tenant's id (the Jira webhook URL's tenant_id)
+    ORCH_WEBHOOK_TENANT    the tenant's name, e.g. test (optional)
+    """
+    base = os.environ.get("ORCH_WEBHOOK_BASE_URL", "").strip().rstrip("/")
+    tenant_id = os.environ.get("ORCH_WEBHOOK_TENANT_ID", "").strip()
+    tenant = os.environ.get("ORCH_WEBHOOK_TENANT", "").strip()
+    if not (base and tenant_id):
+        return {}
+    query = f"?tenant_id={tenant_id}" + (f"&tenant={tenant}" if tenant else "")
+    return {provider: f"{base}/{provider}{query}" for provider in WEBHOOK_CHECKS}
+
+
+def webhook_status() -> dict[str, Any]:
+    """What the health check reports about the webhooks: their URLs, or which
+    checks wait for the address."""
+    urls = webhook_urls()
+    if urls:
+        return {"configured": True, "urls": urls}
+    return {
+        "configured": False,
+        "missing": "ORCH_WEBHOOK_BASE_URL and ORCH_WEBHOOK_TENANT_ID",
+        "waiting": list(WEBHOOK_CHECKS.values()),
+    }
+
+
+def alert_webhook_url() -> str:
+    """ORCH_ALERT_WEBHOOK_URL (2026-10-15): a chat channel's incoming webhook (Slack,
+    Teams, …) the administrators' alerts are posted to — whatever the email setting:
+    with email off, alerts still need to reach a person."""
+    return os.environ.get("ORCH_ALERT_WEBHOOK_URL", "").strip()

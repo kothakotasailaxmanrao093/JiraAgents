@@ -55,6 +55,8 @@ class Decision:
 # --------------------------------------------------------------------------
 
 _HELP = ("help", "what can you do", "capabilities", "commands")
+# 2026-10-15: what has happened on this ticket — answered from its history.
+_STATUS = ("status", "progress", "where is it", "what is the status", "what's the status")
 # Deliberately NOT bare interrogatives. "who", "why" and "when" match
 # "who is the PM of India?", which is chatter about the world, not a question
 # about this ticket — and Layer 1 has no way to tell the difference. Only
@@ -67,6 +69,69 @@ _QUESTION = (
     "what is this asking",
     "describe this",
 )
+
+
+# Commands the orchestrator runs as a workflow of its own, across agents and
+# into Confluence and GitHub (2026-10-08). Matched by their opening words only —
+# never guessed by the model: they write a design page or open a pull request.
+WORKFLOW_VERBS: dict[str, tuple[str, ...]] = {
+    "TDD": (
+        "create tdd",
+        "create the tdd",
+        "create a tdd",
+        "tdd",
+        "create technical design",
+        "create the technical design",
+        "write the tdd",
+    ),
+    "DESIGN": (
+        "explain why",
+        "why",
+        "why not",
+        "why can't",
+        "why cant",
+        "why can we not",
+        "why didn't",
+        "what about",
+        "could we use",
+        "can we use",
+        "should we use",
+    ),
+    "UPDATE_TDD": ("update the tdd", "update tdd", "revise the tdd", "update the design"),
+    "CODE": ("code", "start coding", "implement this", "implement the tdd"),
+}
+WORKFLOW_INTENTS = tuple(WORKFLOW_VERBS)
+_WORKFLOW_REASON = {
+    "TDD": "a request for the Technical Design Document — checked for readiness, then "
+    "written by the Planning agent in Confluence",
+    "DESIGN": "a question about the design — answered by the Planning agent",
+    "UPDATE_TDD": "a request to change the design — the Planning agent revises the TDD",
+    "CODE": "a request to implement the TDD — the Coding agent, after the branches are confirmed",
+}
+
+
+def _workflow_match(text: str) -> tuple[str, str] | None:
+    """(intent, the opening words matched) for a workflow command, longest first."""
+    best: tuple[str, str] | None = None
+    for intent, verbs in WORKFLOW_VERBS.items():
+        verb = _leading_verb(text, verbs)
+        if verb and (best is None or len(verb) > len(best[1])):
+            best = (intent, verb)
+    return best
+
+
+def classify_workflow(body: str, keyword: str = "Aetherion") -> Decision | None:
+    """A workflow command, by its opening words (Layer 1), or None."""
+    match = _workflow_match(strip_mention(body, keyword))
+    if match is None:
+        return None
+    intent, verb = match
+    return Decision(
+        intent=intent,
+        agent=None,
+        layer=1,
+        reason=f'{_WORKFLOW_REASON[intent]} — the comment began with "{verb}" (Layer 1).',
+    )
 
 
 def strip_mention(body: str, keyword: str = "Aetherion") -> str:
@@ -105,8 +170,27 @@ def classify_by_verb(body: str, keyword: str = "Aetherion") -> Decision | None:
             reason="a request for help — listing what this system can do.",
         )
 
+    if _leading_verb(text, _STATUS) or lowered.rstrip("?") in _STATUS:
+        return Decision(
+            intent="STATUS",
+            agent=None,
+            layer=1,
+            reason="a request for the ticket's status — read from its history.",
+        )
+
     # Longest match across every agent, so a two-word verb is not shadowed by a
     # one-word verb belonging to a different agent.
+    # The longest opening wins: "explain why …" is a design question, not "explain".
+    workflow = _workflow_match(text)
+    if workflow is not None:
+        catalog_verb = max(
+            (len(v) for spec in CATALOG for v in spec.verbs if _leading_verb(text, (v,))),
+            default=0,
+        )
+        question_verb = len(_leading_verb(text, _QUESTION) or "")
+        if len(workflow[1]) >= max(catalog_verb, question_verb):
+            return classify_workflow(body, keyword)
+
     best: tuple[int, AgentSpec, str] | None = None
     for spec in CATALOG:
         verb = _leading_verb(text, spec.verbs)

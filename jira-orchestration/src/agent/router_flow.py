@@ -24,13 +24,18 @@ from typing import Any
 
 from temporalio.common import RetryPolicy
 
-from routing.catalog import AgentSpec, display_name_for
-from routing.classify import Decision, classify, classify_by_verb
+from agent.command_flow import Command, run_command
+from agent.pipeline_flow import Chain, attach_to_ticket, jira_planning_source
+from routing import github_events as gh
+from routing.catalog import AgentSpec, by_intent, display_name_for
+from routing.classify import WORKFLOW_INTENTS, Decision, classify, classify_by_verb
 from routing.compose import (
     AMBIGUOUS_OPTIONS,
     HELP_OPTIONS,
     compose,
+    handled_by,
     router_only,
+    status_blocks,
 )
 from routing.ingress import IngressOutcome
 from routing.orchestration import (
@@ -42,7 +47,10 @@ from routing.orchestration import (
     TicketState,
     clock,
     plan_next,
+    previous_review_points,
 )
+from routing.pipeline import PipelineConfig, add_sections
+from routing.pipeline import summary as steps_summary
 from shared.contract import AgentResult, Outcome
 
 logger = logging.getLogger(__name__)
@@ -136,6 +144,55 @@ async def run_router(
         f"(layer {decision.layer}, confidence {decision.confidence:.2f})"
     )
 
+    # --- the ticket's status, from its history (2026-10-15) ------------------
+    if decision.intent == "STATUS":
+        found = await _safe(
+            execute, "ticket_state", issue_key, start_to_close_timeout=_POST_TIMEOUT
+        )
+        posted = await _reply(
+            execute,
+            gate,
+            status_blocks(issue_key, found.get("state") or {}),
+            run_id,
+            issue_key,
+            comment_id,
+        )
+        return {
+            "status": "answered",
+            "run_id": run_id,
+            "issue_key": issue_key,
+            "intent": "STATUS",
+            "layer": decision.layer,
+            "routed_to": decision.reason,
+            "ran": [],
+            "outcome": None,
+            "posted": bool(posted.get("posted")),
+            "comment_id": posted.get("comment_id", ""),
+            "created": [],
+            "after_build": [],
+        }
+
+    # --- a command the orchestrator runs as a workflow (TDD, design, code) ----
+    if decision.intent in WORKFLOW_INTENTS:
+        posted, ran, after_build = await _run_command(
+            decision, gate, dispatch, execute, run_id, issue_key, comment_id, body, keyword
+        )
+        return {
+            "status": "answered",
+            "run_id": run_id,
+            "issue_key": issue_key,
+            "intent": decision.intent,
+            "layer": decision.layer,
+            "routed_to": decision.reason,
+            "ran": ran,
+            "outcome": None,
+            "posted": bool(posted.get("posted")),
+            "comment_id": posted.get("comment_id", ""),
+            "created": [],
+            "after_build": [],
+            "links": after_build,
+        }
+
     # --- dispatch, or answer directly ---------------------------------------
     if decision.dispatches:
         assert decision.agent is not None
@@ -143,10 +200,11 @@ async def run_router(
         # AgentSpec.task_queue for why this cannot be read here directly.
         overrides = gate.get("task_queue_overrides") or {}
         agent = decision.agent.with_task_queue(overrides.get(decision.agent.agent_name))
-        posted, ran, result = await _orchestrate(
+        posted, ran, result, after_build = await _orchestrate(
             agent, decision, gate, dispatch, execute, sleep, run_id, issue_key, comment_id
         )
     else:
+        after_build = []
         blocks, ran, result = _answer_directly(decision)
         # --- ONE reply ------------------------------------------------------
         posted = await _reply(execute, gate, blocks, run_id, issue_key, comment_id)
@@ -163,7 +221,23 @@ async def run_router(
         "posted": bool(posted.get("posted")),
         "comment_id": posted.get("comment_id", ""),
         "created": [c.key for c in (result.created if result else [])],
+        # Review, Planning and Coding after a build, when configured.
+        "after_build": after_build,
     }
+
+
+async def _record(execute: Execute, issue_key: str, step: str, status: str, run_id: str) -> None:
+    """A step in the ticket's history that no job records itself (2026-10-15)."""
+    await _safe(
+        execute,
+        "record_step",
+        issue_key,
+        step,
+        status,
+        "",
+        run_id,
+        start_to_close_timeout=_POST_TIMEOUT,
+    )
 
 
 async def _reply(
@@ -199,7 +273,7 @@ async def _orchestrate(
     run_id: str,
     issue_key: str,
     comment_id: str,
-) -> tuple[dict[str, Any], list[str], AgentResult | None]:
+) -> tuple[dict[str, Any], list[str], AgentResult | None, list[dict[str, Any]]]:
     """Sequence this request against the ticket's state, answer at once, then finish.
 
     Still exactly one reply per comment: a job that runs is answered with a
@@ -216,9 +290,10 @@ async def _orchestrate(
         return await _reply(execute, gate, blocks, run_id, issue_key, comment_id)
 
     if plan.next is Next.ALREADY_RUNNING:
-        return await reply(_already_running(intent, issue_key, state, decision)), [], None
+        return (await reply(_already_running(intent, issue_key, state, decision)), [], None, [])
     if plan.next is Next.REUSE_REVIEW:
         previous = AgentResult.from_dict(plan.previous or {})
+        await _record(execute, issue_key, "REVIEW", "shown again — the ticket is unchanged", run_id)
         reused = (
             f"{spec.display_name} — {decision.reason} The ticket has not changed since the "
             "last review, so that review is shown again; no new review was run."
@@ -227,9 +302,13 @@ async def _orchestrate(
             await reply(compose(previous, routed_to=reused, ran=[spec.display_name])),
             [spec.display_name],
             previous,
+            [],
         )
     if plan.next is Next.BUILD_PAUSED:
-        return await reply(_paused(issue_key, plan, decision, min_readiness)), [], None
+        await _record(
+            execute, issue_key, "BUILD", f"paused — readiness {plan.review_score}/5", run_id
+        )
+        return (await reply(_paused(issue_key, plan, decision, min_readiness)), [], None, [])
 
     # --- a job runs: answer at once, then do it -----------------------------
     queued = plan.next is Next.WAIT
@@ -239,7 +318,7 @@ async def _orchestrate(
         # Nowhere to report to (the administrators were just told). Doing the
         # work anyway would build tickets nobody hears about; asking again is
         # safe, because nothing was started.
-        return placeholder, [], None
+        return placeholder, [], None, []
 
     if queued:
         state = await _wait_for_turn(execute, sleep, issue_key, gate)
@@ -250,7 +329,7 @@ async def _orchestrate(
             posted = await _finish_reply(
                 execute, gate, reply_id, blocks, run_id, issue_key, comment_id
             )
-            return posted, [], None
+            return posted, [], None, []
         # Anything else runs now, fresh, with what the job ahead left behind.
         plan = Plan(Next.RUN, plan.review_questions, plan.review_score)
         await _safe(
@@ -264,7 +343,17 @@ async def _orchestrate(
         )
 
     tracked = intent in TRACKED
+    # What follows a build (routing/pipeline.py); nothing follows anything else.
+    after = PipelineConfig.from_dict(gate.get("pipeline") if intent == "BUILD" else None)
     if tracked:
+        review = by_intent("REVIEW")
+        # A build followed by review, planning and coding holds the ticket
+        # longer than a build alone; it must not be taken for a dead job.
+        minutes = (
+            after.budget_minutes(spec.timeout_minutes, review.timeout_minutes if review else 0)
+            if after.steps
+            else 0
+        )
         await _safe(
             execute,
             "claim_ticket",
@@ -272,12 +361,36 @@ async def _orchestrate(
             intent,
             run_id,
             reply_id,
+            minutes,
             start_to_close_timeout=_POST_TIMEOUT,
         )
-    extra = {"review_questions": plan.review_questions} if plan.review_questions else {}
+    extra: dict[str, Any] = (
+        {"review_questions": plan.review_questions} if plan.review_questions else {}
+    )
+    if intent == "REVIEW":
+        # The last review's questions: this one checks the comments for answers.
+        previous = previous_review_points(state)
+        if previous:
+            extra["previous_questions"] = previous
     blocks, ran, result = await _dispatch_and_compose(
         spec, decision, gate, dispatch, execute, run_id, issue_key, comment_id, extra
     )
+    after_build: list[dict[str, Any]] = []
+    if after.follows(result):
+        assert result is not None
+        blocks, ran, after_build = await _after_build(
+            after,
+            result,
+            blocks,
+            ran,
+            gate,
+            dispatch,
+            execute,
+            run_id,
+            issue_key,
+            comment_id,
+            reply_id,
+        )
     if tracked:
         await _safe(
             execute,
@@ -290,7 +403,205 @@ async def _orchestrate(
             start_to_close_timeout=_POST_TIMEOUT,
         )
     posted = await _finish_reply(execute, gate, reply_id, blocks, run_id, issue_key, comment_id)
-    return posted, ran, result
+    return posted, ran, result, after_build
+
+
+async def _after_build(
+    config: PipelineConfig,
+    build: AgentResult,
+    blocks: list[tuple[str, object]],
+    ran: list[str],
+    gate: dict[str, Any],
+    dispatch: Dispatch,
+    execute: Execute,
+    run_id: str,
+    issue_key: str,
+    comment_id: str,
+    reply_id: str,
+) -> tuple[list[tuple[str, object]], list[str], list[dict[str, Any]]]:
+    """Review, Planning and Coding after a build (agent/pipeline_flow.py).
+
+    The build's own reply is shown at once, with the steps still to come; the
+    same comment is edited as each step starts and ends.
+    """
+    overrides = gate.get("task_queue_overrides") or {}
+    review = by_intent("REVIEW")
+    if review is not None:
+        review = review.with_task_queue(overrides.get(review.agent_name))
+
+    async def progress(steps: list, ran_now: list[str]) -> None:
+        if not reply_id:
+            return
+        await _safe(
+            execute,
+            "update_reply",
+            issue_key,
+            reply_id,
+            add_sections(blocks, steps, ran_now),
+            run_id,
+            start_to_close_timeout=_POST_TIMEOUT,
+        )
+
+    chain = Chain(
+        config=config,
+        review_spec=review,
+        execute=execute,
+        dispatch=dispatch,
+        progress=progress,
+        issue_key=issue_key,
+        run_id=run_id,
+        review_input={"issue_key": issue_key, "comment_id": comment_id},
+        planning_source=jira_planning_source(execute, issue_key),
+        keep_design=attach_to_ticket(execute, issue_key, run_id),
+    )
+    steps, ran = await chain.run(build, ran)
+    logger.info(
+        f"run {run_id}: after the build — " + ", ".join(f"{s.name} {s.status}" for s in steps)
+    )
+    return add_sections(blocks, steps, ran), ran, steps_summary(steps)
+
+
+# How long a command may hold its ticket: a review, a design, and Coding twice
+# with a revision between (see agent/command_flow.py).
+_COMMAND_MINUTES = {"TDD": 30, "DESIGN": 20, "UPDATE_TDD": 25, "CODE": 75}
+
+
+async def _run_command(
+    decision: Decision,
+    gate: dict[str, Any],
+    dispatch: Dispatch,
+    execute: Execute,
+    run_id: str,
+    issue_key: str,
+    comment_id: str,
+    body: str,
+    keyword: str,
+) -> tuple[dict[str, Any], list[str], dict[str, str]]:
+    """One TDD / design / code command asked on a Jira ticket; (posted, ran, links)."""
+    intent = decision.intent
+    state = TicketState.from_dict(gate.get("orchestration"))
+
+    async def reply(blocks: list[tuple[str, object]]) -> dict[str, Any]:
+        return await _reply(execute, gate, blocks, run_id, issue_key, comment_id)
+
+    if state.active is not None and state.active.intent == intent:
+        started = clock(state.active.started)
+        return (
+            await reply(
+                router_only(
+                    f"⏳ Already working on this ({intent.lower()})",
+                    routed_to=decision.reason,
+                    what_happened=f"The same request started at {started} is still running; "
+                    "its result will appear in that reply.",
+                )
+            ),
+            [],
+            {},
+        )
+
+    placeholder = await reply(
+        router_only("⏳ Working on it…", routed_to=decision.reason, what_happened="Started.")
+    )
+    reply_id = str(placeholder.get("comment_id") or "")
+    if not placeholder.get("posted") and not placeholder.get("read_only"):
+        return placeholder, [], {}
+    await _safe(
+        execute,
+        "claim_ticket",
+        issue_key,
+        intent,
+        run_id,
+        reply_id,
+        _COMMAND_MINUTES.get(intent, 30),
+        start_to_close_timeout=_POST_TIMEOUT,
+    )
+
+    async def say(blocks: list[tuple[str, object]]) -> None:
+        if reply_id:
+            await _safe(
+                execute,
+                "update_reply",
+                issue_key,
+                reply_id,
+                blocks,
+                run_id,
+                start_to_close_timeout=_POST_TIMEOUT,
+            )
+
+    overrides = gate.get("task_queue_overrides") or {}
+    review = by_intent("REVIEW")
+    if review is not None:
+        review = review.with_task_queue(overrides.get(review.agent_name))
+    fingerprint = str(gate.get("fingerprint") or "")
+    last = state.last.get("REVIEW") or {}
+    reusable = (
+        last.get("result")
+        if fingerprint
+        and last.get("fingerprint") == fingerprint
+        and (last.get("result") or {}).get("outcome") == "REVIEWED"
+        else None
+    )
+    cmd = Command(
+        intent=intent,
+        text=body,
+        issue_key=issue_key,
+        run_id=run_id,
+        execute=execute,
+        dispatch=dispatch,
+        say=say,
+        settings=gate.get("commands") or {},
+        keyword=keyword,
+        review_spec=review,
+        comment_id=comment_id,
+        previous_questions=previous_review_points(state),
+        reusable_review=reusable,
+    )
+    result = await run_command(cmd)
+    if result.review is not None:
+        # Kept like any review: the next "review" or "create TDD" on the
+        # unchanged story reuses it.
+        await _safe(
+            execute,
+            "finish_ticket",
+            issue_key,
+            "REVIEW",
+            run_id,
+            result.review,
+            fingerprint,
+            start_to_close_timeout=_POST_TIMEOUT,
+        )
+    await _safe(
+        execute,
+        "finish_ticket",
+        issue_key,
+        intent,
+        run_id,
+        None,
+        fingerprint,
+        start_to_close_timeout=_POST_TIMEOUT,
+    )
+    if result.links.get("pr") and result.links.get("page_id"):
+        # The pull request is linked on the TDD page too.
+        await _safe(
+            execute,
+            "confluence_reply",
+            result.links["page_id"],
+            "",
+            result.blocks,
+            run_id,
+            start_to_close_timeout=_POST_TIMEOUT,
+        )
+    blocks = _with_routing(result.blocks, decision, result.ran)
+    posted = await _finish_reply(execute, gate, reply_id, blocks, run_id, issue_key, comment_id)
+    return posted, result.ran, result.links
+
+
+def _with_routing(
+    blocks: list[tuple[str, object]], decision: Decision, ran: list[str]
+) -> list[tuple[str, object]]:
+    """A command's reply in the usual envelope: "Handled by" and "Routed to" after its title."""
+    head, rest = blocks[:1], blocks[1:]
+    return head + [("Handled by", handled_by(ran)), ("Routed to", decision.reason)] + rest
 
 
 async def _wait_for_turn(
@@ -644,7 +955,7 @@ async def _dispatch_and_compose(
     return blocks, [spec.display_name], result
 
 
-# Outcome -> the email kind, by the names ORCH_NOTIFY_ON and LTW_NOTIFY_ON use.
+# Outcome -> the email kind, by the names ORCH_NOTIFY_ON and TASK_NOTIFY_ON use.
 # NOT_A_REQUIREMENT and REVIEWED are absent on purpose: an invalid request never
 # emails, and a review writes nothing a person has to act on.
 _EMAIL_KIND_FOR = {
@@ -790,8 +1101,17 @@ async def run_health_check(dispatch: Dispatch, execute: Execute) -> dict[str, An
     """
     from routing.catalog import CATALOG
 
+    # The same task queues a real request uses (ORCH_TASK_QUEUE_*), read in an
+    # activity. Without them every probe went to this router's own queue, where
+    # no child worker listens, and timed out — although the agents were fine
+    # (2026-10-13, after publishing).
+    setup = await _safe(execute, "request_settings", "", start_to_close_timeout=_POST_TIMEOUT)
+    overrides = setup.get("task_queue_overrides") or {}
+    pipeline = setup.get("pipeline") or {}
+
     results: dict[str, Any] = {}
     for spec in CATALOG:
+        spec = spec.with_task_queue(overrides.get(spec.agent_name))
         # issue_key "FL" alone is a real, already-observed safe no-op: both
         # children read it as "not a real issue key, nothing to do" and return
         # immediately without creating or reading anything. This is not a
@@ -805,7 +1125,8 @@ async def run_health_check(dispatch: Dispatch, execute: Execute) -> dict[str, An
         probe_payload.update(spec.forced_payload)
 
         options: dict[str, Any] = {
-            "execution_timeout": timedelta(seconds=30),
+            # A published worker that has been idle can take a while to start.
+            "execution_timeout": timedelta(seconds=90),
             "workflow_id": f"healthcheck-{spec.intent.lower()}",
             "retry_policy": RetryPolicy(maximum_attempts=1),
         }
@@ -821,6 +1142,32 @@ async def run_health_check(dispatch: Dispatch, execute: Execute) -> dict[str, An
                 "error": f"{type(exc).__name__}: {str(exc)[:300]}",
             }
 
+    # Planning and Coding, when configured: each is sent a request that stops
+    # before doing anything (no repositories; no design), so it answers at once.
+    probes = (
+        ("planning", pipeline.get("planning_agent"), pipeline.get("planning_queue"), {"repos": ""}),
+        (
+            "coding",
+            pipeline.get("coding_agent"),
+            pipeline.get("coding_queue"),
+            {"mode": "delegated"},
+        ),
+    )
+    for label, name, queue, payload in probes:
+        if not (name and queue):
+            continue
+        options = {
+            "execution_timeout": timedelta(seconds=90),
+            "workflow_id": f"healthcheck-{label}",
+            "retry_policy": RetryPolicy(maximum_attempts=1),
+            "task_queue": queue,
+        }
+        try:
+            await dispatch(name, {**payload, "run_id": "healthcheck"}, **options)
+            results[name] = {"reachable": True}
+        except Exception as exc:  # noqa: BLE001 — the point is to report, not raise
+            results[name] = {"reachable": False, "error": f"{type(exc).__name__}: {str(exc)[:300]}"}
+
     # An app password dies silently (Google revokes it when 2-Step Verification
     # is reset); a failed login here is a missing email caught in advance.
     smtp = await _safe(execute, "smtp_login_check", start_to_close_timeout=_POST_TIMEOUT)
@@ -828,6 +1175,8 @@ async def run_health_check(dispatch: Dispatch, execute: Execute) -> dict[str, An
         "status": "health_check",
         "agents": results,
         "smtp": {"ok": bool(smtp.get("ok")), "error": str(smtp.get("error") or "")},
+        # The webhook URLs to configure, or which checks still wait for them.
+        "webhooks": setup.get("webhooks") or {},
     }
 
 
@@ -852,10 +1201,67 @@ async def run_github_poll(execute: Execute, dispatch: Dispatch) -> dict[str, Any
     scan = await _safe(execute, "github_scan", start_to_close_timeout=_GITHUB_SCAN_TIMEOUT)
     if not scan.get("ok"):
         return {"status": "github_poll", "error": scan.get("error") or "scan failed", "sent": 0}
+    return await _send_github_events(execute, dispatch, scan, "github_poll")
 
+
+# The flat fields a GitHub webhook event carries (antennae unified-webhook,
+# providers/github.py) — the agent's form declares the same names.
+GITHUB_EVENT_FIELDS = (
+    "github_event",
+    "github_action",
+    "github_repo",
+    "pr_number",
+    "github_comment_id",
+)
+
+
+async def run_github_event(
+    execute: Execute, dispatch: Dispatch, payload: dict[str, Any]
+) -> dict[str, Any]:
+    """One GitHub webhook event, pushed as it happened (2026-10-14) — no polling.
+
+    A merge into the main branch refreshes Planning's graph and is announced on
+    the story; a new PR comment goes to Planning. Handled by the same code as
+    the poll, so an event is never sent twice by the two together.
+    """
+    fields = {name: payload.get(name) for name in GITHUB_EVENT_FIELDS}
+    scan = await _safe(execute, "github_event", fields, start_to_close_timeout=_GITHUB_SCAN_TIMEOUT)
+    if not scan.get("ok"):
+        return {"status": "github_event", "error": scan.get("error") or "failed", "sent": 0}
+    result = await _send_github_events(execute, dispatch, scan, "github_event")
+    result["skipped"] = scan.get("skipped") or ""
+    return result
+
+
+async def _send_github_events(
+    execute: Execute, dispatch: Dispatch, scan: dict[str, Any], status: str
+) -> dict[str, Any]:
+    """Give each event to Planning; record it sent, or keep it for a retry."""
     results: list[dict[str, Any]] = []
     for event in scan.get("events") or []:
         ok, message = await _give_to_planning(dispatch, scan, event)
+        if ok and event.get("kind") == "pr_merged" and event.get("issue_key"):
+            # The story — and its TDD page — hear that the merged code is in the graph.
+            await _safe(
+                execute,
+                "announce_merge",
+                event["issue_key"],
+                event["pr_number"],
+                event["pr_url"],
+                event["repo"],
+                start_to_close_timeout=_POST_TIMEOUT,
+            )
+            # The merge in the story's history (2026-10-15): "@Aetherion status" shows it.
+            await _safe(
+                execute,
+                "record_step",
+                event["issue_key"],
+                "MERGE",
+                f"{event['repo']} #{event['pr_number']} merged — Planning's graph refreshed",
+                event["pr_url"],
+                POLL_RUN_ID,
+                start_to_close_timeout=_POST_TIMEOUT,
+            )
         done = await _safe(
             execute,
             "github_event_done",
@@ -877,7 +1283,7 @@ async def run_github_poll(execute: Execute, dispatch: Dispatch) -> dict[str, Any
         results.append({"event": event["key"], "ok": ok, "message": message})
 
     return {
-        "status": "github_poll",
+        "status": status,
         "repos": scan.get("repos", 0),
         "sent": sum(1 for r in results if r["ok"]),
         "failed": sum(1 for r in results if not r["ok"]),
@@ -889,9 +1295,19 @@ async def run_github_poll(execute: Execute, dispatch: Dispatch) -> dict[str, Any
 async def _give_to_planning(
     dispatch: Dispatch, scan: dict[str, Any], event: dict[str, Any]
 ) -> tuple[bool, str]:
-    """Start the Planning agent with the event as its input; (succeeded, message)."""
+    """Start the Planning agent with the event as its input; (succeeded, message).
+
+    A merge refreshes the graph of that one repository and writes no design
+    (Planning with ``repos`` and no ``issue_text``, 2026-10-08): the next design
+    then sees the code as merged. New PR comments are a requirement to design
+    for, against every repository Planning is configured with.
+    """
+    repos_text = str(scan.get("repos_text") or "")
+    merged = event["kind"] == "pr_merged"
+    one_repo = gh.service_line(repos_text, event["repo"])
     payload = {
-        "issue_text": event["issue_text"],
+        "issue_text": "" if merged else event["issue_text"],
+        "repos": one_repo if merged else (repos_text or one_repo),
         # Not read by Planning today; there for it to use.
         "event": event["kind"],
         "repo": event["repo"],
@@ -912,5 +1328,5 @@ async def _give_to_planning(
         return False, f"{type(exc).__name__}: {str(exc)[:300]}"
     out = out if isinstance(out, dict) else {}
     if out.get("status") == "success":
-        return True, "plan generated"
-    return False, str(out.get("message") or out.get("error") or "Planning returned no plan")[:300]
+        return True, "graph refreshed" if merged else "plan generated"
+    return (False, str(out.get("message") or out.get("error") or "Planning returned no plan")[:300])

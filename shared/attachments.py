@@ -12,7 +12,7 @@ design PDF would blow the context window and the bill alongside it.
 already downloaded, which is what lets two agents on different HTTP stacks
 share it unchanged. The caps arrive as an explicit :class:`Limits` rather than
 being read from the environment here, because each agent names its own
-variables (``LTW_ATTACHMENT_MAX_BYTES``, ``REVIEW_ATTACHMENT_MAX_BYTES``) and a
+variables (``TASK_ATTACHMENT_MAX_BYTES``, ``REVIEW_ATTACHMENT_MAX_BYTES``) and a
 shared module must not pick a winner.
 """
 
@@ -285,7 +285,14 @@ async def extract(
 
     text = (text or "").strip()
     if not text:
-        info.note = "No text content found in this attachment."
+        # An image that comes back empty was usually NOT read (the vision model
+        # was unavailable), not an image without text — say both (2026-10-06).
+        info.note = (
+            "No text could be read from this image — it may hold no text, or image "
+            "reading was unavailable for this run."
+            if suffix(filename) in _IMAGE_LIKE
+            else "No text content found in this attachment."
+        )
         return info
 
     text, note = fit_to_budget(text, limits.max_chars)

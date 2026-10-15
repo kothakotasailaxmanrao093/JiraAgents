@@ -30,11 +30,10 @@ ENV_FILE = ROOT / ".env"
 # Anything whose name contains one of these is never printed in full.
 _SECRET_HINTS = ("TOKEN", "SECRET", "PASSWORD", "KEY")
 # ...except these, which are identifiers rather than credentials.
-_NOT_SECRET = ("JIRA_PROJECT_KEY", "LTW_ALLOWED_PROJECT_KEYS", "LTW_TRIGGER_KEYWORD")
+_NOT_SECRET = ("JIRA_PROJECT_KEY", "TASK_ALLOWED_PROJECT_KEYS", "TASK_TRIGGER_KEYWORD")
 
 REQUIRED = ("JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_API_TOKEN")
 # Either proves a delivery really came from Jira; the server accepts both.
-REQUIRED_EITHER = ("LTW_WEBHOOK_SECRET", "LTW_JIRA_WEBHOOK_SECRET")
 
 
 def _is_secret(name: str) -> bool:
@@ -85,27 +84,25 @@ def check(values: dict[str, str]) -> list[str]:
     if missing:
         problems.append(f"Required setting(s) not set: {', '.join(missing)}.")
 
-    if not any(values.get(name, "").strip() for name in REQUIRED_EITHER):
-        problems.append(
-            f"None of {' / '.join(REQUIRED_EITHER)} is set, so the webhook "
-            "cannot tell a real Jira delivery from anyone else's POST."
-        )
+    # No webhook-secret check (2026-10-06): those secrets belong to the standalone
+    # webhook server (src/webhook/server.py), which Aetherion does not run — Jira
+    # reaches the agents through the Orchestration agent's Aetherion webhook.
 
-    if _truthy(values.get("LTW_LOCAL_EXECUTION", "")):
+    if _truthy(values.get("TASK_LOCAL_EXECUTION", "")):
         problems.append(
-            "LTW_LOCAL_EXECUTION is on. That makes the webhook server run the "
+            "TASK_LOCAL_EXECUTION is on. That makes the webhook server run the "
             "agent in its own process, which is a local development mode."
         )
 
-    if _truthy(values.get("LTW_READ_ONLY", "")):
+    if _truthy(values.get("TASK_READ_ONLY", "")):
         problems.append(
-            "LTW_READ_ONLY is on. The deployed agent will refuse every write and "
+            "TASK_READ_ONLY is on. The deployed agent will refuse every write and "
             "reply 'this deployment is in read-only mode' to every request."
         )
 
-    if not values.get("LTW_ALLOWED_PROJECT_KEYS", "").strip():
+    if not values.get("TASK_ALLOWED_PROJECT_KEYS", "").strip():
         problems.append(
-            "LTW_ALLOWED_PROJECT_KEYS is blank, so the deployed agent may create "
+            "TASK_ALLOWED_PROJECT_KEYS is blank, so the deployed agent may create "
             "issues in EVERY project on the site. Name the projects it is for."
         )
 
@@ -113,9 +110,9 @@ def check(values: dict[str, str]) -> list[str]:
     if re.search(r"(localhost|127\.0\.0\.1|ngrok|\.test\b|sandbox|demo)", base, re.IGNORECASE):
         problems.append(f"JIRA_BASE_URL looks like a test site: {base}")
 
-    if values.get("LTW_REQUIRE_LLM", "").strip() == "":
+    if values.get("TASK_REQUIRE_LLM", "").strip() == "":
         problems.append(
-            "LTW_REQUIRE_LLM is unset (defaults to off), so a gateway outage "
+            "TASK_REQUIRE_LLM is unset (defaults to off), so a gateway outage "
             "silently produces generically-worded tickets instead of stopping. "
             "Set it explicitly, either way, so the choice is on the record."
         )

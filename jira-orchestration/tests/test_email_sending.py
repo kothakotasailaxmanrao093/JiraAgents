@@ -77,7 +77,11 @@ async def test_an_identical_email_inside_the_window_is_not_sent_twice(_smtp) -> 
 
 async def test_an_outcome_email_goes_out_with_the_ticket_and_the_facts(_smtp) -> None:
     result = await tools.send_outcome_email(
-        "created", "BGV-7", "Work breakdown created", ["Created Story BGV-8: Record consent"], "r1"
+        "created",
+        "BGV-7",
+        "Work breakdown created",
+        ["Created Story BGV-8: Record consent"],
+        "r1",
     )
     assert result["sent"] is True
     assert "BGV-7" in _smtp[0]["subject"]
@@ -139,9 +143,9 @@ async def test_a_rejected_password_is_named(monkeypatch) -> None:
 
 
 def test_both_deployments_email_the_same_outcomes_and_never_on_creation() -> None:
-    """One list must mean the same thing in both deployments (settings.py). And
-    the owner's decision (2026-09-24, re-confirmed 2026-09-25): no email when
-    tickets are created."""
+    """One list must mean the same thing in both deployments (settings.py). The
+    owner's decision (2026-09-24) was no email when tickets are created; since
+    2026-10-08 it is no email at all — every reply and update is a comment."""
     from pathlib import Path
 
     def value(path: Path, key: str) -> set[str]:
@@ -152,5 +156,26 @@ def test_both_deployments_email_the_same_outcomes_and_never_on_creation() -> Non
 
     here = Path(__file__).resolve().parents[1]
     router = value(here / ".env.template", "ORCH_NOTIFY_ON")
-    breakdown = value(here.parent / "jira-task-creation" / ".env.template", "LTW_NOTIFY_ON")
-    assert router == breakdown == {"clarification", "duplicates", "failed"}
+    breakdown = value(here.parent / "jira-task-creation" / ".env.template", "TASK_NOTIFY_ON")
+    assert router == breakdown == {"none"}
+
+
+def test_none_turns_every_email_off(monkeypatch) -> None:
+    from routing import settings
+
+    monkeypatch.setenv("ORCH_NOTIFY_ON", "none")
+    assert settings.email_off() and settings.notify_on() == ()
+
+
+async def test_with_email_off_an_admin_alert_is_only_logged(monkeypatch) -> None:
+    from tools import tools
+
+    monkeypatch.setenv("ORCH_NOTIFY_ON", "none")
+    monkeypatch.setenv("ORCH_NOTIFY_EMAILS", "lead@example.com")
+
+    async def no_send(*a, **k):
+        raise AssertionError("no email may be sent")
+
+    monkeypatch.setattr(tools, "deliver", no_send)
+    out = await tools.notify_admins("Could not post", "403", "r1")
+    assert out["sent"] is False and "email is off" in out["skipped"]

@@ -28,6 +28,22 @@ def test_a_comment_without_the_keyword_is_dropped_silently(body: str) -> None:
     assert verdict.ignored is IgnoreReason.NO_KEYWORD
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        # KS-17185 (2026-10-06): a colleague's note naming the agent was answered
+        # on a real team's ticket. Only an explicit "@Aetherion" asks for work.
+        "Hey @Tyler Judkins here is the first version of the reports created by Aetherion Agent",
+        "Aetherion build a thing",
+        "mail the summary to bot@aetherion.io",
+    ],
+)
+def test_naming_the_agent_without_the_mention_is_dropped(body: str) -> None:
+    verdict = screen_comment(body)
+    assert verdict.dropped
+    assert verdict.ignored is IgnoreReason.NO_KEYWORD
+
+
 def test_a_near_miss_on_the_keyword_does_not_fire() -> None:
     """Whole-word matching: "aetherionx" is not a mention."""
     assert screen_comment("@aetherionx build a thing").dropped
@@ -52,7 +68,7 @@ def test_the_systems_own_reply_can_never_start_a_run() -> None:
 
 
 def test_the_signature_alone_is_enough_to_stop_a_run() -> None:
-    assert screen_comment(f"@Aetherion build x {AGENT_SIGNATURE}").dropped
+    assert screen_comment(f"@Aetherion build x\n{AGENT_FOOTER}").dropped
 
 
 def test_the_bot_account_is_recognised_when_configured() -> None:
@@ -73,7 +89,7 @@ def test_a_human_on_a_different_account_still_proceeds() -> None:
 def test_the_signature_guard_works_even_with_no_account_configured() -> None:
     """Identity cannot decide this: the agent usually posts as the same Jira
     account as the people using it."""
-    assert screen_comment(f"@Aetherion {AGENT_SIGNATURE} said so").dropped
+    assert screen_comment(f"{AGENT_SIGNATURE} · @Aetherion said so").dropped
 
 
 # --- the keys ----------------------------------------------------------------

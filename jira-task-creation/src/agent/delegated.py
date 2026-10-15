@@ -63,7 +63,7 @@ AGENT_DISPLAY_NAME = "JiraTaskCreation"
 # It is kept in step by scripts/publish.py, which writes all three (pyproject,
 # metadata.json and this constant) together, and by
 # tests/test_version_agreement.py, which fails if they ever diverge.
-AGENT_VERSION = "4.3.52"
+AGENT_VERSION = "4.3.54"
 
 
 def agent_version() -> str:
@@ -363,6 +363,7 @@ def to_contract(result: dict[str, Any], *, run_id: str, agent_version: str) -> A
             else list(result.get("clarifying_questions") or [])
         ),
         proposed=list(result.get("proposed") or []),
+        documents=list(result.get("documents") or []),
         duplicates=duplicates,
         sources_read=_sources_read(result),
         sources_missing=_sources_missing(result),

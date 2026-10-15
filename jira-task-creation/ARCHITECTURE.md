@@ -150,12 +150,12 @@ mistaken for a bad requirement when the truth is the spec was never opened.
 
 **Two size limits, both honest about what they did:**
 
-- *Per file* (`LTW_ATTACHMENT_MAX_CHARS`, 20,000). `fit_to_budget` keeps the
+- *Per file* (`TASK_ATTACHMENT_MAX_CHARS`, 20,000). `fit_to_budget` keeps the
   opening **and** the ending, splitting on blank lines, and writes
   `[... N characters omitted from the middle ...]` into the text. Plain
   truncation used to keep only the opening, which is the worst half to keep —
   scope, limits and acceptance criteria are almost always at the end.
-- *Overall* (`LTW_CONTEXT_MAX_CHARS`, 24,000). Whole sections are dropped,
+- *Overall* (`TASK_CONTEXT_MAX_CHARS`, 24,000). Whole sections are dropped,
   least valuable first (work log, then history, then comments…), never cut
   mid-sentence, and each drop is named in the reply.
 
@@ -213,7 +213,7 @@ The requirement text is byte-identical on every re-post, so it is the only
 dependable comparison. Measured on the real project: the genuine duplicate
 scored **0.833**, the nearest unrelated ticket **0.333**.
 
-Closed work is ignored by default (`LTW_MATCH_CLOSED_WORK=false`). Work closed
+Closed work is ignored by default (`TASK_MATCH_CLOSED_WORK=false`). Work closed
 as "Won't Do" is a decision *not* to build something; that is not a reason to
 refuse a new request.
 

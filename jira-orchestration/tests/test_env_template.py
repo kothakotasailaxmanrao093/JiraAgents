@@ -17,7 +17,9 @@ SETTINGS = ROOT / "src" / "routing" / "settings.py"
 
 
 def _declared() -> set[str]:
-    return set(re.findall(r"^([A-Z][A-Z0-9_]+)=", TEMPLATE.read_text(), re.MULTILINE))
+    # Set ("NAME=") or listed at its default under "Optional" ("# NAME=…"): both
+    # tell a new person the setting exists and what it does (2026-10-06).
+    return set(re.findall(r"^#?\s*([A-Z][A-Z0-9_]+)=", TEMPLATE.read_text(), re.MULTILINE))
 
 
 def _read_by_the_code() -> set[str]:

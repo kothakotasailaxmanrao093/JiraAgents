@@ -42,9 +42,31 @@ def text_node(text: str, *, strong: bool = False, em: bool = False) -> dict[str,
     return node
 
 
+# "[label](https://…)" and bare "https://…" become links, so a reply's issue
+# keys, TDD pages and pull requests can be clicked (2026-10-08).
+_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)|(https?://[^\s<>()\]]+)")
+
+
+def link_runs(text: str) -> list[dict[str, Any]]:
+    """Plain text as ADF runs, with every link made clickable."""
+    runs: list[dict[str, Any]] = []
+    pos = 0
+    for m in _LINK.finditer(text):
+        if m.start() > pos:
+            runs.append(text_node(text[pos : m.start()]))
+        label, url = (m.group(1), m.group(2)) if m.group(2) else (m.group(3), m.group(3))
+        runs.append(
+            {"type": "text", "text": label, "marks": [{"type": "link", "attrs": {"href": url}}]}
+        )
+        pos = m.end()
+    if pos < len(text):
+        runs.append(text_node(text[pos:]))
+    return runs or [text_node(text)]
+
+
 def paragraph(runs: Any) -> dict[str, Any]:
     if isinstance(runs, str):
-        runs = [text_node(runs)]
+        runs = link_runs(runs)
     return {"type": "paragraph", "content": list(runs)}
 
 
@@ -144,7 +166,12 @@ def _adf_inline(node: Any) -> str:
             parts.append(str(item.get("text") or ""))
         elif kind == "hardBreak":
             parts.append("\n")
-        elif kind in ("mention", "emoji"):
+        elif kind == "mention":
+            # A mention is "@Name" in Jira; written that way even when the node
+            # leaves the "@" out, because the trigger rule needs it (2026-10-06).
+            name = str((item.get("attrs") or {}).get("text") or "")
+            parts.append(name if not name or name.startswith("@") else f"@{name}")
+        elif kind == "emoji":
             parts.append(str((item.get("attrs") or {}).get("text") or ""))
         elif kind in ("inlineCard", "blockCard"):
             # A pasted link Jira turned into a card still has to be visible:

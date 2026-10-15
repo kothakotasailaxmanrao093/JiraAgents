@@ -1,7 +1,9 @@
-"""Start a GitHub check on the local router every minute (2026-10-03).
+"""Start the router's scheduled checks on this laptop every minute (2026-10-03).
 
-The local stand-in for Aetherion's Schedule: ``{"github_poll": true}`` on the
-router's local queue, one check at a time — a check still running (Planning
+The local stand-in for Aetherion's Schedule, on the router's local queue:
+``{"github_poll": true}`` (merges → Planning refreshes its code graph; the story
+hears of it) and, since 2026-10-08, ``{"confluence_poll": true}`` (comments on
+the TDD pages). One check at a time — a check still running (Planning or Coding
 can take minutes) is never overlapped. Started by ``scripts/run_local.sh --poll``.
 """
 
@@ -34,11 +36,22 @@ async def main() -> None:
             )
             result = await handle.result()
             summary = {k: result.get(k) for k in ("repos", "sent", "failed", "error") if k in result}
-            print(f"{stamp} {summary} {result.get('notes') or ''}", flush=True)
+            print(f"{stamp} github {summary} {result.get('notes') or ''}", flush=True)
             for item in result.get("results") or []:
                 print(f"         {'sent' if item['ok'] else 'FAILED'}: {item['event']} — {item['message']}", flush=True)
         except Exception as exc:  # noqa: BLE001 — keep checking; say what happened
-            print(f"{stamp} check did not run: {type(exc).__name__}: {exc}", flush=True)
+            print(f"{stamp} github check did not run: {type(exc).__name__}: {exc}", flush=True)
+        try:
+            handle = await client.start_workflow(
+                "JiraOrchestration", {"confluence_poll": True}, id="confluence-poll-local", task_queue=queue
+            )
+            result = await handle.result()
+            answered = result.get("answered") or []
+            print(f"{stamp} confluence pages={result.get('pages', 0)} answered={len(answered)} {result.get('error') or ''}", flush=True)
+            for item in answered:
+                print(f"         {item.get('intent')}: comment {item.get('comment')} {item.get('links') or ''}", flush=True)
+        except Exception as exc:  # noqa: BLE001 — keep checking; say what happened
+            print(f"{stamp} confluence check did not run: {type(exc).__name__}: {exc}", flush=True)
         await asyncio.sleep(max(0.0, INTERVAL_SECONDS - (time.monotonic() - started)))
 
 

@@ -34,12 +34,14 @@ belongs to it. If you cannot tell confidently, ask a focused clarification
 question rather than rejecting.
 
 CLASSIFICATION (scope and complexity, never description length)
-- Small: one focused feature or change. One Story with its Subtasks. No Epic.
-- Medium: several related capabilities. One Epic with multiple Stories.
-- Large: several connected workflows or modules. One Epic with a Story per
-  workflow, each with its Subtasks.
+- Small: one focused change or job. ONE item (it becomes a Jira Task) with its
+  Subtasks. No Epic.
+- Medium: one feature with several parts. ONE Story with a Subtask per part
+  (usually 2 to 4). No Epic. Do not split one feature into several Stories.
+- Large: several distinct features or connected workflows. One Epic with a
+  Story per feature, each with its Subtasks.
 
-EPIC (Medium and Large only) — exactly these business fields:
+EPIC (Large only) — exactly these business fields:
 business objective, scope, out-of-scope items, priority, acceptance criteria,
 related user stories. Nothing else. If out-of-scope items are unknown, use
 "Not specified".
@@ -143,7 +145,7 @@ Decompose the requirement. Return JSON only, in exactly this shape:
     "impact": "<who is affected and how badly>",
     "widespread": true | false       // everyone, or a whole feature, is affected
   },
-  "epic": {                          // omit entirely when classification is Small
+  "epic": {                          // only when classification is Large; omit otherwise
     "business_objective": "...",
     "scope": ["..."],
     "out_of_scope": ["..."],         // ["Not specified"] when unknown
@@ -176,14 +178,15 @@ Decompose the requirement. Return JSON only, in exactly this shape:
 }
 
 Rules the output is checked against, so satisfy them up front:
-- Small -> no "epic" key, exactly one story.
+- Small or Medium -> no "epic" key, exactly one story (Small: the Task;
+  Medium: the Story).
 - work_kind: "defect" when something that already exists is BROKEN in
   production or for real users (an error, a page that will not load, people
   unable to do what they could before). "technical" when it is one technical
   job with no user-facing behaviour (rotate a password, upgrade a library,
   change a configuration value). Otherwise "feature" — any new or changed
-  behaviour, and every Medium or Large requirement.
-- Medium/Large -> "epic" present, at least two stories.
+  behaviour, and every Large requirement.
+- Large -> "epic" present, at least two stories.
 - Every story has at least one subtask and at least one acceptance criterion.
 - No subtask text may contain a source filename.
 """
@@ -214,9 +217,10 @@ Input: "Allow users to update their preferred language."
 
 Examples of the expected sizing:
 
-"Allow users to update their preferred language." -> Small (one Story, no Epic)
-"Send email and SMS notifications and allow users to manage notification
- preferences." -> Medium (Epic + one Story per capability)
+"Allow users to update their preferred language." -> Small (one Task, no Epic)
+"Client users select several reports on the dashboard and print them in bulk,
+ as the client or the candidate version." -> Medium (one Story; Subtasks for
+ the selection, the PDF retrieval and the version choice)
 "Support mobile registration, OTP verification, login, token refresh, logout,
  password recovery, and active session management." -> Large (Epic + one Story
  per workflow)
@@ -350,7 +354,7 @@ not the Stories' details. Return JSON only, in exactly this shape:
   "analysis": "<2-3 sentences on why this classification>",
   "work_kind": "feature" | "technical" | "defect",
   "defect": { ... },                 // only when work_kind is "defect", as described below
-  "epic": {                          // omit entirely when classification is Small
+  "epic": {                          // only when classification is Large; omit otherwise
     "business_objective": "...",
     "scope": ["..."],
     "out_of_scope": ["..."],         // ["Not specified"] when unknown
@@ -365,7 +369,7 @@ not the Stories' details. Return JSON only, in exactly this shape:
 }
 
 Rules the output is checked against:
-- Small -> no "epic", exactly one story. Medium/Large -> "epic", at least two stories.
+- Small/Medium -> no "epic", exactly one story. Large -> "epic", at least two stories.
 - One behaviour per Story; together the Stories deliver EVERY requirement line,
   and "coverage" maps every line number to one of the titles above.
 - "defect": {"actual": "...", "expected": "...", "impact": "...", "widespread": true|false}

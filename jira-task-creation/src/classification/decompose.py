@@ -76,8 +76,8 @@ class DecompositionError(RuntimeError):
 
 
 def _llm_settings() -> tuple[str, str]:
-    provider = os.environ.get("LTW_LLM_PROVIDER", DEFAULT_PROVIDER).strip() or DEFAULT_PROVIDER
-    model = os.environ.get("LTW_LLM_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    provider = os.environ.get("TASK_LLM_PROVIDER", DEFAULT_PROVIDER).strip() or DEFAULT_PROVIDER
+    model = os.environ.get("TASK_LLM_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
     return provider, model
 
 
@@ -85,8 +85,8 @@ DEFAULT_MAX_TOKENS = 16000
 
 
 def _max_tokens() -> int:
-    """``LTW_LLM_MAX_TOKENS``, or 16000 — within gpt-4o's 16,384 output cap."""
-    raw = os.environ.get("LTW_LLM_MAX_TOKENS", "").strip()
+    """``TASK_LLM_MAX_TOKENS``, or 16000 — within gpt-4o's 16,384 output cap."""
+    raw = os.environ.get("TASK_LLM_MAX_TOKENS", "").strip()
     try:
         value = int(raw) if raw else DEFAULT_MAX_TOKENS
     except ValueError:
@@ -96,7 +96,7 @@ def _max_tokens() -> int:
 
 def llm_required() -> bool:
     """When true, a gateway failure fails the run instead of falling back."""
-    return env_bool("LTW_REQUIRE_LLM")
+    return env_bool("TASK_REQUIRE_LLM")
 
 
 def _strip_fences(text: str) -> str:
@@ -138,19 +138,28 @@ def _parse_json_object(text: str) -> dict[str, Any]:
 
 
 async def _chat(prompt: str) -> str:
-    """One gateway round-trip on the main model (LTW_LLM_MODEL)."""
+    """One gateway round-trip on the main model (TASK_LLM_MODEL)."""
     return await _gateway_chat(prompt, _llm_settings()[1])
 
 
+async def condense_chat(prompt: str, system_prompt: str) -> str:
+    """The main model with the caller's own instructions (condensing).
+
+    The main model, not the fast one: a condensed transcript is what the
+    breakdown is written from, so a lost number or rule is a wrong ticket.
+    """
+    return await _gateway_chat(prompt, _llm_settings()[1], system_prompt=system_prompt)
+
+
 def fast_model() -> str:
-    """LTW_LLM_FAST_MODEL: a quicker model for the two yes/no checks, or "".
+    """TASK_LLM_FAST_MODEL: a quicker model for the two yes/no checks, or "".
 
     Only "is this a requirement?" (triage) and "is the ticket asked on
     related?" use it — short answers where a smaller model is as good. The
     breakdown, its self-review, the duplicate second opinion and the repairs
     stay on the main model: those decide what the tickets say (2026-09-30).
     """
-    return os.environ.get("LTW_LLM_FAST_MODEL", "").strip()
+    return os.environ.get("TASK_LLM_FAST_MODEL", "").strip()
 
 
 async def _chat_fast(prompt: str) -> str:
@@ -165,8 +174,12 @@ async def _chat_fast(prompt: str) -> str:
         return await _chat(prompt)
 
 
-async def _gateway_chat(prompt: str, model: str) -> str:
-    """One gateway round-trip. Imported lazily so tests need no gateway."""
+async def _gateway_chat(prompt: str, model: str, system_prompt: str = SYSTEM_PROMPT) -> str:
+    """One gateway round-trip. Imported lazily so tests need no gateway.
+
+    ``system_prompt`` is the breakdown persona unless a caller doing other work
+    (condensing a long transcript) brings its own.
+    """
     from agent_lib.gateway.ai import AiGatewayClient
 
     provider = _llm_settings()[0]
@@ -179,7 +192,7 @@ async def _gateway_chat(prompt: str, model: str) -> str:
                 provider=provider,
                 model=model,
                 prompt=prompt,
-                system_prompt=SYSTEM_PROMPT,
+                system_prompt=system_prompt,
                 temperature=0.2,
                 max_tokens=_max_tokens(),
             )
@@ -189,7 +202,7 @@ async def _gateway_chat(prompt: str, model: str) -> str:
                     provider=provider,
                     model_name=model,
                     prompt=prompt,
-                    system_prompt=SYSTEM_PROMPT,
+                    system_prompt=system_prompt,
                     temperature=0.2,
                     # Explicit, and large: with the gateway's default a Large breakdown
                     # (an Epic, a dozen Stories, their Sub-tasks) was cut off mid-JSON,
@@ -535,8 +548,8 @@ DEFAULT_LLM_CONCURRENCY = 6
 
 
 def parallel_breakdown() -> bool:
-    """LTW_PARALLEL_BREAKDOWN: plan first, then write the Stories in parallel."""
-    return os.environ.get("LTW_PARALLEL_BREAKDOWN", "true").strip().lower() not in {
+    """TASK_PARALLEL_BREAKDOWN: plan first, then write the Stories in parallel."""
+    return os.environ.get("TASK_PARALLEL_BREAKDOWN", "true").strip().lower() not in {
         "0",
         "false",
         "no",
@@ -545,9 +558,9 @@ def parallel_breakdown() -> bool:
 
 
 def llm_concurrency() -> int:
-    """How many Stories are written at the same time (LTW_LLM_CONCURRENCY)."""
+    """How many Stories are written at the same time (TASK_LLM_CONCURRENCY)."""
     try:
-        return max(1, int(os.environ.get("LTW_LLM_CONCURRENCY", "") or DEFAULT_LLM_CONCURRENCY))
+        return max(1, int(os.environ.get("TASK_LLM_CONCURRENCY", "") or DEFAULT_LLM_CONCURRENCY))
     except ValueError:
         return DEFAULT_LLM_CONCURRENCY
 
@@ -1843,7 +1856,12 @@ def heuristic_breakdown(requirement: str, context: ProjectContext) -> WorkBreakd
     # Size what is actually being built. Sizing the original text counted work
     # that was ruled out, so excluding two of three capabilities still produced
     # an Epic over a single Story.
-    classification = _size_for(len(capabilities))
+    #
+    # Only the tests use this writer (a stand-in for the model). It cannot tell
+    # parts of one feature from separate features, so it never says Medium (one
+    # Story): one capability is Small, several are Large — an Epic with a Story
+    # per capability (sizes as of the owner decision, 2026-10-07).
+    classification = Classification.SMALL if len(capabilities) <= 1 else Classification.LARGE
     # Carry the most recently named actor across clauses that name none.
     stories: list[Story] = []
     seen_actor = ""
@@ -1858,12 +1876,11 @@ def heuristic_breakdown(requirement: str, context: ProjectContext) -> WorkBreakd
         return WorkBreakdown(
             classification=classification,
             analysis=(
-                "The requirement asks for one focused capability, so it is sized "
-                "as Small and produces a single Story with its subtasks."
+                "The requirement asks for one focused change, so it is sized as "
+                "Small and produces a single Task with its subtasks."
             ),
             stories=stories[:1],
         )
-
     scope_label = context.name or "the configured project"
     # Built from the capabilities that survived, not from the original text. An
     # Epic titled "Send email and SMS notifications" with no SMS Story under it
@@ -1930,7 +1947,7 @@ async def build_breakdown(requirement: str, context: ProjectContext) -> tuple[Wo
     boilerplate unrelated to the requirement ("…matches the rules agreed with
     the product owner"), and could never pass the self-review gate. The owner
     decided (2026-09-25): when the model cannot produce the breakdown, nothing
-    is created and the reply says so — whatever ``LTW_REQUIRE_LLM`` says.
+    is created and the reply says so — whatever ``TASK_REQUIRE_LLM`` says.
     """
     # Filenames the person wrote are theirs to keep; only invented ones are refused.
     with allow_source_files_from(requirement):

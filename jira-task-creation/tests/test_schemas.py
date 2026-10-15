@@ -236,31 +236,54 @@ def test_small_requirement_must_not_have_an_epic():
         )
 
 
-def test_small_requirement_produces_exactly_one_story():
-    with pytest.raises(ValidationError, match="exactly one Story"):
+# Owner decision, 2026-10-07: Small is one Task, Medium one Story (each with
+# its Sub-tasks, never an Epic), Large an Epic with two or more Stories.
+
+
+@pytest.mark.parametrize("size", ["Small", "Medium"])
+def test_small_and_medium_produce_exactly_one_item(size):
+    with pytest.raises(ValidationError, match="exactly one item"):
         WorkBreakdown(
-            classification="Small",
-            analysis="One focused change to a single setting.",
+            classification=size,
+            analysis="One focused piece of work with its parts.",
             stories=[make_story(), make_story()],
         )
 
 
-@pytest.mark.parametrize("size", ["Medium", "Large"])
-def test_medium_and_large_require_an_epic(size):
+@pytest.mark.parametrize("size", ["Small", "Medium"])
+def test_small_and_medium_never_carry_an_epic(size):
+    with pytest.raises(ValidationError, match="must not produce an Epic"):
+        WorkBreakdown(
+            classification=size,
+            analysis="One focused piece of work with its parts.",
+            epic=make_epic(),
+            stories=[make_story()],
+        )
+
+
+def test_medium_is_one_story_with_its_subtasks():
+    breakdown = WorkBreakdown(
+        classification="Medium",
+        analysis="One feature with three parts.",
+        stories=[make_story(subtasks=[make_subtask(), make_subtask(), make_subtask()])],
+    )
+    assert breakdown.issue_count() == {"epics": 0, "stories": 1, "subtasks": 3}
+
+
+def test_large_requires_an_epic():
     with pytest.raises(ValidationError, match="must produce an Epic"):
         WorkBreakdown(
-            classification=size,
-            analysis="Several related capabilities across the product.",
+            classification="Large",
+            analysis="Several distinct features across the product.",
             stories=[make_story(), make_story()],
         )
 
 
-@pytest.mark.parametrize("size", ["Medium", "Large"])
-def test_medium_and_large_require_multiple_stories(size):
+def test_large_requires_multiple_stories():
     with pytest.raises(ValidationError, match="at least two Stories"):
         WorkBreakdown(
-            classification=size,
-            analysis="Several related capabilities across the product.",
+            classification="Large",
+            analysis="Several distinct features across the product.",
             epic=make_epic(),
             stories=[make_story()],
         )
@@ -268,7 +291,7 @@ def test_medium_and_large_require_multiple_stories(size):
 
 def test_issue_count_reports_the_hierarchy_size():
     breakdown = WorkBreakdown(
-        classification="Medium",
+        classification="Large",
         analysis="Two related capabilities.",
         epic=make_epic(),
         stories=[

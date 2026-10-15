@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import logging
 
+from config import MAX_COMMENTS_CHARS
+
 from .base import ContextDocument, ContextSource, FetchContext
 
 logger = logging.getLogger(__name__)
@@ -40,9 +42,7 @@ def _issue_documents(
         )
 
     comments = bundle.get("comments") or []
-    rendered = "\n".join(
-        f"- {c.get('author') or 'Unknown'}: {c.get('body', '')}" for c in comments if c.get("body")
-    ).strip()
+    rendered = _render_comments(comments)
     if rendered:
         docs.append(
             ContextDocument(
@@ -54,6 +54,30 @@ def _issue_documents(
             )
         )
     return docs
+
+
+def _render_comments(comments: list[dict], limit: int = MAX_COMMENTS_CHARS) -> str:
+    """Every comment in full, the newest kept when together they pass ``limit``.
+
+    The newest are kept because that is where the answers to the review's
+    questions are; the note says how many older ones were left out, so the
+    review never reads a shortened discussion as the whole one.
+    """
+    lines = [
+        f"- {c.get('author') or 'Unknown'}: {c.get('body', '')}" for c in comments if c.get("body")
+    ]
+    kept: list[str] = []
+    used = 0
+    for line in reversed(lines):
+        if kept and used + len(line) + 1 > limit:
+            break
+        kept.append(line)
+        used += len(line) + 1
+    kept.reverse()
+    left_out = len(lines) - len(kept)
+    if left_out:
+        kept.insert(0, f"({left_out} older comment(s) left out — the discussion is very long)")
+    return "\n".join(kept).strip()
 
 
 class TargetIssueSource(ContextSource):

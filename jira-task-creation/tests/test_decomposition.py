@@ -180,7 +180,7 @@ async def test_triage_falls_back_to_proceed_when_the_gateway_is_down(fake_chat):
 
 
 async def test_triage_propagates_when_the_llm_is_marked_required(fake_chat, monkeypatch):
-    monkeypatch.setenv("LTW_REQUIRE_LLM", "true")
+    monkeypatch.setenv("TASK_REQUIRE_LLM", "true")
     fake_chat(RuntimeError("gateway unreachable"))
     with pytest.raises(RuntimeError):
         await triage(SMALL, CONTEXT)

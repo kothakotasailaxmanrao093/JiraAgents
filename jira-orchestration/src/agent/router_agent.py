@@ -14,23 +14,35 @@ from typing import Any, Dict
 
 from aetherion_sdk import agent, agentExecutor, toolExecutor
 
-from agent.router_flow import run_github_poll, run_health_check, run_router
+from agent.confluence_flow import run_confluence_comment, run_confluence_poll
+from agent.request_flow import run_request
+from agent.router_flow import run_github_event, run_github_poll, run_health_check, run_router
 
 logger = logging.getLogger(__name__)
 
 # Kept in step with pyproject.toml and metadata.json by scripts/publish.py, and
 # asserted by tests/test_version_agreement.py. A constant rather than a file
 # read because a workflow may not read files.
-AGENT_VERSION = "0.1.27"
+AGENT_VERSION = "0.1.36"
 
 
 async def _dispatch(agent_name: str, payload: dict[str, Any], **options: Any) -> Any:
     """Invoke one child agent as a Temporal child workflow, and await it.
 
     Synchronous on purpose: whoever waits for the result must be whoever posts
-    the reply, or "exactly one reply" stops being structural. See
-    ../docs/AGENT_TO_AGENT.md.
+    the reply, or "exactly one reply" stops being structural.
+
+    Only ever on the agent's own task queue (2026-10-15): resolved by name
+    alone, an agent registered by another team under the same name
+    ("planning_agent") could take the request — with its own code graph and
+    repositories. A missing queue is a configuration error, said plainly.
     """
+    if not str(options.get("task_queue") or "").strip():
+        raise ValueError(
+            f"No task queue is configured for {agent_name}: set its ORCH_TASK_QUEUE_* "
+            "setting (<agent id>-task-queue). Agents are only called on their own queue, "
+            "never by name alone."
+        )
     return await agentExecutor.execute(agent_name, payload, **options)
 
 
@@ -51,10 +63,46 @@ async def JiraOrchestration(payload: Dict[str, Any]) -> dict:
         logger.info("mode : health_check")
         return await run_health_check(_dispatch, toolExecutor.execute)
 
+    if payload.get("confluence_poll"):
+        # Every minute: new "@Aetherion" comments on the TDD pages.
+        logger.info("mode : confluence_poll")
+        return await run_confluence_poll(toolExecutor.execute, _dispatch)
+
     if payload.get("github_poll"):
         # Every minute: new merges and PR comments on GitHub, given to Planning.
         logger.info("mode : github_poll")
         return await run_github_poll(toolExecutor.execute, _dispatch)
+
+    if payload.get("confluence_comment_id"):
+        # Pushed by the Confluence webhook: one comment on a TDD page, as it was posted.
+        logger.info(
+            "mode : confluence comment | page : %s | comment : %s",
+            payload.get("confluence_page_id"),
+            payload.get("confluence_comment_id"),
+        )
+        return await run_confluence_comment(
+            toolExecutor.execute,
+            _dispatch,
+            str(payload.get("confluence_page_id") or ""),
+            str(payload["confluence_comment_id"]),
+        )
+
+    if payload.get("github_event"):
+        # Pushed by the GitHub webhook: a merge or a PR comment, as it happened.
+        logger.info(
+            "mode : github event | %s %s | %s #%s",
+            payload.get("github_event"),
+            payload.get("github_action"),
+            payload.get("github_repo"),
+            payload.get("pr_number"),
+        )
+        return await run_github_event(toolExecutor.execute, _dispatch, payload)
+
+    if str(payload.get("requirement") or "").strip() and not payload.get("issue_key"):
+        # A request typed on this agent's form: breakdown PDF, review, design,
+        # pull request — nothing written to Jira (agent/request_flow.py).
+        logger.info("mode : request from the form")
+        return await run_request(payload, toolExecutor.execute, _dispatch)
 
     logger.info(
         "mode : webhook | issue_key : %s | comment_id : %s",

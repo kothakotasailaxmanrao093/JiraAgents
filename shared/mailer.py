@@ -26,7 +26,7 @@ from email.message import EmailMessage
 from typing import Any
 
 from ._logging import get_logger
-from .settings import mask
+from .settings import mask, secret
 
 logger = get_logger(__name__)
 
@@ -69,7 +69,7 @@ def smtp_settings() -> tuple[str, int, str, str]:
     sender = os.environ.get("GMAIL_SENDER", "").strip()
     # A Google account password will not work here: Gmail requires a 16-character
     # app password with 2-Step Verification enabled.
-    password = os.environ.get("GMAIL_APP_PASSWORD", "").strip()
+    password = secret("GMAIL_APP_PASSWORD")
     return host, port, sender, password
 
 

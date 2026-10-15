@@ -1,14 +1,14 @@
 """Every ticket in the project, indexed by word, kept up to date — in memory.
 
 Duplicate detection used to read only the newest 300 tickets
-(LTW_MAX_CONTEXT_ISSUES), so in an 18,000-ticket project 17,700 were never
+(TASK_MAX_CONTEXT_ISSUES), so in an 18,000-ticket project 17,700 were never
 compared. Reading all of them on every build takes ~75 s (180 pages of 100,
 ~0.4 s each, measured on FL). So instead:
 
 * the first build after a worker starts reads the whole project once;
 * every later build asks Jira only what changed (``updated >= -Nm``) — usually
   nothing, one page at most;
-* a full re-read every ``LTW_INDEX_FULL_REFRESH_HOURS`` (24) drops tickets that
+* a full re-read every ``TASK_INDEX_FULL_REFRESH_HOURS`` (24) drops tickets that
   were deleted or moved, which "what changed" cannot report — and before that,
   any match is checked to still exist before it is reported, so a deleted
   ticket can never block new work in between (tools._still_there).
@@ -46,12 +46,12 @@ DEFAULT_FULL_REFRESH_HOURS = 24
 
 
 def enabled() -> bool:
-    """LTW_DUPLICATE_INDEX: compare against every ticket (on by default)."""
-    return env_bool("LTW_DUPLICATE_INDEX", default=True)
+    """TASK_DUPLICATE_INDEX: compare against every ticket (on by default)."""
+    return env_bool("TASK_DUPLICATE_INDEX", default=True)
 
 
 def full_refresh_seconds() -> int:
-    return max(1, env_int("LTW_INDEX_FULL_REFRESH_HOURS", DEFAULT_FULL_REFRESH_HOURS)) * 3600
+    return max(1, env_int("TASK_INDEX_FULL_REFRESH_HOURS", DEFAULT_FULL_REFRESH_HOURS)) * 3600
 
 
 @dataclass

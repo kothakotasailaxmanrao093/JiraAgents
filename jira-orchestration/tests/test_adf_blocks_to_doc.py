@@ -61,7 +61,10 @@ def test_an_empty_list_body_with_no_heading_renders_nothing_for_that_block() -> 
     doc = blocks_to_doc([("", [])])
     # Falls back to the "no content at all" placeholder.
     assert doc["content"] == [
-        {"type": "paragraph", "content": [{"type": "text", "text": "No description provided."}]}
+        {
+            "type": "paragraph",
+            "content": [{"type": "text", "text": "No description provided."}],
+        }
     ]
 
 

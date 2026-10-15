@@ -27,3 +27,13 @@ planning-tdds/
 docs-export/
 # The Coding agent is its own repo (github.com/suhaniimittal/coding-agent); never commit it here.
 coding-agent/
+
+# Another Jira site for local runs (scripts/run_local.sh --site NAME): holds a token.
+.env.site.*
+!.env.site.example
+
+# Files picked on the local test form (scripts/local_files.py).
+.local-uploads/
+
+# Plans Task Creation keeps for identical input on a laptop (plan_cache.py).
+.local-cache/

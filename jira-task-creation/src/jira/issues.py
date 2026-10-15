@@ -41,6 +41,7 @@ from src.jira.client import (
 )
 from src.jira.context import fetch_epic_children
 from src.models.schemas import (
+    Classification,
     JiraIssueRef,
     JiraResult,
     ResultStatus,
@@ -308,12 +309,12 @@ DEFAULT_WRITE_CONCURRENCY = 4
 
 
 def write_concurrency() -> int:
-    """Tickets created at the same time (LTW_WRITE_CONCURRENCY, at least 1).
+    """Tickets created at the same time (TASK_WRITE_CONCURRENCY, at least 1).
 
     4, as for reads: well inside Jira Cloud's per-account rate limit, and
     enough that 12 tickets take about three rounds instead of twelve.
     """
-    return max(1, env_int("LTW_WRITE_CONCURRENCY", DEFAULT_WRITE_CONCURRENCY))
+    return max(1, env_int("TASK_WRITE_CONCURRENCY", DEFAULT_WRITE_CONCURRENCY))
 
 
 class _Step(Exception):
@@ -447,7 +448,7 @@ async def build_under_root(
     create_subtasks: bool,
     types: dict[str, str],
 ) -> JiraResult:
-    """The children of a ticket that has just become the root. No Epic, ever.
+    """The children of the card the work is built on. No Epic, ever.
 
     Safe to repeat: every level is compared by title with what the root (or
     each Story) already holds, so a redelivered or repeated request reuses the
@@ -514,7 +515,9 @@ async def build_under_root(
                 base_url,
                 project_key,
                 types["subtask"],
-                breakdown.stories[0].subtasks,
+                # Every step, even if the model split the work into several
+                # items despite being told the card is one (2026-10-07).
+                [t for story in breakdown.stories for t in story.subtasks],
                 labels,
                 root_key,
                 created,
@@ -614,6 +617,10 @@ async def create_hierarchy(
             )
 
     gate = asyncio.Semaphore(write_concurrency())
+    # Small is one Task, with Sub-tasks only for two or more steps; Medium is
+    # one Story; Large an Epic with Stories (owner decision, 2026-10-07).
+    small = breakdown.classification is Classification.SMALL and breakdown.epic is None
+    item_type = types.get("task", "Task") if small else types["story"]
 
     async def one(story: Story) -> tuple[JiraIssueRef, list[JiraIssueRef]]:
         async with gate:
@@ -621,7 +628,7 @@ async def create_hierarchy(
                 client,
                 base_url,
                 project_key,
-                types["story"],
+                item_type,
                 story,
                 labels,
                 epic_ref.key if epic_ref else "",
@@ -643,13 +650,14 @@ async def create_hierarchy(
                     parent_key=story_ref.key,
                 )
 
-        made = await asyncio.gather(*(sub(t) for t in story.subtasks), return_exceptions=True)
+        steps = story.subtasks if not small or len(story.subtasks) >= 2 else []
+        made = await asyncio.gather(*(sub(t) for t in steps), return_exceptions=True)
         good = [ref for ref in made if isinstance(ref, JiraIssueRef)]
         created.extend(good)
         subtask_refs.extend(good)
         failed = next((r for r in made if isinstance(r, BaseException)), None)
         if failed is not None:
-            bad = story.subtasks[made.index(failed)]
+            bad = steps[made.index(failed)]
             raise _Step(f"Subtask '{bad.title}'", failed)
         return story_ref, good
 
@@ -677,7 +685,11 @@ async def create_hierarchy(
     parts = []
     if counts["epics"]:
         parts.append(f"{counts['epics']} Epic")
-    parts.append(f"{counts['stories']} Stor{'y' if counts['stories'] == 1 else 'ies'}")
+    if small:
+        parts.append("1 Task")
+        counts = {**counts, "subtasks": len(subtask_refs)}
+    else:
+        parts.append(f"{counts['stories']} Stor{'y' if counts['stories'] == 1 else 'ies'}")
     parts.append(f"{counts['subtasks']} Subtask{'' if counts['subtasks'] == 1 else 's'}")
 
     summary = (

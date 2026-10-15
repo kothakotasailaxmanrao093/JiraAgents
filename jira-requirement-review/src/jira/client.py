@@ -19,7 +19,6 @@ import aiohttp
 
 from config import (
     MAX_ATTACHMENTS,
-    MAX_CHARS_PER_COMMENT,
     MAX_COMMENTS_PER_ISSUE,
     MAX_DESC_CHARS,
     MAX_JQL_RESULTS,
@@ -102,7 +101,7 @@ class JiraClient:
             -MAX_COMMENTS_PER_ISSUE:
         ]:  # most recent N (Jira returns oldest-first)
             author = (c.get("author") or {}).get("displayName")
-            body = http.adf_to_text(c.get("body"))[:MAX_CHARS_PER_COMMENT]
+            body = http.adf_to_text(c.get("body"))  # in full
             if body:
                 comments.append(
                     {

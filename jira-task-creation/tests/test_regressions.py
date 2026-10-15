@@ -737,7 +737,7 @@ async def test_allowlist_blocks_a_project_not_on_the_list(
 ):
     """With several people sharing one service account, a mistyped key must
     not be able to reach a project the deployment never authorised."""
-    monkeypatch.setenv("LTW_ALLOWED_PROJECT_KEYS", "TT2,KS")
+    monkeypatch.setenv("TASK_ALLOWED_PROJECT_KEYS", "TT2,KS")
     fake = fake_jira()
 
     result, calls = await run_agent(
@@ -756,7 +756,7 @@ async def test_allowlist_blocks_a_project_not_on_the_list(
 
 
 async def test_allowlist_permits_a_listed_project(run_agent, fake_jira, jira_env, monkeypatch):
-    monkeypatch.setenv("LTW_ALLOWED_PROJECT_KEYS", "ABC,TT2")
+    monkeypatch.setenv("TASK_ALLOWED_PROJECT_KEYS", "ABC,TT2")
     fake_jira()
     result, _ = await run_agent(
         {
@@ -782,7 +782,7 @@ async def test_empty_allowlist_keeps_the_old_behaviour(run_agent, fake_jira, jir
 
 
 async def test_read_only_mode_refuses_every_write(run_agent, fake_jira, jira_env, monkeypatch):
-    monkeypatch.setenv("LTW_READ_ONLY", "true")
+    monkeypatch.setenv("TASK_READ_ONLY", "true")
     fake = fake_jira()
 
     result, _ = await run_agent(
@@ -925,7 +925,7 @@ async def test_adjudication_failure_falls_back_to_the_word_scores(
 async def test_adjudication_can_be_switched_off(run_agent, fake_jira, jira_env, monkeypatch):
     fake = fake_jira()
     seed_story(fake, "ABC-43", "Allow drivers to log a rest break")
-    monkeypatch.setenv("LTW_DUPLICATE_ADJUDICATE", "false")
+    monkeypatch.setenv("TASK_DUPLICATE_ADJUDICATE", "false")
 
     called = False
 

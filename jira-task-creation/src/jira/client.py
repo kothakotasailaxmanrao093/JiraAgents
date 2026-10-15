@@ -74,6 +74,8 @@ def issue_type_names() -> dict[str, str]:
         "epic": os.environ.get("JIRA_EPIC_ISSUE_TYPE", "Epic").strip() or "Epic",
         "story": os.environ.get("JIRA_STORY_ISSUE_TYPE", "Story").strip() or "Story",
         "subtask": os.environ.get("JIRA_SUBTASK_ISSUE_TYPE", "Sub-task").strip() or "Sub-task",
+        # A Small requirement is one Task (2026-10-07).
+        "task": os.environ.get("JIRA_TASK_ISSUE_TYPE", "Task").strip() or "Task",
     }
 
 
@@ -84,6 +86,7 @@ _ALIASES = {
     "subtask": ("sub-task", "subtask", "sub task"),
     "story": ("story", "user story"),
     "epic": ("epic",),
+    "task": ("task",),
 }
 
 
@@ -115,19 +118,19 @@ def target_project_key(override: str = "") -> str:
 
 
 def allowed_project_keys() -> tuple[str, ...]:
-    """Projects this deployment may write to, from ``LTW_ALLOWED_PROJECT_KEYS``.
+    """Projects this deployment may write to, from ``TASK_ALLOWED_PROJECT_KEYS``.
 
     Empty means "any project the token can reach", which is the historical
     behaviour. Setting it caps the blast radius once several people share one
     published agent and one service account: a mistyped or deliberately
     different key cannot reach a project you did not name.
     """
-    return tuple(k.upper() for k in env_list("LTW_ALLOWED_PROJECT_KEYS"))
+    return tuple(k.upper() for k in env_list("TASK_ALLOWED_PROJECT_KEYS"))
 
 
 def read_only() -> bool:
     """When true the agent refuses every write, whatever the caller asked for."""
-    return env_bool("LTW_READ_ONLY")
+    return env_bool("TASK_READ_ONLY")
 
 
 def browse_url(base_url: str, key: str) -> str:

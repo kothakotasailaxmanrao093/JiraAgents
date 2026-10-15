@@ -180,7 +180,7 @@ async def test_unsupported_attachments_are_not_downloaded(jira_env: None, client
 async def test_attachments_are_capped(
     jira_env: None, monkeypatch: pytest.MonkeyPatch, client
 ) -> None:
-    monkeypatch.setenv("LTW_ATTACHMENT_MAX_FILES", "1")
+    monkeypatch.setenv("TASK_ATTACHMENT_MAX_FILES", "1")
     client(
         issue_route(
             issue_payload(attachments=[attachment("a.csv"), attachment("b.csv")]),

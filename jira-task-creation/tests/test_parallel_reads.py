@@ -72,7 +72,7 @@ async def test_an_unexpected_error_is_one_unreadable_file_not_a_lost_run() -> No
 
 
 async def test_concurrency_never_exceeds_the_setting(monkeypatch) -> None:
-    monkeypatch.setenv("LTW_READ_CONCURRENCY", "3")
+    monkeypatch.setenv("TASK_READ_CONCURRENCY", "3")
     in_flight = peak = 0
 
     async def download(url: str) -> bytes:
@@ -89,7 +89,7 @@ async def test_concurrency_never_exceeds_the_setting(monkeypatch) -> None:
 
 
 async def test_the_file_cap_note_is_unchanged(monkeypatch) -> None:
-    monkeypatch.setenv("LTW_ATTACHMENT_MAX_FILES", "2")
+    monkeypatch.setenv("TASK_ATTACHMENT_MAX_FILES", "2")
 
     async def download(url: str) -> bytes:
         return b"x"
@@ -101,7 +101,7 @@ async def test_the_file_cap_note_is_unchanged(monkeypatch) -> None:
 
 @pytest.mark.parametrize("value,expected", [("", 4), ("0", 1), ("8", 8)])
 def test_read_concurrency_defaults_to_four_and_is_at_least_one(monkeypatch, value, expected):
-    monkeypatch.setenv("LTW_READ_CONCURRENCY", value)
+    monkeypatch.setenv("TASK_READ_CONCURRENCY", value)
     assert attachments_mod.read_concurrency() == expected
 
 

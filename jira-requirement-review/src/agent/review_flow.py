@@ -59,6 +59,50 @@ def resolve_transcript_file_keys(payload: dict[str, Any]) -> list[str]:
     return []
 
 
+PREVIOUS_REVIEW_LABEL = "Previous review's open questions"
+
+
+def previous_review_document(questions: list[str]) -> dict[str, Any]:
+    """The last review's questions, for this review to check against the comments.
+
+    The person answers in the ticket's comments and asks again (2026-10-08). A
+    question a later comment answers is settled: it must not be asked again.
+    Only what is still open — or newly found — is reported.
+    """
+    lines = "\n".join(f"- {q}" for q in questions)
+    return {
+        "source_id": "previous_review",
+        "source_label": PREVIOUS_REVIEW_LABEL,
+        "kind": "review_history",
+        "text": (
+            "These questions were asked by the previous review of this ticket. Read the "
+            "ticket's comments for answers. Treat a question a comment answers as settled and "
+            "do not raise it again; report a question only if it is still unanswered, and use "
+            "the answers as part of the requirement.\n" + lines
+        ),
+        "metadata": {"count": len(questions)},
+    }
+
+
+def resolve_document_keys(payload: dict[str, Any]) -> list[str]:
+    """The documents to review when there is no ticket (2026-10-08).
+
+    The orchestrator names them (``document_file_keys``: Task Creation's PDF
+    and the files the person attached). On this agent's own form, files
+    uploaded with no Issue Key and no query are the documents themselves.
+    """
+    named = payload.get("document_file_keys")
+    if named:
+        items = named if isinstance(named, list) else str(named).split(",")
+        return list(dict.fromkeys(str(i).strip() for i in items if str(i or "").strip()))
+    if (
+        str(payload.get("issue_key") or "").strip()
+        or str(payload.get("jql_override") or "").strip()
+    ):
+        return []
+    return resolve_transcript_file_keys(payload)
+
+
 async def _review_one_issue(
     issue_key: str,
     execute: Execute,
@@ -74,22 +118,38 @@ async def _review_one_issue(
     model_id: str | None,
     post_to_jira: bool,
     workflow_id: str | None,
+    document_keys: list[str] | None = None,
+    previous_questions: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run the full context-gather -> analyze -> render -> (optional post) pipeline
-    for one issue and return a single structured result dict."""
-    ctx = await execute(
-        "gather_context",
-        issue_key,
-        include_parent,
-        include_subtasks,
-        include_linked_issues,
-        include_attachments,
-        include_confluence,
-        trigger_comment_id,
-        transcript_file_keys,
-        team_id,
-        start_to_close_timeout=timedelta(minutes=2),
-    )
+    for one issue and return a single structured result dict.
+
+    With ``document_keys`` there is no ticket: those files are what is reviewed,
+    under the label ``issue_key``, and nothing can be posted (2026-10-08).
+    """
+    if document_keys:
+        post_to_jira = False
+        ctx = await execute(
+            "gather_documents",
+            document_keys,
+            issue_key,
+            team_id,
+            start_to_close_timeout=timedelta(minutes=2),
+        )
+    else:
+        ctx = await execute(
+            "gather_context",
+            issue_key,
+            include_parent,
+            include_subtasks,
+            include_linked_issues,
+            include_attachments,
+            include_confluence,
+            trigger_comment_id,
+            transcript_file_keys,
+            team_id,
+            start_to_close_timeout=timedelta(minutes=2),
+        )
     if ctx.get("error"):
         return {
             "status": "error",
@@ -110,9 +170,12 @@ async def _review_one_issue(
             ),
         }
 
+    documents = list(ctx.get("documents", []))
+    if previous_questions:
+        documents.append(previous_review_document(previous_questions))
     analysis = await execute(
         "analyze_requirement",
-        ctx.get("documents", []),
+        documents,
         issue_key,
         ctx.get("issue_summary"),
         model_id,
@@ -238,15 +301,17 @@ async def run_review(
 ) -> list[dict]:
     issue_key = str(payload.get("issue_key") or "").strip()
     jql_override = str(payload.get("jql_override") or "").strip()
+    document_keys = resolve_document_keys(payload)
 
-    if not issue_key and not jql_override:
+    if not issue_key and not jql_override and not document_keys:
         return [
             {
                 "status": "error",
                 "error": "issue_key_or_jql_required",
                 "message": (
-                    "Provide 'issue_key' (e.g. ABC-123) or a Sprint/JQL query "
-                    "('jql_override', e.g. 'sprint = \"Sprint 42\"')."
+                    "Provide 'issue_key' (e.g. ABC-123), a Sprint/JQL query "
+                    "('jql_override', e.g. 'sprint = \"Sprint 42\"'), or upload the "
+                    "documents to review."
                 ),
             }
         ]
@@ -263,6 +328,9 @@ async def run_review(
         model_id=payload.get("model_id"),
         post_to_jira=flag(payload, "post_to_jira"),
         workflow_id=workflow_id,
+        previous_questions=[
+            str(q) for q in payload.get("previous_questions") or [] if str(q).strip()
+        ],
     )
     generate_docx = flag(payload, "generate_docx")
     # TEMPORARILY DISABLED: email delivery is not exposed as a trigger (see
@@ -271,7 +339,12 @@ async def run_review(
     # Re-enable by restoring `bool(payload.get("send_email", False))` once confirmed.
     send_email = False
 
-    if jql_override:
+    if document_keys and not issue_key and not jql_override:
+        # No ticket: review the documents themselves (2026-10-08).
+        label = str(payload.get("document_title") or "").strip() or "Document review"
+        logger.info("Requirement review starting (documents): %d file(s)", len(document_keys))
+        results = [await _review_one_issue(label, execute, **common, document_keys=document_keys)]
+    elif jql_override:
         label = jql_override
         logger.info("Requirement review starting (batch): jql=%s wf=%s", jql_override, workflow_id)
         search = await execute(
@@ -326,6 +399,16 @@ async def run_review(
                     "title": f"Requirement Review Report — {label}",
                     "file_key": s3_key,
                     "label": "Download Review Report",
+                    "extension": report.get("extension", "docx"),
+                }
+            )
+        elif generate_docx and report.get("local_path"):
+            # A laptop run: the report was saved on disk, not uploaded.
+            output.append(
+                {
+                    "type": "local_file",
+                    "title": f"Requirement Review Report — {label}",
+                    "path": report["local_path"],
                     "extension": report.get("extension", "docx"),
                 }
             )

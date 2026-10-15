@@ -52,7 +52,10 @@ def test_the_request_matches_what_the_gateway_would_get():
     )
     assert body == {
         "model": "gpt-4o",
-        "messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "Q"}],
+        "messages": [
+            {"role": "system", "content": "S"},
+            {"role": "user", "content": "Q"},
+        ],
         "temperature": 0.2,
         "max_completion_tokens": 900,
     }
@@ -60,7 +63,11 @@ def test_the_request_matches_what_the_gateway_would_get():
 
 def test_reasoning_models_keep_their_temperature_and_room_to_think():
     body = llm.openai_request(
-        provider="openai", model="gpt-5-mini", prompt="Q", temperature=0.0, max_tokens=200
+        provider="openai",
+        model="gpt-5-mini",
+        prompt="Q",
+        temperature=0.0,
+        max_tokens=200,
     )
     assert "temperature" not in body
     assert body["max_completion_tokens"] == llm.REASONING_MIN_TOKENS
@@ -84,7 +91,10 @@ async def test_the_reply_text_comes_back(monkeypatch):
         return httpx.Response(200, json={"choices": [{"message": {"content": "BUILD 0.9"}}]})
 
     reply = await llm.openai_chat(
-        transport=httpx.MockTransport(answer), provider="openai", model="gpt-4o", prompt="Q"
+        transport=httpx.MockTransport(answer),
+        provider="openai",
+        model="gpt-4o",
+        prompt="Q",
     )
     assert reply == "BUILD 0.9"
     assert seen["auth"] == "Bearer sk-test"

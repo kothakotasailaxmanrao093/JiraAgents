@@ -41,7 +41,7 @@ Reports, without touching any real ticket or sending any email:
 
 ## Which outcomes email (owner decision)
 
-`ORCH_NOTIFY_ON=clarification,duplicates,failed`, the same in `LTW_NOTIFY_ON`.
+`ORCH_NOTIFY_ON=clarification,duplicates,failed`, the same in `TASK_NOTIFY_ON`.
 **No email when tickets are created** — decided 2026-09-24, re-confirmed
 2026-09-25. `tests/test_email_sending.py` fails if the two lists diverge or
 "created" is added.

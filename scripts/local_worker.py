@@ -1,7 +1,7 @@
-"""Run one agent's worker on its OWN local task queue (2026-10-03).
+"""Run one agent's worker on its OWN local task queue (2026-10-03; Coding 2026-10-08).
 
 ``aetherion run`` puts every local worker on this laptop on one shared queue
-(``aetherion_sdk.task_queue.local_task_queue()``). With four agents running at
+(``aetherion_sdk.task_queue.local_task_queue()``). With five agents running at
 once, a job for one agent can be handed to another agent's worker, which does
 not have it. This starts the same runtime the CLI does, but on a queue of the
 agent's own, so each job reaches the worker that has its code.
@@ -10,7 +10,7 @@ Run from the agent's folder, with that agent's Python:
 
     cd jira-orchestration && .venv/bin/python ../scripts/local_worker.py jira-orchestration
 
-``scripts/run_local.sh`` starts all four this way.
+``scripts/run_local.sh`` starts all five this way.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ AGENT_NAMES = {
     "jira-task-creation": ("JiraTaskCreation",),
     "jira-requirement-review": ("JiraRequirementReview", "PostJiraReviewComment"),
     "planning-agent": ("planning_agent", "query_agent"),
+    "coding-agent": ("coding-agent",),
 }
 AGENTS = tuple(AGENT_NAMES)
 
@@ -58,6 +59,30 @@ async def main(agent: str) -> None:
     agent_map = local_agent_map()
     os.environ["AETHERION_AGENT_TASK_QUEUE_MAP"] = json.dumps(agent_map)
     os.environ["AETHERION_TOOL_TASK_QUEUE_MAP"] = "{}"
+    # Images: the platform reads them through the AI Gateway, which a laptop
+    # does not have; this worker sends them to OpenAI instead (local_vision.py).
+    from local_vision import install as install_local_vision
+
+    if install_local_vision():
+        print(f"{agent}: images are read with OpenAI vision on this laptop", flush=True)
+    # Files picked on the local form are kept on this laptop (local_files.py).
+    from local_files import install_storage
+
+    install_storage()
+    # Every agent shares the storage (the breakdown PDF, the designs); Planning
+    # and Coding also Neo4j: the Docker containers', filled only where unset.
+    from local_infra import install as install_local_infra
+
+    filled = install_local_infra(agent)
+    if filled:
+        print(
+            f"{agent}: local Neo4j/storage from Docker ({', '.join(filled)})",
+            flush=True,
+        )
+    # Without Docker (--jira) the Jira agents still need a storage name to look
+    # in before reading an upload kept on this laptop.
+    if agent.startswith("jira-"):
+        os.environ.setdefault("TENANT_ID", "laptop")
     settings = AetherionSettings(
         workflow_task_queue=queue,
         activity_task_queue=queue,
@@ -92,6 +117,7 @@ CHILD_QUEUE_SETTINGS = {
     "jira-task-creation": "ORCH_TASK_QUEUE_JIRA_TASK_CREATION",
     "jira-requirement-review": "ORCH_TASK_QUEUE_JIRA_REQUIREMENT_REVIEW",
     "planning-agent": "ORCH_TASK_QUEUE_PLANNING",
+    "coding-agent": "ORCH_TASK_QUEUE_CODING",
 }
 
 

@@ -13,25 +13,42 @@ from src.models.schemas import DuplicateMatch, JiraIssueRef
 
 @pytest.mark.parametrize(
     "text",
-    ["Aetherion please help", "aetherion", "Ask AETHERION to break this down", "(Aetherion)"],
+    ["@Aetherion please help", "@aetherion", "Ask @AETHERION to break this down", "(@Aetherion)"],
 )
-def test_trigger_keyword_matches_whole_word(text: str) -> None:
+def test_trigger_keyword_matches_an_explicit_mention(text: str) -> None:
     assert jira.mentions_trigger(text)
 
 
-@pytest.mark.parametrize("text", ["aetherionx", "myaetherion", "aether", "", "Aether ion"])
+@pytest.mark.parametrize(
+    "text",
+    ["@aetherionx", "my@aetherion", "@aether", "", "@Aether ion", "bot@aetherion.io"],
+)
 def test_trigger_keyword_does_not_match_partial_words(text: str) -> None:
     assert not jira.mentions_trigger(text)
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        # KS-17185 (2026-10-06): a colleague's note naming the agent was
+        # answered on a real team's ticket. Naming it is not asking it.
+        "Hey @Tyler Judkins here is the first version of the reports created by Aetherion Agent",
+        "Aetherion please help",
+        "aetherion",
+    ],
+)
+def test_naming_the_agent_without_the_mention_is_not_a_request(text: str) -> None:
+    assert not jira.mentions_trigger(text)
+
+
 def test_trigger_keyword_searches_every_supplied_text() -> None:
-    assert jira.mentions_trigger("nothing here", "", "a comment mentioning Aetherion")
+    assert jira.mentions_trigger("nothing here", "", "a comment mentioning @Aetherion")
 
 
 def test_trigger_keyword_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LTW_TRIGGER_KEYWORD", "Jarvis")
-    assert jira.mentions_trigger("hey Jarvis")
-    assert not jira.mentions_trigger("hey Aetherion")
+    monkeypatch.setenv("TASK_TRIGGER_KEYWORD", "Jarvis")
+    assert jira.mentions_trigger("hey @Jarvis")
+    assert not jira.mentions_trigger("hey @Aetherion")
 
 
 # --- parsing ----------------------------------------------------------------

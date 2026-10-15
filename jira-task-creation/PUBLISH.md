@@ -115,23 +115,23 @@ every one of those deployments.
 you publish is what the deployed agent uses.
 
 ```bash
-grep -n "^LTW_NOTIFY_ON\|^LTW_READ_ONLY\|^LTW_ALLOWED_PROJECT_KEYS" .env
+grep -n "^TASK_NOTIFY_ON\|^TASK_READ_ONLY\|^TASK_ALLOWED_PROJECT_KEYS" .env
 ```
 
 Check at minimum:
 
 | Setting | Confirm |
 |---|---|
-| `LTW_NOTIFY_ON` | Is this who you want emailed, and for what? |
-| `LTW_READ_ONLY` | Must be `false` in production, or nothing is ever created |
-| `LTW_ALLOWED_PROJECT_KEYS` | Restricted to the projects you intend |
-| `LTW_ATTACHMENT_READ_IMAGES` | `true` costs a model call per image and slows runs |
+| `TASK_NOTIFY_ON` | Is this who you want emailed, and for what? |
+| `TASK_READ_ONLY` | Must be `false` in production, or nothing is ever created |
+| `TASK_ALLOWED_PROJECT_KEYS` | Restricted to the projects you intend |
+| `TASK_ATTACHMENT_READ_IMAGES` | `true` costs a model call per image and slows runs |
 
-> Version 4.0.11 shipped with `failed` in `LTW_NOTIFY_ON` because the file was
+> Version 4.0.11 shipped with `failed` in `TASK_NOTIFY_ON` because the file was
 > edited *after* the package was built. Every stray event then sent an email.
 > Review this file **before** step 4, not after.
 
-`LTW_LOCAL_EXECUTION` is read only by `src/webhook/server.py`, which the
+`TASK_LOCAL_EXECUTION` is read only by `src/webhook/server.py`, which the
 platform does not run, so its value is harmless in a deployed package.
 
 ---
@@ -157,7 +157,7 @@ grep -n '^version' dist/package/pyproject.toml
 manifest because it is a dotfile, but it *is* in the package:
 
 ```bash
-grep -n "^LTW_NOTIFY_ON\|^LTW_READ_ONLY" dist/package/.env
+grep -n "^TASK_NOTIFY_ON\|^TASK_READ_ONLY" dist/package/.env
 ```
 
 **Your actual change** — grep the packaged file for it, not your working copy:
@@ -250,7 +250,7 @@ Two other useful markers:
 | Publish succeeds, behaviour unchanged | Version not bumped | Bump it and publish again |
 | `RestrictedWorkflowAccessError` in logs | Old build still running | Bump the version and republish |
 | Wrong settings in production | `.env` shipped with wrong values | Fix `.env`, bump, republish |
-| Flood of identical emails | A run is failing and retrying | Fix the run. `LTW_EMAIL_REPEAT_WINDOW` caps the noise but is not the fix |
+| Flood of identical emails | A run is failing and retrying | Fix the run. `TASK_EMAIL_REPEAT_WINDOW` caps the noise but is not the fix |
 
 ### Rolling back
 
@@ -266,7 +266,7 @@ Each of these is a real incident from this project, not a hypothetical.
 | Step | What happened without it |
 |---|---|
 | **2 — Bump the version** | 4.0.9 was published over 4.0.9. The upload succeeded, the worker kept the old code, and every run crashed with `RestrictedWorkflowAccessError` — an error already fixed in the source |
-| **3 — Review `.env`** | 4.0.11 shipped `LTW_NOTIFY_ON=...,failed` because the file was edited after the build. Stray webhook events then emailed on every retry |
+| **3 — Review `.env`** | 4.0.11 shipped `TASK_NOTIFY_ON=...,failed` because the file was edited after the build. Stray webhook events then emailed on every retry |
 | **4 — Inspect the package** | `.env` is invisible in the printed manifest because it is a dotfile. A wrong value travelled to production unnoticed |
 | **6 — Confirm from the logs** | A successful upload was assumed to be a successful deployment. It was not, and hours were spent debugging code that was never running |
 
@@ -287,7 +287,7 @@ grep -n '^version' pyproject.toml
 grep -n '"version"' src/agent/metadata.json
 
 # 3. review what ships
-grep -n "^LTW_NOTIFY_ON\|^LTW_READ_ONLY" .env
+grep -n "^TASK_NOTIFY_ON\|^TASK_READ_ONLY" .env
 
 # 4. build and inspect
 uv run python scripts/build_package.py --extract

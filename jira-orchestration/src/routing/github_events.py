@@ -251,3 +251,49 @@ def prune(sent: dict[str, str], now: datetime) -> dict[str, str]:
         if when and now - when <= REMEMBER:
             keep[key] = at
     return keep
+
+
+# --- which service a repository is, for Planning (2026-10-08) ----------------------
+
+_SERVICE_LINE = re.compile(r"^\s*([^:=]+?)\s*[:=]\s*([^@\s]+)(?:@(\S+))?\s*$")
+
+
+def _slug(repo: str) -> str:
+    """ "org/name" from a slug or a full GitHub URL, lower case."""
+    repo = repo.strip().removesuffix(".git")
+    if "://" in repo:
+        repo = repo.split("://", 1)[1].split("/", 1)[-1]
+    return repo.strip("/").lower()
+
+
+def repo_entries(repos_text: str) -> list[tuple[str, str, str]]:
+    """(name, "org/repo", branch or "") of every "name: org/repo[@branch]" line."""
+    out = []
+    for line in repos_text.splitlines():
+        match = _SERVICE_LINE.match(line)
+        if match:
+            out.append((match.group(1).strip(), match.group(2), match.group(3) or ""))
+    return out
+
+
+def repo_slugs(repos_text: str) -> list[str]:
+    """The "org/name" of every "name: org/repo[@branch]" line Planning is given."""
+    slugs = []
+    for line in repos_text.splitlines():
+        match = _SERVICE_LINE.match(line)
+        if match:
+            slugs.append(match.group(2))
+    return slugs
+
+
+def service_line(repos_text: str, repo: str) -> str:
+    """This repository's line as Planning knows it, else "name: org/name".
+
+    Planning keys its graph by service name, so a merge must refresh the
+    service under the name it was first read with.
+    """
+    for line in repos_text.splitlines():
+        match = _SERVICE_LINE.match(line)
+        if match and _slug(match.group(2)) == _slug(repo):
+            return line.strip()
+    return f"{repo.rsplit('/', 1)[-1]}: {repo}"

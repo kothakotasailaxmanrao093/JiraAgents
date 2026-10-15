@@ -86,7 +86,9 @@ async def test_the_pdf_is_emailed_and_nothing_in_jira_changes(bgv, outbox) -> No
     assert "BGV-25" in mail["subject"]
     assert result["emailed_to"] == ["lead@example.com", "pm@example.com"]
     assert "was emailed to lead@example.com, pm@example.com" in result["summary"]
-    assert "BGV-25 would become an Epic (it is a Task now)" in result["summary"]
+    # 2026-10-07: the card keeps its type; what goes under it is said instead.
+    assert "would go under BGV-25, which stays a Task" in result["summary"]
+    assert "would become" not in result["summary"]
 
 
 async def test_a_pdf_that_cannot_be_emailed_says_so(bgv, monkeypatch) -> None:
@@ -106,9 +108,10 @@ async def test_the_reply_numbers_what_the_pdf_proposes(bgv) -> None:
     bgv("Task")
     result = await tools.generate_breakdown_pdf(request(large()))
     proposed = result["proposed"]
-    assert proposed[0].startswith("S1  Generate Monthly Invoices for Completed Checks")
+    # A Task card is the one item: named by its key, its steps under it.
+    assert proposed == [proposed[0]] and proposed[0].startswith("BGV-25 (this Task, unchanged)")
     assert "S1.1 Collect completed checks" in proposed[0]
-    assert not any(line.startswith("E ") for line in proposed), "the root is the Epic"
+    assert not any(line.startswith("E ") for line in proposed), "no Epic is proposed"
 
 
 async def test_without_a_root_the_epic_is_its_own_item(bgv) -> None:
@@ -158,6 +161,20 @@ async def test_the_same_breakdown_twice_is_emailed_once(bgv, outbox) -> None:
     second = await tools.generate_breakdown_pdf(request(large()))
     assert len(outbox) == 1, "a redelivered request does not email again"
     assert first["status"] == second["status"] == ResultStatus.PLANNED.value
+    # The second result says so, rather than claiming it was just emailed.
+    assert "not resent" in second["summary"] and "not resent" not in first["summary"]
+
+
+async def test_a_form_run_emails_the_pdf_every_time(bgv, outbox) -> None:
+    # 2026-10-07: a person pressing "Run" again on the form got nothing for 15
+    # minutes. The repeat guard is for redelivered webhooks; a form run (no
+    # ticket) is always emailed.
+    bgv("Task")
+    form_run = {**request(large()), "issue_key": "", "project_key": "BGV"}
+    await tools.generate_breakdown_pdf(form_run)
+    second = await tools.generate_breakdown_pdf(form_run)
+    assert len(outbox) == 2
+    assert "not resent" not in second["summary"]
 
 
 async def test_a_root_that_could_not_be_built_is_said_before_any_pdf(bgv, outbox) -> None:
@@ -179,7 +196,14 @@ def _doc(**over: Any) -> pdf.BreakdownDocument:
         generated_at="2026-09-29 10:30 UTC",
         agent_version="4.3.42",
         breakdown=WorkBreakdown.model_validate(large()),
-        root=pdf.RootPreview("BGV-25", "Task", "Epic", "Monthly client invoicing", "Automate"),
+        root=pdf.RootPreview(
+            "BGV-25",
+            "Task",
+            "Task",
+            "Monthly client invoicing",
+            "Monthly client invoicing",
+            children="4 Sub-tasks",
+        ),
         related_keys=["BGV-30 — Email invoices (relates to)"],
         sources_read=["BGV-25 description"],
         sources_missing=["Attachment: Scan.tiff (unsupported)"],
@@ -197,14 +221,15 @@ def test_the_pdf_holds_everything_clearly() -> None:
         "Tickets (card numbers)",
         "BGV-25 — Monthly client invoicing (asked on)",
         "BGV-30 — Email invoices",
-        "Type: Task → Epic",
+        "BGV-25 stays a Task — its type, summary and description are not changed.",
+        "Under it: 4 Sub-tasks.",
         "Sources read",
         "Scan.tiff (unsupported)",
         "Confirmed facts",
         "30 days",
         "From the review: Who is told the result?",
         "Proposed tickets (not created)",
-        "S1 — Generate Monthly Invoices for Completed Checks",
+        "BGV-25 — Monthly client invoicing (this Task, unchanged)",
         "S1.1 Collect completed checks",
         "Acceptance criteria",
         "Done when:",

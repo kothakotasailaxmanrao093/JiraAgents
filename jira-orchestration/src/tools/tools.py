@@ -39,6 +39,7 @@ from routing.ingress import IgnoreReason, IngressOutcome, idempotency_key, scree
 from routing.orchestration import FINISHED_LABEL, RUNNING_LABEL, STATUS_LABELS
 from shared import llm
 from shared.adf import blocks_to_doc, comment_text
+from shared.keywords import is_agent_comment, mentions_trigger
 from shared.mailer import Delivery, check_login, deliver
 
 load_dotenv()
@@ -189,10 +190,14 @@ async def ingress_check(
                 "read_only": settings.read_only(),
                 "task_queue_overrides": settings.task_queue_overrides(),
                 # The orchestrator's view of this ticket (routing/orchestration.py).
-                "fingerprint": content_fingerprint(fields),
+                "fingerprint": content_fingerprint(fields, settings.trigger_keyword()),
                 "orchestration": await _live_state(client, issue_key),
                 "build_min_readiness": settings.build_min_readiness(),
                 "queue_wait_minutes": settings.queue_wait_minutes(),
+                # What follows a build: review, planning, coding (routing/pipeline.py).
+                "pipeline": settings.pipeline(),
+                # The TDD, design and code commands (agent/command_flow.py).
+                "commands": settings.commands(),
             }
     except Exception as exc:  # noqa: BLE001 — a failure is reported, never dropped
         logger.error(f"run {run_id}: ingress failed on {issue_key}: {exc}", exc_info=True)
@@ -441,13 +446,23 @@ async def _add_label(client: httpx.AsyncClient, issue_key: str, label: str) -> l
 @tool(name="notify_admins")
 async def notify_admins(subject: str, body: str, run_id: str) -> dict[str, Any]:
     """Tell the administrators the router itself could not do its job — a child
-    that never answered, or a reply that would not post.
+    that never answered, a reply that would not post, coding that gave up.
 
-    Always logged. Emailed too, through the shared sender; the result says which,
-    and a reply may only say "Emailed" when ``sent`` is true.
+    Always logged (an "ADMIN ALERT" line, for log-based alerting); posted to the
+    alert channel when ORCH_ALERT_WEBHOOK_URL is set, whatever the email
+    setting; and emailed, through the shared sender. The result says which, and
+    a reply may only say "Emailed" when ``sent`` is true.
     """
     recipients = list(settings.notify_emails())
     logger.error(f"run {run_id}: ADMIN ALERT to {', '.join(recipients) or '-'} — {subject}: {body}")
+    channel = await _post_alert(subject, body, run_id)
+    if settings.email_off():
+        return {
+            "attempted": False,
+            "sent": False,
+            "skipped": "email is off (ORCH_NOTIFY_ON=none)",
+            **channel,
+        }
     if not recipients:
         return {"attempted": False, "sent": False, "error": "ORCH_NOTIFY_EMAILS is not set"}
     delivery = await deliver(
@@ -458,6 +473,22 @@ async def notify_admins(subject: str, body: str, run_id: str) -> dict[str, Any]:
         repeat_window_seconds=settings.email_repeat_window_seconds(),
     )
     return _delivery_dict(delivery)
+
+
+async def _post_alert(subject: str, body: str, run_id: str) -> dict[str, Any]:
+    """The alert in the chat channel (2026-10-15); {} when none is configured."""
+    url = settings.alert_webhook_url()
+    if not url:
+        return {}
+    text = f"[Aetherion] ALERT — {subject}\n{body}\n(run {run_id})"
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(url, json={"text": text})
+            resp.raise_for_status()
+        return {"alerted": True}
+    except httpx.HTTPError as exc:
+        logger.error(f"run {run_id}: the alert channel refused the alert: {exc}")
+        return {"alerted": False, "alert_error": f"{type(exc).__name__}: {exc}"}
 
 
 @tool(name="send_outcome_email")
@@ -520,26 +551,48 @@ def _delivery_dict(delivery: Delivery) -> dict[str, Any]:
 _MAX_STORED_CHARS = 24_000
 
 
-def content_fingerprint(fields: dict[str, Any]) -> str:
-    """What a review reads — summary, description, attachments — as one hash.
+def content_fingerprint(fields: dict[str, Any], keyword: str = "Aetherion") -> str:
+    """What a review reads — summary, description, attachments, people's comments — as one hash.
 
     Not the ticket's ``updated`` time: the agent's own replies and labels move
-    that, which would make every ticket look changed.
+    that, which would make every ticket look changed. People's comments count
+    (2026-10-08): answering the review's questions in a comment must make the
+    next "@Aetherion review" read the ticket again. The agent's replies, and the
+    comments asking it something, do not.
     """
     attachments = sorted(
         f"{a.get('id')}:{a.get('filename')}" for a in fields.get("attachment") or []
     )
+    comments = [
+        f"{c.get('id')}:{c.get('updated') or c.get('created') or ''}"
+        for c in ((fields.get("comment") or {}).get("comments") or [])
+        if _is_answer(comment_text(c.get("body"), keep=keyword), keyword)
+    ]
     material = json.dumps(
-        [fields.get("summary") or "", fields.get("description"), attachments],
+        [fields.get("summary") or "", fields.get("description"), attachments, comments],
         sort_keys=True,
         default=str,
     )
     return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
 
 
-def _stale_after(intent: str) -> timedelta:
-    """A job older than its own timeout (plus margin) died with its worker."""
-    minutes = next((spec.timeout_minutes for spec in CATALOG if spec.intent == intent), 10)
+def _is_answer(text: str, keyword: str) -> bool:
+    """A person's comment, not the agent's reply and not a request to it."""
+    return (
+        bool(text.strip())
+        and not is_agent_comment(text)
+        and not mentions_trigger(text, keyword=keyword)
+    )
+
+
+def _stale_after(intent: str, minutes: int = 0) -> timedelta:
+    """A job older than its own timeout (plus margin) died with its worker.
+
+    ``minutes`` is the job's own budget when it said one — a build followed by
+    review, planning and coding holds the ticket far longer than a build alone.
+    """
+    if minutes <= 0:
+        minutes = next((spec.timeout_minutes for spec in CATALOG if spec.intent == intent), 10)
     return timedelta(minutes=minutes + 3)
 
 
@@ -550,6 +603,46 @@ async def _read_state(client: httpx.AsyncClient, issue_key: str) -> dict[str, An
     resp.raise_for_status()
     value = resp.json().get("value")
     return value if isinstance(value, dict) else {}
+
+
+# How many steps a ticket keeps: enough for its whole story, small enough for
+# one Jira property.
+_HISTORY_MAX = 50
+
+
+def _add_step(state: dict[str, Any], step: str, status: str, detail: str, run_id: str) -> None:
+    """One line of the ticket's history (2026-10-15): what ran, how it ended, when."""
+    history = list(state.get("history") or [])
+    history.append(
+        {
+            "at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "step": step,
+            "status": status,
+            "detail": detail[:300],
+            "run_id": run_id,
+        }
+    )
+    state["history"] = history[-_HISTORY_MAX:]
+
+
+@tool(name="record_step")
+async def record_step(
+    issue_key: str, step: str, status: str, detail: str, run_id: str
+) -> dict[str, Any]:
+    """Add one step to the ticket's history — a TDD published, a PR raised, a merge.
+    Never raises: a history that could not be written loses one line, nothing else."""
+    issue_key = (issue_key or "").strip().upper()
+    if not issue_key:
+        return {"recorded": False}
+    try:
+        async with _client() as client:
+            state = await _live_state(client, issue_key)
+            _add_step(state, step, status, detail, run_id)
+            await _write_state(client, issue_key, state)
+        return {"recorded": True}
+    except Exception as exc:  # noqa: BLE001 — the history is a record, not the work
+        logger.warning(f"run {run_id}: could not record {step} on {issue_key}: {exc}")
+        return {"recorded": False, "error": str(exc)}
 
 
 async def _write_state(client: httpx.AsyncClient, issue_key: str, state: dict[str, Any]) -> None:
@@ -573,7 +666,8 @@ async def _live_state(client: httpx.AsyncClient, issue_key: str) -> dict[str, An
             started = datetime.fromisoformat(str(active.get("started")))
         except ValueError:
             started = datetime.min.replace(tzinfo=UTC)
-        if datetime.now(UTC) - started > _stale_after(str(active.get("intent") or "")):
+        budget = int(active.get("minutes") or 0)
+        if datetime.now(UTC) - started > _stale_after(str(active.get("intent") or ""), budget):
             logger.warning(f"Dropping a stale {active.get('intent')} job on {issue_key}")
             state["active"] = None
     return state
@@ -614,8 +708,14 @@ async def ticket_state(issue_key: str) -> dict[str, Any]:
 
 
 @tool(name="claim_ticket")
-async def claim_ticket(issue_key: str, intent: str, run_id: str, reply_id: str) -> dict[str, Any]:
-    """Mark the ticket as having this job running, and show it on the card."""
+async def claim_ticket(
+    issue_key: str, intent: str, run_id: str, reply_id: str, minutes: int = 0
+) -> dict[str, Any]:
+    """Mark the ticket as having this job running, and show it on the card.
+
+    ``minutes``: how long the job may take, when longer than its agent's own
+    timeout (a build with the steps after it); 0 = the agent's timeout.
+    """
     issue_key = issue_key.strip().upper()
     started = datetime.now(UTC).isoformat(timespec="seconds")
     try:
@@ -627,6 +727,9 @@ async def claim_ticket(issue_key: str, intent: str, run_id: str, reply_id: str) 
                 "started": started,
                 "reply_id": reply_id,
             }
+            if minutes > 0:
+                state["active"]["minutes"] = minutes
+            _add_step(state, intent, "started", "", run_id)
             await _write_state(client, issue_key, state)
             await _set_status_label(client, issue_key, RUNNING_LABEL.get(intent, ""))
         return {"claimed": True, "started": started}
@@ -657,6 +760,13 @@ async def finish_ticket(
                     "fingerprint": fingerprint,
                     "finished": datetime.now(UTC).isoformat(timespec="seconds"),
                 }
+            _add_step(
+                state,
+                intent,
+                "finished",
+                str((result or {}).get("headline") or (result or {}).get("outcome") or ""),
+                run_id,
+            )
             await _write_state(client, issue_key, state)
             outcome = str((result or {}).get("outcome") or "")
             await _set_status_label(client, issue_key, FINISHED_LABEL.get(outcome, ""))

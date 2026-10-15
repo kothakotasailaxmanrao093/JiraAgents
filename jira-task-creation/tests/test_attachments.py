@@ -28,29 +28,29 @@ async def test_unsupported_type_is_reported_not_raised() -> None:
 
 async def test_images_are_read_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """A screenshot is often the only place the requirement exists."""
-    monkeypatch.delenv("LTW_ATTACHMENT_READ_IMAGES", raising=False)
+    monkeypatch.delenv("TASK_ATTACHMENT_READ_IMAGES", raising=False)
     assert attachments.supported("screen.png")
 
 
 async def test_images_can_be_switched_off(monkeypatch: pytest.MonkeyPatch) -> None:
     """Each image costs a vision call, so a slow project can opt out."""
-    monkeypatch.setenv("LTW_ATTACHMENT_READ_IMAGES", "false")
+    monkeypatch.setenv("TASK_ATTACHMENT_READ_IMAGES", "false")
     assert not attachments.supported("screen.png")
 
     result = await attachments.extract(b"\x89PNG", "screen.png")
     assert not result.usable
-    assert "LTW_ATTACHMENT_READ_IMAGES" in result.note
+    assert "TASK_ATTACHMENT_READ_IMAGES" in result.note
 
 
 async def test_oversized_files_are_skipped(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LTW_ATTACHMENT_MAX_BYTES", "10")
+    monkeypatch.setenv("TASK_ATTACHMENT_MAX_BYTES", "10")
     result = await attachments.extract(b"a,b\n" * 100, "big.csv")
     assert not result.usable
     assert "over the" in result.note
 
 
 async def test_long_text_is_truncated_with_a_note(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LTW_ATTACHMENT_MAX_CHARS", "20")
+    monkeypatch.setenv("TASK_ATTACHMENT_MAX_CHARS", "20")
     result = await attachments.extract(b"x" * 500, "long.txt")
     assert len(result.text) == 20
     assert "Truncated" in result.note
@@ -75,9 +75,9 @@ async def test_empty_extraction_is_reported() -> None:
 
 
 def test_size_and_count_caps_fall_back_on_invalid_values(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LTW_ATTACHMENT_MAX_FILES", "not-a-number")
+    monkeypatch.setenv("TASK_ATTACHMENT_MAX_FILES", "not-a-number")
     assert attachments.max_files() == attachments.DEFAULT_MAX_FILES
-    monkeypatch.setenv("LTW_ATTACHMENT_MAX_FILES", "3")
+    monkeypatch.setenv("TASK_ATTACHMENT_MAX_FILES", "3")
     assert attachments.max_files() == 3
 
 

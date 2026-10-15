@@ -61,7 +61,7 @@ async def test_the_model_is_asked_for_enough_output(monkeypatch) -> None:
     module = types.ModuleType("agent_lib.gateway.ai")
     module.AiGatewayClient = _Client  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "agent_lib.gateway.ai", module)
-    monkeypatch.delenv("LTW_LLM_MAX_TOKENS", raising=False)
+    monkeypatch.delenv("TASK_LLM_MAX_TOKENS", raising=False)
 
     await _REAL_CHAT("prompt")
     assert seen["max_tokens"] == decompose.DEFAULT_MAX_TOKENS
@@ -71,7 +71,7 @@ async def test_the_model_is_asked_for_enough_output(monkeypatch) -> None:
     "raw, expected", [("8000", 8000), ("", 16000), ("nope", 16000), ("0", 16000)]
 )
 def test_the_output_limit_is_configurable_and_safe(raw: str, expected: int, monkeypatch) -> None:
-    monkeypatch.setenv("LTW_LLM_MAX_TOKENS", raw)
+    monkeypatch.setenv("TASK_LLM_MAX_TOKENS", raw)
     assert decompose._max_tokens() == expected
 
 
@@ -82,7 +82,7 @@ async def test_a_required_model_failure_is_catchable_by_the_tools_layer(monkeypa
         raise TimeoutError("gateway timed out")
 
     monkeypatch.setattr(decompose, "_chat", _chat)
-    monkeypatch.setenv("LTW_REQUIRE_LLM", "true")
+    monkeypatch.setenv("TASK_REQUIRE_LLM", "true")
 
     with pytest.raises(DecompositionError, match="TimeoutError: gateway timed out"):
         await decompose.build_breakdown("Let recruiters record consent.", ProjectContext())
@@ -91,14 +91,14 @@ async def test_a_required_model_failure_is_catchable_by_the_tools_layer(monkeypa
 
 
 async def test_the_fallback_never_runs_even_with_llm_not_required(monkeypatch) -> None:
-    """Blocked whatever LTW_REQUIRE_LLM says: its tickets were boilerplate
+    """Blocked whatever TASK_REQUIRE_LLM says: its tickets were boilerplate
     unrelated to the requirement (owner decision, 2026-09-25)."""
 
     async def _chat(prompt: str) -> str:
         raise TimeoutError("gateway timed out")
 
     monkeypatch.setattr(decompose, "_chat", _chat)
-    monkeypatch.setenv("LTW_REQUIRE_LLM", "false")
+    monkeypatch.setenv("TASK_REQUIRE_LLM", "false")
 
     with pytest.raises(decompose.DecompositionError, match="gateway timed out"):
         await decompose.build_breakdown(

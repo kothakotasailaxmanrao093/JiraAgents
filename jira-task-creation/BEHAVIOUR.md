@@ -163,7 +163,7 @@ EXISTING (FL-85): Send email notifications to tenants
 It is deliberately conservative: anything the model does not positively confirm
 is treated as new work, which is exactly what happened before the check
 existed. If the model is unreachable, only word overlap runs. Switch it off
-with `LTW_DUPLICATE_ADJUDICATE=false`.
+with `TASK_DUPLICATE_ADJUDICATE=false`.
 
 **Reply comment:**
 
@@ -215,7 +215,7 @@ Created in Jira
 ```
 
 **Email: not sent by default.** The comment on the ticket is the record, and a
-successful creation needs no chasing. Add `created` to `LTW_NOTIFY_ON` to turn
+successful creation needs no chasing. Add `created` to `TASK_NOTIFY_ON` to turn
 it on; the subject then states the counts:
 
 ```
@@ -235,13 +235,13 @@ Jira API error — not a project update.
 [JiraTaskCreation] FL-123 — Failed: Jira rejected the Sub-task type
 ```
 
-**Who gets it:** `LTW_ADMIN_EMAILS` if set, otherwise `LTW_NOTIFY_EMAILS`.
+**Who gets it:** `TASK_ADMIN_EMAILS` if set, otherwise `TASK_NOTIFY_EMAILS`.
 Sending breakage reports to everyone who wanted to hear about their own
 requirements trains the whole team to filter the agent out.
 
 **Retries do not re-send.** A failing run is retried automatically, sometimes
 for hours. An identical message is sent once and then suppressed for
-`LTW_EMAIL_REPEAT_WINDOW` seconds (15 minutes by default). Without this, one
+`TASK_EMAIL_REPEAT_WINDOW` seconds (15 minutes by default). Without this, one
 stuck ticket produces an email every few seconds.
 
 ---
@@ -262,7 +262,7 @@ These are added to the reply comment whenever they apply, in any outcome.
 
 ## The one email setting
 
-`LTW_NOTIFY_ON` — a comma-separated list, any of:
+`TASK_NOTIFY_ON` — a comma-separated list, any of:
 
 | Value | Sends email when | Default |
 |---|---|---|

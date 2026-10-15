@@ -81,7 +81,11 @@ def gate(**over: Any) -> dict[str, Any]:
     return base
 
 
-PAYLOAD = {"issue_key": "FL-120", "comment_id": "10501", "webhookEvent": "comment_created"}
+PAYLOAD = {
+    "issue_key": "FL-120",
+    "comment_id": "10501",
+    "webhookEvent": "comment_created",
+}
 VERB = {"build": "@Aetherion build a thing", "review": "@Aetherion review this"}
 
 
@@ -194,7 +198,12 @@ def test_the_child_itself_refuses_to_recommend_an_email_for_an_invalid_request()
 
 # The claims a reply could make about email. D1a: none may appear unless an
 # email was actually sent — and on the routed path none is sent yet.
-_EMAIL_CLAIMS = ("An email was recommended", "Emailed", "email was sent", "Notification")
+_EMAIL_CLAIMS = (
+    "An email was recommended",
+    "Emailed",
+    "email was sent",
+    "Notification",
+)
 
 
 @pytest.mark.parametrize("name", ALL_CONTRACTS)
@@ -234,7 +243,11 @@ async def test_the_already_exists_outcome_names_what_it_matched() -> None:
 async def test_a_redelivery_never_reaches_the_child_at_all() -> None:
     """Layer 1 of three. The child's own idempotency label is the third."""
     tools = Tools(
-        ingress_check={"outcome": "ignored", "ignored": "DUPLICATE", "run_id": "4a81f7c2"}
+        ingress_check={
+            "outcome": "ignored",
+            "ignored": "DUPLICATE",
+            "run_id": "4a81f7c2",
+        }
     )
     child = Child(contract=load("build_created"))
 
@@ -256,7 +269,9 @@ async def test_the_child_workflow_id_prevents_a_replay_running_it_twice() -> Non
 
 
 @pytest.mark.parametrize("name", ALL_CONTRACTS)
-async def test_the_label_and_answered_record_are_passed_on_every_path(name: str) -> None:
+async def test_the_label_and_answered_record_are_passed_on_every_path(
+    name: str,
+) -> None:
     """Both belong to the router now. Every answered path must carry them, or a
     redelivery would be answered a second time."""
     tools, _, _ = await run_with(name)

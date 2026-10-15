@@ -305,3 +305,28 @@ async def test_include_linked_issues_threaded_to_gather_context():
     # gather_context(issue_key, include_parent, include_subtasks, include_linked_issues, ...)
     assert captured["args"][0] == "ABC-1"
     assert captured["args"][3] is False
+
+
+async def test_generate_docx_on_a_laptop_run_points_at_the_saved_file():
+    ex = FakeExecute(
+        {
+            **_single_issue_responses(),
+            "build_review_report": {
+                "s3_key": None,
+                "local_path": "/tmp/reports/ABC_1_2026-01-01.docx",
+                "extension": "docx",
+                "metrics": {"issue_count": 1, "total_findings": 1, "overall_readiness": "ready"},
+                "email_html": "<p>hi</p>",
+                "error": None,
+            },
+        }
+    )
+    out = await run_review({"issue_key": "ABC-1", "generate_docx": True}, ex)
+    assert out[0]["status"] == "success"
+    assert out[1] == {
+        "type": "local_file",
+        "title": "Requirement Review Report — ABC-1",
+        "path": "/tmp/reports/ABC_1_2026-01-01.docx",
+        "extension": "docx",
+    }
+    assert out[2]["status"] == "success"

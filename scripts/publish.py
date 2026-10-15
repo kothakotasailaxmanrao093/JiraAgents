@@ -161,6 +161,33 @@ def write_versions(project: Path, rel_metadata: str, new: str, rel_constant: str
 # --------------------------------------------------------------------------
 
 
+# A setting whose value is a credential (2026-10-15). Its NAME may be printed;
+# its value never is.
+_SECRET_NAME = re.compile(r"TOKEN|PASSWORD|SECRET|PRIVATE|_KEY$", re.IGNORECASE)
+# Jira and Confluence identifiers ("FL", "BTS"), not credentials.
+_NOT_SECRET = re.compile(r"(PROJECT|ISSUE|EPIC|SPACE)_KEYS?$", re.IGNORECASE)
+
+
+def secrets_in_env(project: Path) -> list[str]:
+    """The names of credentials with a value in the agent's .env — which ships
+    inside the published artifact. In production they belong in the platform's
+    secret store (read through ``secret()``: a mounted file before the variable)."""
+    env = project / ".env"
+    if not env.exists():
+        return []
+    names = []
+    for line in env.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        name, _, value = line.partition("=")
+        name = name.strip().removeprefix("export ").strip()
+        secretive = _SECRET_NAME.search(name) and not _NOT_SECRET.search(name)
+        if secretive and value.strip().strip("\"'"):
+            names.append(name)
+    return names
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Publish an Aetherion agent, safely.")
     group = parser.add_mutually_exclusive_group(required=True)
@@ -184,6 +211,14 @@ def main() -> int:
             "pass --force to the agent's preflight, accepting its warnings. Use ONLY "
             "when you have read each warning and confirmed it is intended — e.g. a "
             "real Jira site whose name merely looks like a test one."
+        ),
+    )
+    parser.add_argument(
+        "--no-secrets-in-env",
+        action="store_true",
+        help=(
+            "refuse to publish while .env holds a credential (a token, password or key) - "
+            "for production, where secrets come from the platform's secret store"
         ),
     )
     args = parser.parse_args()
@@ -248,6 +283,18 @@ def main() -> int:
             print(_run(command, project, what="preflight failed"))
         else:
             print("  (this agent has no preflight script)")
+        shipped = secrets_in_env(project)
+        if shipped:
+            note = f".env holds {len(shipped)} credential(s) that ship inside the agent: " + (
+                ", ".join(shipped)
+            )
+            if args.no_secrets_in_env:
+                raise Failed(
+                    note + ". Move them to the platform's secret store (or SECRETS_DIR) "
+                    "and remove them from .env."
+                )
+            print("  " + note)
+            print("  (production: publish with --no-secrets-in-env, secrets in the secret store)")
 
         _step(7, "Publish")
         # After the bump, so uv.lock and the environment carry the new version

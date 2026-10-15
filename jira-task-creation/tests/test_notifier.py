@@ -71,7 +71,7 @@ def test_an_email_means_a_person_has_something_to_do(
     # A successful run needs no chasing; the tickets are the outcome.
     assert not notifier.should_notify(NotificationKind.CREATED)
 
-    monkeypatch.setenv("LTW_NOTIFY_ON", "created")
+    monkeypatch.setenv("TASK_NOTIFY_ON", "created")
     assert notifier.should_notify(NotificationKind.CREATED)
     assert not notifier.should_notify(NotificationKind.FAILED)
 
@@ -84,7 +84,7 @@ def test_a_comment_that_was_not_a_requirement_never_emails(
     "hi", "thanks", "who is the PM?" are not events to alert a human about.
     """
     for setting in ("", "created,failed", "clarification,duplicates,created,failed"):
-        monkeypatch.setenv("LTW_NOTIFY_ON", setting)
+        monkeypatch.setenv("TASK_NOTIFY_ON", setting)
         assert not notifier.should_notify(NotificationKind.INVALID_REQUEST)
 
 
@@ -100,7 +100,7 @@ async def test_missing_recipients_is_reported(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setenv("GMAIL_APP_PASSWORD", "app-password")
     result = await notifier.send(NotificationKind.FAILED, issue_key="KS-1")
     assert not result.attempted
-    assert "LTW_NOTIFY_EMAILS" in result.error
+    assert "TASK_NOTIFY_EMAILS" in result.error
 
 
 # --- delivery ---------------------------------------------------------------
@@ -299,7 +299,7 @@ async def test_chatter_is_never_emailed(gmail_env: None, sent: list[dict]) -> No
 async def test_success_receipts_are_sent_when_enabled(
     gmail_env: None, sent: list[dict], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("LTW_NOTIFY_ON", "created")
+    monkeypatch.setenv("TASK_NOTIFY_ON", "created")
     result = await notifier.send(
         NotificationKind.CREATED, issue_key="TT2-118", created_keys=["TT2-119"]
     )
@@ -370,7 +370,7 @@ async def test_a_different_outcome_on_one_issue_is_still_emailed(
 async def test_suppression_can_be_turned_off(
     gmail_env: None, sent: list[dict], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("LTW_EMAIL_REPEAT_WINDOW", "0")
+    monkeypatch.setenv("TASK_EMAIL_REPEAT_WINDOW", "0")
     for _ in range(3):
         await notifier.send(NotificationKind.FAILED, issue_key="KS-12", errors=["Boom"])
     assert len(sent) == 3
@@ -380,8 +380,8 @@ async def test_suppression_can_be_turned_off(
 
 
 def test_failures_go_to_the_admin_list_when_one_is_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LTW_NOTIFY_EMAILS", "team@example.com")
-    monkeypatch.setenv("LTW_ADMIN_EMAILS", "ops@example.com")
+    monkeypatch.setenv("TASK_NOTIFY_EMAILS", "team@example.com")
+    monkeypatch.setenv("TASK_ADMIN_EMAILS", "ops@example.com")
     assert notifier.recipients_for(NotificationKind.FAILED) == ["ops@example.com"]
     assert notifier.recipients_for(NotificationKind.CLARIFICATION_REQUIRED) == ["team@example.com"]
 
@@ -390,6 +390,62 @@ def test_failures_fall_back_to_the_normal_list_when_no_admin_is_set(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unconfigured install must still hear about breakage."""
-    monkeypatch.setenv("LTW_NOTIFY_EMAILS", "team@example.com")
-    monkeypatch.delenv("LTW_ADMIN_EMAILS", raising=False)
+    monkeypatch.setenv("TASK_NOTIFY_EMAILS", "team@example.com")
+    monkeypatch.delenv("TASK_ADMIN_EMAILS", raising=False)
     assert notifier.recipients_for(NotificationKind.FAILED) == ["team@example.com"]
+
+
+# --- the email quotes the request, not the files read with it (2026-10-06) -------
+
+
+def _requirement_with_files() -> str:
+    transcript = "\n".join(f"00:0{i}:00 Tyler Judkins: um, so this is line {i}" for i in range(400))
+    return (
+        "Enhancement request for mass report printing\n\n"
+        "Parity with Classic, need the client user to print reports in mass.\n\n"
+        "## Uploaded on the Aetherion form (supporting material)\n"
+        f"### Attachment: 17185 Transcript.txt\n{transcript}\n\n"
+        "### Attachment: image-20250116-192047.png\nCAPTION: A report list.\nTEXT: Selected: Archive, Print"
+    )
+
+
+def test_the_email_quotes_the_request_and_names_the_files() -> None:
+    from src.notifications.email import build_body
+
+    body = build_body(
+        NotificationKind.CLARIFICATION_REQUIRED,
+        issue_key="",
+        project_key="BGV",
+        questions=["Which version is printed?"],
+        requirement=_requirement_with_files(),
+    )
+    assert "Enhancement request for mass report printing" in body
+    assert "Read with it: 17185 Transcript.txt, image-20250116-192047.png" in body
+    assert "Tyler Judkins" not in body, "the transcript is named, not reprinted"
+    assert "Selected: Archive, Print" not in body, "nor the screenshot's text"
+    assert len(body) < 1_500
+
+
+def test_a_form_run_is_told_to_run_the_form_again() -> None:
+    from src.notifications.email import build_body
+
+    body = build_body(
+        NotificationKind.CLARIFICATION_REQUIRED, issue_key="", requirement="Print reports in bulk."
+    )
+    assert "run it again" in body and "trigger keyword" not in body
+
+
+def test_a_ticket_run_is_still_told_to_mention_the_agent() -> None:
+    from src.notifications.email import build_body
+
+    body = build_body(
+        NotificationKind.CLARIFICATION_REQUIRED, issue_key="BGV-12", requirement="Print reports."
+    )
+    assert "mention the trigger keyword again" in body
+
+
+def test_a_very_long_request_is_shortened_in_the_email() -> None:
+    from src.notifications.email import REQUEST_QUOTE_CHARS, request_quote
+
+    quoted = request_quote("Print the reports. " * 500)
+    assert len(quoted) <= REQUEST_QUOTE_CHARS + 2 and quoted.endswith("…")

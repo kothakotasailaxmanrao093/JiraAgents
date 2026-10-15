@@ -158,3 +158,16 @@ FINISHED_LABEL = {
     "PLANNED": "aetherion-pdf-ready",
     "NEEDS_INFO": "aetherion-needs-input",
 }
+
+
+def previous_review_points(state: TicketState) -> list[str]:
+    """What the last completed review asked, changed ticket or not (2026-10-08).
+
+    Handed to the next review, which checks the comments for answers and reports
+    only what is still open.
+    """
+    review = state.last.get("REVIEW") or {}
+    result = review.get("result") or {}
+    if result.get("outcome") != "REVIEWED":
+        return []
+    return _open_points(result, limit=12)

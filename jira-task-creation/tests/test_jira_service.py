@@ -34,7 +34,7 @@ def small_breakdown() -> dict:
 
 def medium_breakdown() -> dict:
     return WorkBreakdown(
-        classification="Medium",
+        classification="Large",
         analysis="Three related notification capabilities.",
         epic=make_epic(),
         stories=[
@@ -451,7 +451,7 @@ def test_the_status_name_alone_is_not_trusted() -> None:
 
 
 def test_closed_work_can_be_compared_again_on_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LTW_MATCH_CLOSED_WORK", "true")
+    monkeypatch.setenv("TASK_MATCH_CLOSED_WORK", "true")
     issues = [closed_issue("Log a rest break", "Won't Do", "done")]
     assert len(jira.find_overlaps(["Log a rest break"], issues)) == 1
 

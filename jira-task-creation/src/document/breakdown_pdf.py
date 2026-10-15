@@ -23,6 +23,7 @@ from src.classification.details import phrase as detail_phrase
 from src.models.schemas import WorkBreakdown
 
 MODE_LINE = "PDF only — no Jira tickets were created or changed"
+CREATED_LINE = "Created in Jira — the tickets below now exist"
 
 SECTIONS = (
     "At a glance",
@@ -63,6 +64,9 @@ class RootPreview:
     summary_after: str
     priority: str = ""
     reason: str = ""
+    # What would go under it: "3 Sub-tasks", "2 Stories with their Sub-tasks",
+    # or "" when nothing would (one step).
+    children: str = ""
 
 
 @dataclass
@@ -88,11 +92,35 @@ class BreakdownDocument:
     # "BGV-69 — Candidate Address Verification": the Epic the form named; the
     # Stories go under it and no new Epic is made, as creation does.
     existing_epic: str = ""
+    # Proposed items that already exist in Jira ({"proposed_title",
+    # "existing_key", "existing_summary", "existing_status"}). In PDF mode the
+    # plan is still emailed — they are named here instead of stopping the run.
+    already_exist: list[dict] = field(default_factory=list)
+    # "BGV-110 · Story · Bulk print …": set when the tickets WERE created (a
+    # laptop run keeps this copy in docs-export); empty for a PDF-only run.
+    created: list[str] = field(default_factory=list)
 
 
-def numbered(breakdown: WorkBreakdown, *, root_is_epic: bool, existing_epic: str = "") -> list[str]:
-    """The proposed items as a reader refers to them: E, S1, S1.1 …"""
+def numbered(
+    breakdown: WorkBreakdown,
+    *,
+    root_is_epic: bool,
+    existing_epic: str = "",
+    card: RootPreview | None = None,
+) -> list[str]:
+    """The proposed items as a reader refers to them: E, S1, S1.1 …
+
+    Built on a Story, Task or Bug card, the one item IS that card: it is named
+    by its key and its Sub-tasks are listed under it (2026-10-07).
+    """
     lines: list[str] = []
+    if card is not None and card.type_after.lower() != "epic":
+        subs = [
+            f"S1.{t} {sub.title}"
+            for t, sub in enumerate((x for st in breakdown.stories for x in st.subtasks), 1)
+        ]
+        label = f"{card.key} (this {card.type_after}, unchanged)"
+        return [label + (f" — Sub-tasks: {', '.join(subs)}" if subs and card.children else "")]
     if existing_epic:
         lines.append(f"{existing_epic} (existing Epic — no new Epic; the Stories go under it)")
     elif breakdown.epic is not None and not root_is_epic:
@@ -122,20 +150,31 @@ def _root(doc: BreakdownDocument) -> str:
             + f". {escape(doc.issue_key)} itself would not change.</p>"
         )
     r = doc.root
+    article = "an" if r.type_after[:1].lower() in "aeiou" else "a"
     return "<h2>What the ticket would become</h2>" + _list(
         [
-            f"Type: {r.type_before} → {r.type_after}",
-            f"Summary: {r.summary_before} → {r.summary_after}",
-            f"Priority: {r.priority or 'unchanged'}",
-            f"Why: {r.reason}",
-            "Its original summary and description would be kept under 'Original request'.",
+            f"{r.key} stays {article} {r.type_after} — its type, summary and description "
+            "are not changed.",
+            f"Under it: {r.children}." if r.children else "Nothing goes under it: it is one step.",
         ],
         "",
     )
 
 
-def _hierarchy(breakdown: WorkBreakdown, root_is_epic: bool, existing_epic: str) -> str:
-    parts = ["<h2>Proposed tickets (not created)</h2>"]
+def _hierarchy(
+    breakdown: WorkBreakdown,
+    root_is_epic: bool,
+    existing_epic: str,
+    created: bool = False,
+    card: RootPreview | None = None,
+) -> str:
+    parts = [
+        (
+            "<h2>Tickets (created in Jira)</h2>"
+            if created
+            else "<h2>Proposed tickets (not created)</h2>"
+        )
+    ]
     if existing_epic:
         parts.append(f"<h3>Existing Epic: {escape(existing_epic)}</h3>")
         parts.append("<p>No new Epic would be made. Every Story below would go under it.</p>")
@@ -147,8 +186,16 @@ def _hierarchy(breakdown: WorkBreakdown, root_is_epic: bool, existing_epic: str)
         parts.append("<p><b>Scope</b></p>" + _list(epic.scope, "Not specified"))
         parts.append("<p><b>Out of scope</b></p>" + _list(epic.out_of_scope, "Not specified"))
         parts.append("<p><b>Acceptance criteria</b></p>" + _list(epic.acceptance_criteria, "—"))
+    on_card = card is not None and card.type_after.lower() != "epic"
     for s, story in enumerate(breakdown.stories, start=1):
-        parts.append(f"<h3>S{s} — {escape(story.title)}</h3>")
+        if on_card:
+            # The one item IS the card: named as it is, never re-titled.
+            parts.append(
+                f"<h3>{escape(card.key)} — {escape(card.summary_before)} "
+                f"(this {escape(card.type_after)}, unchanged)</h3>"
+            )
+        else:
+            parts.append(f"<h3>S{s} — {escape(story.title)}</h3>")
         parts.append(f"<p>{escape(story.user_story_statement)}</p>")
         parts.append(f"<p>{escape(story.description)}</p>")
         parts.append(
@@ -192,6 +239,12 @@ def breakdown_html(doc: BreakdownDocument) -> str:
         if match
         else "No existing ticket covers this work."
     )
+    existing = [
+        f"“{d.get('proposed_title')}” already exists as {d.get('existing_key')} "
+        f"“{d.get('existing_summary')}” ({d.get('existing_status') or 'status unknown'}) "
+        "— not to be created again."
+        for d in doc.already_exist
+    ]
     cards = [f"{doc.issue_key} — {doc.issue_summary} (asked on)"] + list(doc.related_keys)
     coverage = [f"Line {n} → {title}" for n, title in sorted(doc.coverage.items(), key=_num)]
     counts = b.issue_count()
@@ -207,13 +260,14 @@ def breakdown_html(doc: BreakdownDocument) -> str:
         ("Would become", becomes),
         ("Proposed", f"{counts['stories']} Stories, {counts['subtasks']} Sub-tasks"),
         ("Open questions", str(len(questions) + len(doc.review_questions))),
+        *([("Already in Jira", f"{len(existing)} of the proposed items")] if existing else []),
         ("Generated", f"{doc.generated_at} · agent {doc.agent_version}"),
     ]
     table = "".join(f"<tr><td><b>{escape(k)}</b></td><td>{escape(v)}</td></tr>" for k, v in glance)
     return "".join(
         [
             f"<h1>Work breakdown — {escape(doc.issue_key)}</h1>",
-            f"<p class='mode'>{escape(MODE_LINE)}</p>",
+            f"<p class='mode'>{escape(CREATED_LINE if doc.created else MODE_LINE)}</p>",
             f"<h2>{SECTIONS[0]}</h2><div class='box'><table>{table}</table></div>",
             "<p><b>Contents</b></p>" + _list(list(SECTIONS[1:]), ""),
             f"<h2>{SECTIONS[1]}</h2>" + _list(cards, ""),
@@ -226,10 +280,19 @@ def breakdown_html(doc: BreakdownDocument) -> str:
             + _list(
                 questions + [f"From the review: {q}" for q in doc.review_questions], "Nothing."
             ),
-            f"<h2>{SECTIONS[7]}</h2>" + f"<p>{escape(duplicate)}</p>",
+            f"<h2>{SECTIONS[7]}</h2>"
+            + (_list(existing, "") if existing else f"<p>{escape(duplicate)}</p>"),
             "<h2>Summary of proposed tickets</h2>"
-            + _list(numbered(b, root_is_epic=root_is_epic, existing_epic=doc.existing_epic), ""),
-            _hierarchy(b, root_is_epic, doc.existing_epic),
+            + _list(
+                numbered(
+                    b, root_is_epic=root_is_epic, existing_epic=doc.existing_epic, card=doc.root
+                ),
+                "",
+            ),
+            ("<h2>Created in Jira</h2>" + _list(doc.created, "")) if doc.created else "",
+            _hierarchy(
+                b, root_is_epic, doc.existing_epic, created=bool(doc.created), card=doc.root
+            ),
             f"<h2>{SECTIONS[9]}</h2>" + _list(risks, "None recorded."),
             f"<h2>{SECTIONS[10]}</h2>" + f"<p>{escape(doc.placement.replace('_', ' '))}</p>",
             f"<h2>{SECTIONS[11]}</h2>" + _list(coverage, "No listed requirement lines."),

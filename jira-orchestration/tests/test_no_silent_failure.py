@@ -24,10 +24,16 @@ from shared.contract import AgentResult, Outcome
 from tests.fake_tools import Tools
 from tools import tools
 
-PAYLOAD = {"issue_key": "BGV-50", "comment_id": "10900", "webhookEvent": "comment_created"}
+PAYLOAD = {
+    "issue_key": "BGV-50",
+    "comment_id": "10900",
+    "webhookEvent": "comment_created",
+}
 
 
-def _proceed(body: str = "@Aetherion build — let recruiters download a report as a PDF"):
+def _proceed(
+    body: str = "@Aetherion build — let recruiters download a report as a PDF",
+):
     return {
         "outcome": "proceed",
         "run_id": "r1",
@@ -95,7 +101,11 @@ REPLYING_PATHS = [
         {"ingress_check": _raise(TimeoutError("activity timed out"))},
         _dispatch_ok,
     ),
-    ("ingress returned an unknown outcome", {"ingress_check": {"outcome": "maybe"}}, _dispatch_ok),
+    (
+        "ingress returned an unknown outcome",
+        {"ingress_check": {"outcome": "maybe"}},
+        _dispatch_ok,
+    ),
     ("help", {"ingress_check": _proceed("@Aetherion help")}, _dispatch_ok),
     (
         "chatter",
@@ -117,18 +127,27 @@ REPLYING_PATHS = [
     ("child unreachable", {"ingress_check": _proceed()}, _dispatch_raises),
     (
         "child unreachable, admin alert raised",
-        {"ingress_check": _proceed(), "notify_admins": _raise(ConnectionError("smtp down"))},
+        {
+            "ingress_check": _proceed(),
+            "notify_admins": _raise(ConnectionError("smtp down")),
+        },
         _dispatch_raises,
     ),
     ("child returned garbage", {"ingress_check": _proceed()}, _dispatch_garbage),
     (
         "outcome email raised",
-        {"ingress_check": _proceed(), "send_outcome_email": _raise(ConnectionError("smtp down"))},
+        {
+            "ingress_check": _proceed(),
+            "send_outcome_email": _raise(ConnectionError("smtp down")),
+        },
         _dispatch_ok,
     ),
     (
         "post_reply raised",
-        {"ingress_check": _proceed(), "post_reply": _raise(TimeoutError("jira timeout"))},
+        {
+            "ingress_check": _proceed(),
+            "post_reply": _raise(TimeoutError("jira timeout")),
+        },
         _dispatch_ok,
     ),
 ]
@@ -233,4 +252,8 @@ async def test_a_comment_without_the_keyword_is_ignored_not_failed(monkeypatch) 
     monkeypatch.setattr(tools, "_client", _jira(lambda r: httpx.Response(200, json=issue)))
     monkeypatch.delenv("ORCH_ALLOWED_PROJECT_KEYS", raising=False)
     gate = await tools.ingress_check("BGV-50", "10900")
-    assert gate == {"outcome": "ignored", "ignored": "NO_KEYWORD", "run_id": gate["run_id"]}
+    assert gate == {
+        "outcome": "ignored",
+        "ignored": "NO_KEYWORD",
+        "run_id": gate["run_id"],
+    }

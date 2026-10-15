@@ -28,7 +28,12 @@ def iso(t: datetime) -> str:
 
 
 def pr(
-    number: int, *, updated: datetime, merged: datetime | None = None, base: str = "main", **over
+    number: int,
+    *,
+    updated: datetime,
+    merged: datetime | None = None,
+    base: str = "main",
+    **over,
 ):
     return {
         "number": number,
@@ -117,13 +122,20 @@ def world(monkeypatch):
     monkeypatch.setenv("ORCH_GITHUB_ORG", "AetherionAgentDemo")
     monkeypatch.setenv("ORCH_GITHUB_STATE_PROJECT", "BGV")
     monkeypatch.setenv("ORCH_ALLOWED_PROJECT_KEYS", "BGV,FL")
-    for name in ("ORCH_GITHUB_REPOS", "ORCH_GITHUB_BRANCH", "ORCH_GITHUB_MAX_TRIES"):
+    # The developer's own .env is loaded on import; none of it may reach these tests.
+    for name in (
+        "ORCH_GITHUB_REPOS",
+        "ORCH_GITHUB_BRANCH",
+        "ORCH_GITHUB_MAX_TRIES",
+        "ORCH_PLANNING_REPOS",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(
         github_tools,
         "_github",
         lambda: httpx.AsyncClient(
-            base_url="https://api.github.com", transport=httpx.MockTransport(github.handle)
+            base_url="https://api.github.com",
+            transport=httpx.MockTransport(github.handle),
         ),
     )
     monkeypatch.setattr(
@@ -164,13 +176,20 @@ async def test_the_first_check_watches_from_now_and_sends_no_history(world) -> N
 # --- a merge into main ---------------------------------------------------------------
 
 
-async def test_a_merge_into_main_is_given_once_with_its_files_and_comments(world) -> None:
+async def test_a_merge_into_main_is_given_once_with_its_files_and_comments(
+    world,
+) -> None:
     github, jira, clock = world
     await scan(clock, T0)
     merged_at = T0 + timedelta(seconds=20)
     github.prs = [pr(2, updated=merged_at, merged=merged_at)]
     github.files[2] = [
-        {"filename": "src/reminders.py", "status": "added", "additions": 40, "deletions": 0}
+        {
+            "filename": "src/reminders.py",
+            "status": "added",
+            "additions": 40,
+            "deletions": 0,
+        }
     ]
     github.line_comments[2] = [
         {
@@ -321,6 +340,7 @@ async def test_an_unconfigured_check_says_what_is_missing(monkeypatch) -> None:
         "ORCH_GITHUB_ORG",
         "ORCH_GITHUB_STATE_PROJECT",
         "ORCH_ALLOWED_PROJECT_KEYS",
+        "ORCH_PLANNING_REPOS",
     ):
         monkeypatch.delenv(name, raising=False)
     result = await github_tools.github_scan()
@@ -394,19 +414,54 @@ class Planning:
         return self.answer
 
 
-async def test_each_event_is_given_to_planning_as_its_issue_text() -> None:
-    tools = Tools(github_scan=SCAN, github_event_done={"recorded": True, "gave_up": False})
-    planning = Planning({"status": "success", "tdd": {}})
+async def test_a_merge_refreshes_that_repositorys_graph_and_writes_no_design() -> None:
+    """2026-10-08: the merge brings the graph up to date for the next design."""
+    scan = {**SCAN, "repos_text": f"demo: {REPO}\nuser: org/user"}
+    tools = Tools(github_scan=scan, github_event_done={"recorded": True, "gave_up": False})
+    planning = Planning({"status": "success", "mode": "graph_sync", "results": []})
     result = await run_github_poll(tools.execute, planning)
 
     [(name, payload, options)] = planning.calls
     assert name == "planning_agent"
-    assert payload["issue_text"] == EVENT["issue_text"]
+    assert payload["issue_text"] == "", "no requirement: Planning only syncs the graph"
+    assert payload["repos"] == f"demo: {REPO}", "that repository, under its configured name"
     assert payload["event"] == "pr_merged" and payload["issue_key"] == "BGV-93"
     assert options["task_queue"] == "local-planning-agent-q"
     assert options["workflow_id"] == "planning-gh-abc"
-    assert tools.args("github_event_done") == (EVENT["key"], True, "plan generated")
+    assert tools.args("github_event_done") == (EVENT["key"], True, "graph refreshed")
     assert result["sent"] == 1 and result["failed"] == 0
+
+
+async def test_an_unconfigured_repository_is_named_after_itself() -> None:
+    tools = Tools(github_scan=SCAN, github_event_done={"recorded": True, "gave_up": False})
+    planning = Planning({"status": "success"})
+    await run_github_poll(tools.execute, planning)
+    assert planning.calls[0][1]["repos"] == f"{REPO.split('/')[1]}: {REPO}"
+
+
+async def test_new_pr_comments_are_designed_for_against_every_repository() -> None:
+    event = {
+        **EVENT,
+        "kind": "pr_comments",
+        "issue_text": "New comments on a pull request…",
+    }
+    scan = {**SCAN, "events": [event], "repos_text": f"demo: {REPO}\nuser: org/user"}
+    tools = Tools(github_scan=scan, github_event_done={"recorded": True, "gave_up": False})
+    planning = Planning({"status": "success"})
+    await run_github_poll(tools.execute, planning)
+
+    payload = planning.calls[0][1]
+    assert payload["issue_text"] == "New comments on a pull request…"
+    assert payload["repos"] == f"demo: {REPO}\nuser: org/user"
+    assert tools.args("github_event_done") == (event["key"], True, "plan generated")
+
+
+async def test_planning_repositories_are_watched_even_outside_the_organization(
+    world, monkeypatch
+) -> None:
+    github, jira, clock = world
+    monkeypatch.setenv("ORCH_PLANNING_REPOS", "tickets: someone/TicketRouting@main")
+    assert (await scan(clock, T0))["repos"] == 2
 
 
 @pytest.mark.parametrize(

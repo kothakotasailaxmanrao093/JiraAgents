@@ -127,7 +127,10 @@ def _section(name: str, result: AgentResult) -> Section | None:
         return Section("What happened", result.summary) if result.summary else None
 
     if name == "created":
-        items = [f"{c.issue_type} {c.key} — {c.summary}".strip(" —") for c in result.created]
+        items = [
+            f"{c.issue_type} {f'[{c.key}]({c.url})' if c.url else c.key} — {c.summary}".strip(" —")
+            for c in result.created
+        ]
         return Section("Created in Jira", items) if items else None
 
     if name == "duplicates":
@@ -276,8 +279,54 @@ AMBIGUOUS_OPTIONS = [
 ]
 
 HELP_OPTIONS = [
-    '"@Aetherion build <requirement>" — break a requirement into Jira issues',
-    '"@Aetherion review" — assess this ticket and report what is missing',
-    '"@Aetherion explain" — describe what this ticket is asking for',
+    '"@Aetherion build <requirement>" — break the requirement, or this ticket\'s requirements, '
+    "into Jira work items (a Story gets Sub-tasks, an Epic gets Stories)",
+    '"@Aetherion review" — review this ticket: findings, gaps, missing information and open '
+    "questions. Answer them in the comments and ask again",
+    '"@Aetherion explain this card" — explain what this ticket is asking for',
+    '"@Aetherion explain why this approach and why not another approach" — the Planning agent '
+    "explains the design's reasoning and weighs the alternative",
+    '"@Aetherion create TDD" — on a Story: check the requirement is ready, then write the '
+    "Technical Design Document in Confluence and link it here",
+    '"@Aetherion code" — start coding from the Confluence TDD, after confirming the branches; '
+    "the pull request is linked here and on the TDD page",
+    '"@Aetherion status" — what has happened on this ticket so far, and what is running now',
     '"@Aetherion help" — show this list',
 ]
+
+
+# How many of a ticket's steps the status reply shows, newest last.
+STATUS_STEPS = 15
+
+
+def status_blocks(issue_key: str, state: dict) -> list[tuple[str, object]]:
+    """The reply to "@Aetherion status" (2026-10-15): the job running now, if any,
+    and the ticket's latest steps — each with its time and run id."""
+    blocks: list[tuple[str, object]] = [(f"{AGENT_SIGNATURE} · Status of {issue_key}", "")]
+    active = state.get("active") or {}
+    blocks.append(
+        (
+            "Running now",
+            (
+                f"{active.get('intent', 'A job')} — started {active.get('started', '')} "
+                f"(run {active.get('run_id', '')})"
+                if active
+                else "Nothing is running on this ticket."
+            ),
+        )
+    )
+    steps = list(state.get("history") or [])[-STATUS_STEPS:]
+    blocks.append(
+        (
+            "What has happened",
+            [
+                f"{s.get('at', '')} — {s.get('step', '')} {s.get('status', '')}"
+                + (f": {s['detail']}" if s.get("detail") else "")
+                + f" (run {s.get('run_id', '')})"
+                for s in steps
+            ]
+            or ["Nothing has been asked of the agents on this ticket yet."],
+        )
+    )
+    blocks.append(("", AGENT_FOOTER))
+    return blocks

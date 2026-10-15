@@ -124,13 +124,6 @@ CATALOG: tuple[AgentSpec, ...] = (
     ),
 )
 
-# Intents the router answers itself. They dispatch to no agent, so they are not
-# in the catalog — but the classifier must still be able to return them, and the
-# set has to be closed or the composer cannot be exhaustive.
-ROUTER_INTENTS = ("QUESTION", "CHATTER")
-
-INTENTS = tuple(spec.intent for spec in CATALOG) + ROUTER_INTENTS
-
 
 def by_intent(intent: str) -> AgentSpec | None:
     """The agent that serves this intent, or None when the router answers."""

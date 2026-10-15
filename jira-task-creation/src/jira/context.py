@@ -88,12 +88,12 @@ _DESCRIPTION_SNIPPET = 1500
 
 
 def max_context_issues() -> int:
-    """How many existing tickets to read, from ``LTW_MAX_CONTEXT_ISSUES``."""
-    raw = os.environ.get("LTW_MAX_CONTEXT_ISSUES", "").strip()
+    """How many existing tickets to read, from ``TASK_MAX_CONTEXT_ISSUES``."""
+    raw = os.environ.get("TASK_MAX_CONTEXT_ISSUES", "").strip()
     try:
         value = int(raw) if raw else DEFAULT_MAX_CONTEXT_ISSUES
     except ValueError:
-        logger.warning(f"LTW_MAX_CONTEXT_ISSUES is not an integer ({raw!r}); using default")
+        logger.warning(f"TASK_MAX_CONTEXT_ISSUES is not an integer ({raw!r}); using default")
         value = DEFAULT_MAX_CONTEXT_ISSUES
     return max(1, value)
 
@@ -174,7 +174,7 @@ async def fetch_existing_issues(
 
     if token and not payload.get("isLast") and len(issues) >= cap:
         unavailable.append(
-            f"Stopped after {len(issues)} existing tickets (LTW_MAX_CONTEXT_ISSUES). "
+            f"Stopped after {len(issues)} existing tickets (TASK_MAX_CONTEXT_ISSUES). "
             f"Older work was not compared."
         )
 

@@ -53,10 +53,10 @@ In `.env`:
 
 ```bash
 JIRA_PROJECT_KEY=FL
-LTW_ALLOWED_PROJECT_KEYS=FL
+TASK_ALLOWED_PROJECT_KEYS=FL
 ```
 
-`LTW_ALLOWED_PROJECT_KEYS` is a safety fence — the agent will refuse to write
+`TASK_ALLOWED_PROJECT_KEYS` is a safety fence — the agent will refuse to write
 anywhere else, even if someone comments on a ticket in another project.
 
 ### 0.3 Check the project is ready
@@ -123,7 +123,7 @@ Jira → **Settings** → **System** → **WebHooks** → **Create a WebHook**
 | --- | --- |
 | **URL** | `https://your-ngrok-address/jira/webhook` |
 | **Events** | ☑ Comment: created |
-| **Secret** | The same value as `LTW_JIRA_WEBHOOK_SECRET` in your `.env` |
+| **Secret** | The same value as `TASK_JIRA_WEBHOOK_SECRET` in your `.env` |
 
 > **The URL must end in `/jira/webhook`.** Pointing it at the bare address is the
 > most common mistake — Jira gets a 405 and nothing happens.
@@ -554,9 +554,9 @@ catches it. In production this exact case created a duplicate Story.
 | **M1** | `@Aetherion who is the PM?` | **No email at all.** Not at any setting |
 | **M2** | A vague but genuine request | Email: `Not created: 3 details missing` |
 | **M3** | A repeat of existing work | Email: `Not created: this work already exists (matches FL-x)` |
-| **M4** | A successful creation | **No email** unless `created` is in `LTW_NOTIFY_ON` |
+| **M4** | A successful creation | **No email** unless `created` is in `TASK_NOTIFY_ON` |
 | **M5** | Break `JIRA_API_TOKEN`, then trigger twice within 15 minutes | **One** email, not two. The second is suppressed as a retry |
-| **M6** | Set `LTW_ADMIN_EMAILS`, then cause a failure | The failure goes to the admin address, not the team list |
+| **M6** | Set `TASK_ADMIN_EMAILS`, then cause a failure | The failure goes to the admin address, not the team list |
 
 Every subject line must state the outcome on its own. A subject reading only
 *"could not be processed"* is a bug.
@@ -597,7 +597,7 @@ Nothing from that host may appear anywhere. A ticket comment is untrusted input.
 **E9 · A project outside the allow-list is refused**
 
 Comment on a ticket in a *different* project. With
-`LTW_ALLOWED_PROJECT_KEYS=FL`, the agent must refuse and create nothing there.
+`TASK_ALLOWED_PROJECT_KEYS=FL`, the agent must refuse and create nothing there.
 
 ### Loops and repeats
 
@@ -624,7 +624,7 @@ naming the credentials — not a stack trace, and no partial tickets.
 
 **E13 · Read-only mode**
 
-Set `LTW_READ_ONLY=true`, restart, and comment. Expect the full breakdown to be
+Set `TASK_READ_ONLY=true`, restart, and comment. Expect the full breakdown to be
 produced and reported, with **nothing** written to Jira.
 
 ---

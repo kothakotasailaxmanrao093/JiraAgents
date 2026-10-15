@@ -136,6 +136,9 @@ class AgentResult:
     # REVIEWED: readiness, 1-5 (0 = not scored). The router keeps it, so a later
     # build on the same unchanged ticket knows how ready it was judged.
     readiness_score: int = 0
+    # Files the child made, kept in the agents' shared storage, for the next
+    # agent to read: [{"name": "…pdf", "file_key": "…"}] (2026-10-08).
+    documents: list[dict[str, str]] = field(default_factory=list)
 
     # Mandatory in meaning: present on every run, even when empty.
     sources_read: list[str] = field(default_factory=list)
