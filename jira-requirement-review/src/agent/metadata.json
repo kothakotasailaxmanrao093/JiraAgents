@@ -1,6 +1,6 @@
 {
     "name": "JiraRequirementReview",
-    "version": "2.2.25",
+    "version": "2.2.26",
     "description": "Reviews one Jira requirement (or a batch via Sprint/JQL query) across the issue, its parent card, its subtasks, its linked issues, and an optional meeting transcript, then produces a structured review of Assumptions, Open Questions, Requirement Gaps, Ambiguities, Edge Cases, Missing Functional/Technical Details, Missing Acceptance Criteria, and Dependency Questions (each with evidence source, confidence, and priority where applicable), plus an overall readiness score and executive summary per issue. By default it returns a draft for you to copy into Jira; turn on 'Publish to Jira' to have it post the comment to each issue directly, and 'Generate Word Report' to also produce a downloadable .docx report.",
     "config": {
         "triggers": [
