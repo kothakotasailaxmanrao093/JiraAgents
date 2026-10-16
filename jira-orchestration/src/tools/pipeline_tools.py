@@ -17,6 +17,7 @@ from common_lib.utils.logger import setup_logger
 
 from routing import pipeline, settings
 from shared.adf import to_text
+from tools.org_repos import with_repos
 from tools.tools import _client
 
 logger = setup_logger(__name__)
@@ -133,7 +134,7 @@ async def request_settings(project_key: str = "") -> dict[str, Any]:
         "run_id": uuid.uuid4().hex[:8],
         "project_key": project,
         "problem": problem,
-        "pipeline": settings.pipeline(),
+        "pipeline": await with_repos(settings.pipeline()),
         "task_queue_overrides": settings.task_queue_overrides(),
         "min_readiness": settings.request_min_readiness(),
         "webhooks": settings.webhook_status(),

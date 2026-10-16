@@ -16,3 +16,6 @@ def _no_local_model_key(monkeypatch: pytest.MonkeyPatch) -> None:
     would switch every model call to OpenAI; tests must see the gateway path."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("AETHERION_LOCAL_RUN", raising=False)
+    # The developer's ORCH_GITHUB_ORG would make every command read GitHub's
+    # repository list; tests that want it turn it back on (test_org_repos.py).
+    monkeypatch.setenv("ORCH_PLANNING_ORG_REPOS", "false")

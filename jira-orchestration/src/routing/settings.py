@@ -250,6 +250,15 @@ def planning_repos() -> str:
     return "\n".join(entries)
 
 
+def planning_uses_org() -> bool:
+    """Every repository of ORCH_GITHUB_ORG is designed and coded against (2026-10-16),
+    a new one as soon as it exists — ORCH_PLANNING_REPOS then only names some of
+    them (or adds repositories outside the organization). ORCH_PLANNING_ORG_REPOS=false
+    goes back to the list alone."""
+    flag = os.environ.get("ORCH_PLANNING_ORG_REPOS", "").strip().lower()
+    return bool(github_org()) and flag not in ("false", "0", "no", "off")
+
+
 def coding_agent() -> str:
     return os.environ.get("ORCH_CODING_AGENT", "").strip() or DEFAULT_CODING_AGENT
 

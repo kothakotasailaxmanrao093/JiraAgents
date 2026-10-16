@@ -1,7 +1,9 @@
 """GitHub → Planning: merges into main and new PR comments, each given once (2026-10-03).
 
-The tools run for real against a fake GitHub and a fake Jira (the memory lives
-in Jira project properties), at the HTTP level.
+Since 2026-10-16 every GitHub event arrives by webhook (no polling). The tools
+run for real against a fake GitHub and a fake Jira (the memory lives in Jira
+project properties), at the HTTP level; the fixtures here are shared with
+test_pushed_events.
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ import httpx
 import pytest
 from fake_tools import Tools
 
-from agent.router_flow import run_github_poll
+from agent.router_flow import run_github_event
 from routing import github_events as gh
 from tools import github_tools
 
@@ -156,208 +158,6 @@ def world(monkeypatch):
     return github, jira, clock
 
 
-async def scan(clock, at: datetime) -> dict:
-    clock["now"] = at
-    return await github_tools.github_scan()
-
-
-# --- the first check ---------------------------------------------------------------
-
-
-async def test_the_first_check_watches_from_now_and_sends_no_history(world) -> None:
-    github, jira, clock = world
-    github.prs = [pr(1, updated=T0 - timedelta(days=3), merged=T0 - timedelta(days=3))]
-    result = await scan(clock, T0)
-    assert result["ok"] and result["events"] == []
-    assert f"{REPO}: watching from now on" in result["notes"]
-    assert jira.properties["aetherion-github-poll"]["repos"][REPO]["cursor"] == T0.isoformat()
-
-
-# --- a merge into main ---------------------------------------------------------------
-
-
-async def test_a_merge_into_main_is_given_once_with_its_files_and_comments(
-    world,
-) -> None:
-    github, jira, clock = world
-    await scan(clock, T0)
-    merged_at = T0 + timedelta(seconds=20)
-    github.prs = [pr(2, updated=merged_at, merged=merged_at)]
-    github.files[2] = [
-        {
-            "filename": "src/reminders.py",
-            "status": "added",
-            "additions": 40,
-            "deletions": 0,
-        }
-    ]
-    github.line_comments[2] = [
-        {
-            "id": 7,
-            "user": {"login": "arjun"},
-            "body": "Send at 10:00 IST",
-            "created_at": iso(T0),
-            "path": "src/reminders.py",
-            "line": 12,
-        }
-    ]
-    github.issue_comments[2] = [
-        {
-            "id": 8,
-            "user": {"login": "dependabot[bot]", "type": "Bot"},
-            "body": "bump",
-            "created_at": iso(T0),
-        }
-    ]
-    github.change()
-
-    [event] = (await scan(clock, T0 + timedelta(minutes=1)))["events"]
-    assert event["kind"] == "pr_merged" and event["pr_number"] == 2
-    assert event["issue_key"] == "BGV-93"
-    text = event["issue_text"]
-    assert text.startswith(f"A pull request was merged into main in {REPO}")
-    assert "PR #2: BGV-93: Change 2" in text and "Adds referee reminders." in text
-    assert "- src/reminders.py (added, +40 −0)" in text
-    assert "- arjun on src/reminders.py line 12: Send at 10:00 IST" in text
-    assert "bump" not in text, "bot comments are left out"
-    assert len(jira.pending()) == 1, "stored before it is handed out"
-
-    assert (await github_tools.github_event_done(event["key"], True, "plan generated"))["recorded"]
-    assert jira.pending() == {}
-    github.change()  # re-read inside the overlap: already sent, so not again
-    assert (await scan(clock, T0 + timedelta(minutes=2)))["events"] == []
-
-
-@pytest.mark.parametrize(
-    "change",
-    [
-        {"merged": None, "state": "closed"},  # closed without merging
-        {"base": "develop"},  # merged into another branch
-    ],
-)
-async def test_what_is_not_a_merge_into_main_is_not_given(world, change) -> None:
-    github, jira, clock = world
-    await scan(clock, T0)
-    at = T0 + timedelta(seconds=30)
-    github.prs = [pr(3, updated=at, merged=change.pop("merged", at), **change)]
-    github.change()
-    assert (await scan(clock, T0 + timedelta(minutes=1)))["events"] == []
-
-
-async def test_an_unchanged_repo_costs_one_free_call(world) -> None:
-    github, jira, clock = world
-    await scan(clock, T0)
-    github.calls.clear()
-    jira.properties["aetherion-github-poll"]["repos"][REPO]["etag"] = github.etag
-    result = await scan(clock, T0 + timedelta(minutes=1))
-    assert result["events"] == []
-    assert github.calls == ["/orgs/AetherionAgentDemo/repos", f"/repos/{REPO}/pulls"]
-
-
-# --- comments --------------------------------------------------------------------------
-
-
-async def test_only_new_comments_are_given_and_each_once(world) -> None:
-    github, jira, clock = world
-    await scan(clock, T0)
-    at = T0 + timedelta(seconds=40)
-    github.prs = [pr(4, updated=at, title="Consent page")]
-    github.issue_comments[4] = [
-        {
-            "id": 1,
-            "user": {"login": "old"},
-            "body": "From yesterday",
-            "created_at": iso(T0 - timedelta(days=1)),
-        },
-        {
-            "id": 2,
-            "user": {"login": "arjun"},
-            "body": "Why a new table here?",
-            "created_at": iso(at),
-        },
-    ]
-    github.change()
-    [event] = (await scan(clock, T0 + timedelta(minutes=1)))["events"]
-    assert event["kind"] == "pr_comments" and event["issue_key"] == ""
-    assert "New comments on a pull request (open)" in event["issue_text"]
-    assert "- arjun: Why a new table here?" in event["issue_text"]
-    assert "From yesterday" not in event["issue_text"]
-    await github_tools.github_event_done(event["key"], True)
-
-    github.issue_comments[4].append(
-        {
-            "id": 3,
-            "user": {"login": "priya"},
-            "body": "To keep history.",
-            "created_at": iso(T0 + timedelta(minutes=1, seconds=10)),
-        }
-    )
-    github.change()
-    [again] = (await scan(clock, T0 + timedelta(minutes=2)))["events"]
-    assert "- priya: To keep history." in again["issue_text"]
-    assert "Why a new table here?" not in again["issue_text"], "already given"
-
-
-# --- failures --------------------------------------------------------------------------
-
-
-async def test_a_failed_planning_run_is_retried_then_given_up(world, monkeypatch) -> None:
-    github, jira, clock = world
-    monkeypatch.setenv("ORCH_GITHUB_MAX_TRIES", "3")
-    await scan(clock, T0)
-    at = T0 + timedelta(seconds=10)
-    github.prs = [pr(5, updated=at, merged=at)]
-    github.change()
-    [event] = (await scan(clock, T0 + timedelta(minutes=1)))["events"]
-
-    assert (await github_tools.github_event_done(event["key"], False, "Neo4j unreachable"))[
-        "gave_up"
-    ] is False
-    [retry] = (await scan(clock, T0 + timedelta(minutes=2)))["events"]
-    assert retry["key"] == event["key"] and retry["tries"] == 1
-    assert (await github_tools.github_event_done(event["key"], False, "again"))["gave_up"] is False
-    assert (await github_tools.github_event_done(event["key"], False, "again"))["gave_up"] is True
-    assert jira.pending() == {}
-    assert (await scan(clock, T0 + timedelta(minutes=3)))["events"] == []
-
-
-async def test_a_check_that_dies_half_way_loses_nothing(world) -> None:
-    github, jira, clock = world
-    await scan(clock, T0)
-    at = T0 + timedelta(seconds=10)
-    github.prs = [pr(6, updated=at, merged=at)]
-    github.change()
-    [event] = (await scan(clock, T0 + timedelta(minutes=1)))["events"]
-    # The check stopped before Planning answered: nothing was recorded.
-    [again] = (await scan(clock, T0 + timedelta(minutes=5)))["events"]
-    assert again["key"] == event["key"] and again["tries"] == 0
-    assert len(jira.pending()) == 1, "kept once, not duplicated"
-
-
-async def test_an_unconfigured_check_says_what_is_missing(monkeypatch) -> None:
-    for name in (
-        "GITHUB_TOKEN",
-        "ORCH_GITHUB_ORG",
-        "ORCH_GITHUB_STATE_PROJECT",
-        "ORCH_ALLOWED_PROJECT_KEYS",
-        "ORCH_PLANNING_REPOS",
-    ):
-        monkeypatch.delenv(name, raising=False)
-    result = await github_tools.github_scan()
-    assert not result["ok"]
-    assert "GITHUB_TOKEN" in result["error"] and "ORCH_GITHUB_ORG" in result["error"]
-
-
-async def test_archived_and_unlisted_repos_are_skipped(world, monkeypatch) -> None:
-    github, jira, clock = world
-    github.repos += [
-        {"name": "Old", "full_name": "AetherionAgentDemo/Old", "archived": True},
-        {"name": "Other", "full_name": "AetherionAgentDemo/Other", "archived": False},
-    ]
-    monkeypatch.setenv("ORCH_GITHUB_REPOS", "firstrepo")
-    assert (await scan(clock, T0))["repos"] == 1
-
-
 # --- the text --------------------------------------------------------------------------
 
 
@@ -377,7 +177,7 @@ def test_comments_on_a_merged_pr_say_it_is_merged() -> None:
     assert "(already merged)" in text
 
 
-# --- the poll run ----------------------------------------------------------------------
+# --- the GitHub event run ----------------------------------------------------------------------
 
 
 EVENT = {
@@ -391,7 +191,7 @@ EVENT = {
     "workflow_id": "planning-gh-abc",
     "tries": 0,
 }
-SCAN = {
+PUSHED = {
     "ok": True,
     "events": [EVENT],
     "repos": 1,
@@ -399,6 +199,16 @@ SCAN = {
     "planning_agent": "planning_agent",
     "planning_queue": "local-planning-agent-q",
     "timeout_minutes": 15,
+}
+
+
+# The webhook's fields for a merge of PR #2 (what the platform puts in the input).
+MERGED = {
+    "github_event": "pull_request",
+    "github_action": "closed",
+    "github_repo": REPO,
+    "pr_number": 2,
+    "github_comment_id": None,
 }
 
 
@@ -416,10 +226,10 @@ class Planning:
 
 async def test_a_merge_refreshes_that_repositorys_graph_and_writes_no_design() -> None:
     """2026-10-08: the merge brings the graph up to date for the next design."""
-    scan = {**SCAN, "repos_text": f"demo: {REPO}\nuser: org/user"}
-    tools = Tools(github_scan=scan, github_event_done={"recorded": True, "gave_up": False})
+    scan = {**PUSHED, "repos_text": f"demo: {REPO}\nuser: org/user"}
+    tools = Tools(github_event=scan, github_event_done={"recorded": True, "gave_up": False})
     planning = Planning({"status": "success", "mode": "graph_sync", "results": []})
-    result = await run_github_poll(tools.execute, planning)
+    result = await run_github_event(tools.execute, planning, MERGED)
 
     [(name, payload, options)] = planning.calls
     assert name == "planning_agent"
@@ -433,9 +243,9 @@ async def test_a_merge_refreshes_that_repositorys_graph_and_writes_no_design() -
 
 
 async def test_an_unconfigured_repository_is_named_after_itself() -> None:
-    tools = Tools(github_scan=SCAN, github_event_done={"recorded": True, "gave_up": False})
+    tools = Tools(github_event=PUSHED, github_event_done={"recorded": True, "gave_up": False})
     planning = Planning({"status": "success"})
-    await run_github_poll(tools.execute, planning)
+    await run_github_event(tools.execute, planning, MERGED)
     assert planning.calls[0][1]["repos"] == f"{REPO.split('/')[1]}: {REPO}"
 
 
@@ -445,23 +255,15 @@ async def test_new_pr_comments_are_designed_for_against_every_repository() -> No
         "kind": "pr_comments",
         "issue_text": "New comments on a pull request…",
     }
-    scan = {**SCAN, "events": [event], "repos_text": f"demo: {REPO}\nuser: org/user"}
-    tools = Tools(github_scan=scan, github_event_done={"recorded": True, "gave_up": False})
+    scan = {**PUSHED, "events": [event], "repos_text": f"demo: {REPO}\nuser: org/user"}
+    tools = Tools(github_event=scan, github_event_done={"recorded": True, "gave_up": False})
     planning = Planning({"status": "success"})
-    await run_github_poll(tools.execute, planning)
+    await run_github_event(tools.execute, planning, MERGED)
 
     payload = planning.calls[0][1]
     assert payload["issue_text"] == "New comments on a pull request…"
     assert payload["repos"] == f"demo: {REPO}\nuser: org/user"
     assert tools.args("github_event_done") == (event["key"], True, "plan generated")
-
-
-async def test_planning_repositories_are_watched_even_outside_the_organization(
-    world, monkeypatch
-) -> None:
-    github, jira, clock = world
-    monkeypatch.setenv("ORCH_PLANNING_REPOS", "tickets: someone/TicketRouting@main")
-    assert (await scan(clock, T0))["repos"] == 2
 
 
 @pytest.mark.parametrize(
@@ -472,26 +274,18 @@ async def test_planning_repositories_are_watched_even_outside_the_organization(
     ],
 )
 async def test_a_failed_planning_run_is_recorded_for_a_retry(answer, expected) -> None:
-    tools = Tools(github_scan=SCAN, github_event_done={"recorded": True, "gave_up": False})
-    result = await run_github_poll(tools.execute, Planning(answer))
+    tools = Tools(github_event=PUSHED, github_event_done={"recorded": True, "gave_up": False})
+    result = await run_github_event(tools.execute, Planning(answer), MERGED)
     assert tools.args("github_event_done") == (EVENT["key"], False, expected)
     assert result["failed"] == 1
     assert "notify_admins" not in tools.names()
 
 
 async def test_the_admins_hear_when_retries_run_out() -> None:
-    tools = Tools(github_scan=SCAN, github_event_done={"recorded": True, "gave_up": True})
-    await run_github_poll(tools.execute, Planning({"status": "error", "message": "down"}))
+    tools = Tools(github_event=PUSHED, github_event_done={"recorded": True, "gave_up": True})
+    await run_github_event(tools.execute, Planning({"status": "error", "message": "down"}), MERGED)
     subject = tools.args("notify_admins")[0]
     assert subject == f"PR #2 in {REPO} could not be given to Planning"
-
-
-async def test_a_failed_scan_starts_nothing() -> None:
-    tools = Tools(github_scan={"ok": False, "error": "GitHub rejected the token (401)"})
-    planning = Planning({"status": "success"})
-    result = await run_github_poll(tools.execute, planning)
-    assert planning.calls == []
-    assert result["error"] == "GitHub rejected the token (401)"
 
 
 @pytest.mark.parametrize(
@@ -506,3 +300,20 @@ async def test_a_failed_scan_starts_nothing() -> None:
 )
 def test_the_jira_key_a_pr_names(title, branch, projects, expected) -> None:
     assert gh.jira_key({"title": title, "head": {"ref": branch}}, projects) == expected
+
+
+# --- the tools, without a schedule ------------------------------------------------------
+
+
+async def test_an_unconfigured_github_says_what_is_missing(monkeypatch) -> None:
+    for name in (
+        "GITHUB_TOKEN",
+        "ORCH_GITHUB_ORG",
+        "ORCH_GITHUB_STATE_PROJECT",
+        "ORCH_ALLOWED_PROJECT_KEYS",
+        "ORCH_PLANNING_REPOS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    result = await github_tools.github_event(MERGED)
+    assert not result["ok"]
+    assert "GITHUB_TOKEN" in result["error"] and "ORCH_GITHUB_ORG" in result["error"]

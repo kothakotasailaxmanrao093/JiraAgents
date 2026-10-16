@@ -306,18 +306,26 @@ def test_the_form_offers_the_request_fields() -> None:
     ]
 
 
-def test_the_form_offers_both_polls_off_by_default() -> None:
-    """Each poll is its own schedule; a schedule sets one, the other stays off."""
+def test_the_form_offers_no_polls() -> None:
+    """Polling was removed (2026-10-16): Confluence and GitHub arrive by webhook."""
     root = Path(__file__).resolve().parents[1]
     meta = json.loads((root / "src" / "agent" / "metadata.json").read_text())
-    polls = {
-        t["name"]: t
-        for t in meta["config"]["triggers"]
-        if t["name"] in ("github_poll", "confluence_poll")
-    }
-    assert set(polls) == {"github_poll", "confluence_poll"}
-    for trigger in polls.values():
-        assert trigger["type"] == "boolean" and trigger["default"] is False
+    names = {t["name"] for t in meta["config"]["triggers"]}
+    assert not names & {"github_poll", "confluence_poll"}
+
+
+@pytest.mark.parametrize("poll", ["github_poll", "confluence_poll"])
+async def test_a_schedule_left_on_is_told_to_switch_off(poll, monkeypatch) -> None:
+    from agent import router_agent
+
+    async def nothing(*a, **k):
+        raise AssertionError("a poll payload starts no work")
+
+    for name in ("run_router", "run_github_event", "run_confluence_comment", "run_request"):
+        monkeypatch.setattr(router_agent, name, nothing)
+    out = await router_agent.JiraOrchestration.fn({poll: True})
+    assert out["status"] == "ignored"
+    assert "Switch this Aetherion Schedule off" in out["reason"]
 
 
 @pytest.mark.parametrize(

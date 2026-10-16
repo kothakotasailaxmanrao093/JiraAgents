@@ -41,6 +41,7 @@ from shared import llm
 from shared.adf import blocks_to_doc, comment_text
 from shared.keywords import is_agent_comment, mentions_trigger
 from shared.mailer import Delivery, check_login, deliver
+from tools.org_repos import with_repos
 
 load_dotenv()
 logger = setup_logger(__name__)
@@ -195,9 +196,9 @@ async def ingress_check(
                 "build_min_readiness": settings.build_min_readiness(),
                 "queue_wait_minutes": settings.queue_wait_minutes(),
                 # What follows a build: review, planning, coding (routing/pipeline.py).
-                "pipeline": settings.pipeline(),
+                "pipeline": await with_repos(settings.pipeline()),
                 # The TDD, design and code commands (agent/command_flow.py).
-                "commands": settings.commands(),
+                "commands": await with_repos(settings.commands()),
             }
     except Exception as exc:  # noqa: BLE001 — a failure is reported, never dropped
         logger.error(f"run {run_id}: ingress failed on {issue_key}: {exc}", exc_info=True)

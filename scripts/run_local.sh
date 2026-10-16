@@ -18,11 +18,11 @@
 #                                 …and open the Aetherion test form for each one in
 #                                 the browser: router :8765, Task Creation :8766,
 #                                 Review :8767 (logs: .local-logs/form-<agent>.log)
-#   scripts/run_local.sh --poll   …and listen, as the published router would: new
-#                                 "@<keyword>" Jira comments (every 20 s; the webhook's job
-#                                 on Aetherion), comments on the TDD pages in Confluence and
-#                                 GitHub merges (every minute). Logs: .local-logs/jira-watch.log,
-#                                 .local-logs/github-poll.log
+#   scripts/run_local.sh --poll   …and listen for new "@<keyword>" Jira comments (every
+#                                 20 s; the webhook's job on Aetherion). Log:
+#                                 .local-logs/jira-watch.log. Confluence comments and GitHub
+#                                 events arrive by webhook only (no polling since
+#                                 2026-10-16), and a webhook cannot reach this laptop.
 #   scripts/run_local.sh --jira --form --site friend
 #                                 …against another Jira site: the settings in
 #                                 .env.site.friend (git-ignored; template:
@@ -55,11 +55,10 @@ done
 if [ -n "$SITE" ]; then
   SITE_FILE="$ROOT/.env.site.$SITE"
   [ -f "$SITE_FILE" ] || { echo "error: no $SITE_FILE — copy .env.site.example and fill it in"; exit 2; }
-  # The GitHub check keeps its memory in a BGV project property; not on another site.
+  # Answering comments by itself is for your own site only, never another team's.
   [ "$POLL" = 1 ] && { echo "error: --poll runs against your own site only; drop --site to use it"; exit 2; }
 fi
 if [ "$JIRA_ONLY" = 1 ]; then
-  [ "$POLL" = 1 ] && { echo "error: --poll hands GitHub events to Planning; drop --jira to use it"; exit 2; }
   AGENTS=(jira-task-creation jira-requirement-review jira-orchestration)
 fi
 
@@ -111,10 +110,6 @@ for agent in "${AGENTS[@]}"; do
 done
 if [ "$POLL" = 1 ]; then
   sleep 20  # let the workers connect first
-  (cd "$ROOT/jira-orchestration" && exec .venv/bin/python "$ROOT/scripts/poll_github_local.py") \
-    >"$LOGS/github-poll.log" 2>&1 &
-  pids+=($!)
-  echo "started the GitHub and Confluence checks every minute  (log: .local-logs/github-poll.log)"
   (cd "$ROOT/jira-orchestration" && exec .venv/bin/python "$ROOT/scripts/watch_jira_local.py") \
     >"$LOGS/jira-watch.log" 2>&1 &
   pids+=($!)
@@ -144,7 +139,7 @@ if [ "$FOLLOW" = 1 ]; then
   # logger writes: each step of a request, the review's verdict, what was read.
   logs=()
   for agent in "${AGENTS[@]}"; do logs+=("$LOGS/$agent.log"); done
-  [ "$POLL" = 1 ] && logs+=("$LOGS/jira-watch.log" "$LOGS/github-poll.log")
+  [ "$POLL" = 1 ] && logs+=("$LOGS/jira-watch.log")
   keep='request_flow|router_flow|pipeline_flow|command_flow|confluence_flow|analyze_requirement_tool|gather_documents_tool'
   tail -n 0 -F "${logs[@]}" 2>/dev/null \
     | awk -v keep="$keep" '/temporalio|HTTP Request: GET/ {next}

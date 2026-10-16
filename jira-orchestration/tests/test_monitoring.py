@@ -219,7 +219,7 @@ async def test_no_channel_configured_is_as_before(monkeypatch) -> None:
 
 
 async def test_a_merge_is_recorded_in_the_storys_history() -> None:
-    from agent.router_flow import run_github_poll
+    from agent.router_flow import run_github_event
 
     event = {
         "kind": "pr_merged",
@@ -241,12 +241,16 @@ async def test_a_merge_is_recorded_in_the_storys_history() -> None:
         "repos_text": "bank: o/bank",
         "timeout_minutes": 15,
     }
-    t = Tools(github_scan=scan, github_event_done={"recorded": True, "gave_up": False})
+    t = Tools(github_event=scan, github_event_done={"recorded": True, "gave_up": False})
 
     async def planning(name, payload, **options):
         return {"status": "success", "mode": "graph_sync"}
 
-    await run_github_poll(t.execute, planning)
+    await run_github_event(
+        t.execute,
+        planning,
+        {"github_event": "pull_request", "github_repo": "o/bank", "pr_number": 22},
+    )
     issue_key, step, status, link, _ = t.args("record_step")
     assert (issue_key, step, link) == ("BTS-15", "MERGE", "https://github.com/o/bank/pull/22")
     assert status == "o/bank #22 merged — Planning's graph refreshed"

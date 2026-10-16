@@ -1,4 +1,4 @@
-"""Show what the Planning agent was given by the router's GitHub check, and the
+"""Show what the Planning agent was given by the router (GitHub events, designs), and the
 plan it wrote (2026-10-04).
 
 Reads the most recent Planning runs from the workflow server: when each

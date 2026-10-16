@@ -19,7 +19,7 @@ Nothing is emailed.
 | TDD page | `@Aetherion code` | proposes the branches (source, new branch, target) and waits |
 | TDD page | `@Aetherion code confirm` or `@Aetherion code source=main branch=feature/X target=main` | **Coding** implements the TDD, runs the repository's tests, opens a pull request — linked on the page and on the story. If it cannot implement the design, or the PR's tests fail, the reasons go back to Planning, the TDD is revised and Coding tries again (the failed PR is closed) |
 | TDD page | `@Aetherion code confirm bank.target=release/2.1 ledger.source=develop` | the same, with branches for one repository only (`<repo>.source=`, `<repo>.target=`; the new branch name is shared); the others keep the proposal. When a design touches several repositories, the reply lists the order to **merge and deploy** them (providers before consumers) and each PR links the others |
-| GitHub | a person merges the PR | the GitHub check gives the merge to **Planning**, which refreshes its code graph; the story and the TDD page are told |
+| GitHub | a person merges the PR | the GitHub webhook gives the merge to **Planning**, which refreshes its code graph; the story and the TDD page are told |
 
 `explain why`, `update the TDD` and `code` also work on the Jira story (they use the story's TDD).
 
@@ -39,11 +39,12 @@ ORCH_BUILD_PIPELINE=                   # build only; TDD and code are their own 
 scripts/run_local.sh --poll --follow --keyword AetherionLocal
 ```
 
-- `--poll` listens the way the published router does: new Jira comments every 20 s
-  (on Aetherion the webhook does this), comments on TDD pages and GitHub merges every minute.
+- `--poll` listens for new Jira comments every 20 s (on Aetherion the Jira webhook does
+  this). Confluence comments and GitHub events arrive **by webhook only**: a webhook
+  cannot reach a laptop, so test TDD-page comments and merges on Aetherion.
 - `--keyword AetherionLocal`: the laptop answers only `@AetherionLocal …`, so the
   published router (same Jira webhook) never answers your tests.
-- Logs: `.local-logs/<agent>.log`, `.local-logs/jira-watch.log`, `.local-logs/github-poll.log`.
+- Logs: `.local-logs/<agent>.log`, `.local-logs/jira-watch.log`.
 
 ## Test it through Jira, Confluence and GitHub
 
@@ -75,11 +76,9 @@ Nothing in the code changes between the laptop and Aetherion; only settings do.
    Their code changes (graph-only refresh, design Q&A, TDD as Confluence content, confirmed
    branches, no retry of the coding tool, closing a superseded PR) live in Suhani's repos and
    must be pushed there and published from there.
-4. **Aetherion Schedules**, every minute, on the Orchestration agent — two schedules, one
-   per check: **GitHub check = Yes** (`{"github_poll": true}`) and **Confluence check = Yes**
-   (`{"confluence_poll": true}`). Turn on only one per schedule: a run with both set does
-   the Confluence check only. The Jira webhook stays as it is. Once the Confluence and
-   GitHub webhooks below are live, both schedules are switched off.
+4. **Webhooks**, no Schedules: Jira, Confluence and GitHub push every event (see
+   "Webhooks" below). Polling was removed on 2026-10-16; a Schedule left on gets
+   `"status": "ignored"` with "Switch this Aetherion Schedule off" and does nothing.
 5. Publish with `scripts/publish.py`; then run `{"health_check": true}` on Orchestration.
 
 ### What makes it safe in production
@@ -104,7 +103,7 @@ Nothing in the code changes between the laptop and Aetherion; only settings do.
   incoming webhook) gets the reason, even with email off. `ORCH_CODING_TIMEOUT_MINUTES`
   (default 35) covers Coding's CI wait.
 
-## Webhooks instead of polling
+## Webhooks (the only way events arrive)
 
 Every event reaches the Orchestration agent through the platform's webhook service
 (`unified-webhook` in the platform's `antennae` repo; route `/webhooks/v2/<provider>`),
@@ -118,8 +117,8 @@ its input by **field name**. Nothing is polled.
 | A pull request merged into `main` | GitHub webhook | `github_event`, `github_action`, `github_repo`, `pr_number` | Planning (graph refresh); a note on the story and page |
 | A comment or review on a pull request | GitHub webhook | the same, plus `github_comment_id` | Planning |
 
-A pushed event runs through the same code and the same memory as the polls, so turning
-the webhooks on while the schedules still run never answers or sends anything twice.
+Each comment is marked answered, and each GitHub event recorded as sent, before the work
+starts, so an event delivered twice is never answered or sent twice.
 
 ### 1. The webhook service (deployed by the platform team)
 
@@ -175,7 +174,7 @@ Set in `jira-orchestration/.env` once the platform team gives the address:
 Jira, Confluence and GitHub URLs to configure — until then it lists the checks that wait
 for them (the Confluence rule and the GitHub webhook; Jira already works).
 
-### 4. Check it, then switch the polls off
+### 4. Check it
 
 Before the platform side is ready, each mode can be run by hand from the Orchestration
 form (or `start_workflow` on its queue) with the input the webhook would send:
@@ -190,5 +189,5 @@ form (or `start_workflow` on its queue) with the input the webhook would send:
 ```
 
 The result says what was done, or why nothing was (`skipped`: "not a TDD page", "already
-answered", "pull request opened is not a merge", …). Once a real comment and a real merge
-arrive by webhook, delete the two Schedules.
+answered", "pull request opened is not a merge", …). Delete any old Aetherion Schedule
+for `github_poll` or `confluence_poll`: polling was removed on 2026-10-16.

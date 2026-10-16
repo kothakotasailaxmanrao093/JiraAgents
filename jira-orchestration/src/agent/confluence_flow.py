@@ -1,14 +1,11 @@
-"""The design discussion on a TDD page: one check of its comments (2026-10-08).
+"""The design discussion on a TDD page (2026-10-08).
 
-Started every minute (Aetherion Schedule, or scripts/run_local.sh --poll):
-
-    {"confluence_poll": true}
-
-Each new "@Aetherion …" comment on a TDD page is answered under it:
+Each "@Aetherion …" comment on a TDD page is pushed by the Confluence webhook
+(an Automation rule; no polling since 2026-10-16) and answered under it:
 "explain why …" / "why not …" go to the Planning agent, "update the TDD" revises
 the page, "code" confirms the branches and then raises the pull request — linked
 on the page and on its Jira story. A comment is recorded as answered before the
-work starts, so a slow command is never started twice by the next check.
+work starts, so a webhook delivered twice never starts a slow command twice.
 
 SDK-free like ``router_flow``: the executors are passed in.
 """
@@ -34,22 +31,11 @@ PAGE_HELP = [
 ]
 
 
-async def run_confluence_poll(execute: Execute, dispatch: Dispatch) -> dict[str, Any]:
-    """Answer every new command on the TDD pages; the result says what was done."""
-    scan = await _safe(execute, "confluence_scan")
-    if not scan.get("ok"):
-        return {"status": "confluence_poll", "error": scan.get("error") or "scan failed"}
-    done: list[dict[str, Any]] = []
-    for event in scan.get("events") or []:
-        done.append(await _answer(event, scan, execute, dispatch))
-    return {"status": "confluence_poll", "pages": scan.get("pages", 0), "answered": done}
-
-
 async def run_confluence_comment(
     execute: Execute, dispatch: Dispatch, page_id: str, comment_id: str
 ) -> dict[str, Any]:
-    """One comment, pushed by the Confluence webhook as it was posted (2026-10-14) —
-    no polling. Answered exactly as the poll answers it, under the comment."""
+    """One comment, pushed by the Confluence webhook as it was posted (2026-10-14),
+    answered under it."""
     found = await _safe(execute, "confluence_comment", page_id, comment_id)
     if not found.get("ok"):
         return {"status": "confluence_comment", "error": found.get("error") or "read failed"}

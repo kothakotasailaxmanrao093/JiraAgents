@@ -10,7 +10,7 @@ already exists:
     Planning        the request, the breakdown, the points + the code graph -> TDD
     Coding          the TDD -> a pull request; when it cannot, back to Planning
     a person        reviews and merges the PR; the merge refreshes Planning's graph
-                    (the GitHub check, router_flow.run_github_poll)
+                    (the GitHub webhook, router_flow.run_github_event)
 
 The steps after the breakdown are the same ``Chain`` a Jira comment runs; only
 what Review reads, what Planning is given and where the design goes differ.
@@ -42,7 +42,7 @@ ALL_STEPS = ("review", "plan", "code")
 UPLOAD_FIELDS = ("supporting_files", "uploaded_files")
 NEXT_STEP = (
     "Review the pull request in GitHub and merge it. The merge reaches Planning through "
-    "the GitHub check, which refreshes the code graph for the next design."
+    "the GitHub webhook, which refreshes the code graph for the next design."
 )
 
 

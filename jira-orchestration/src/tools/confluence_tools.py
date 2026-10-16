@@ -28,6 +28,8 @@ from routing import github_events as gh
 from shared.adf import blocks_to_doc
 from shared.confluence_text import storage_to_text
 from shared.keywords import AGENT_FOOTER, is_agent_comment, mentions_trigger
+from tools import org_repos
+from tools.org_repos import with_repos
 from tools.tools import _client
 
 logger = setup_logger(__name__)
@@ -359,47 +361,6 @@ def _comment_fields(c: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-@tool(name="confluence_scan")
-async def confluence_scan() -> dict[str, Any]:
-    """New "@Aetherion …" comments on TDD pages, not answered yet, oldest first."""
-    keyword = settings.trigger_keyword()
-    try:
-        async with _wiki() as wiki:
-            resp = await wiki.get(
-                "/rest/api/content/search",
-                params={"cql": f'label = "{settings.tdd_label()}" and type = page', "limit": 100},
-            )
-            resp.raise_for_status()
-            pages = resp.json().get("results") or []
-            events: list[dict[str, Any]] = []
-            for page in pages:
-                page_id = str(page["id"])
-                answered = set(
-                    (await _page_property(wiki, page_id, settings.ANSWERED_PAGE_PROPERTY)).get(
-                        "ids"
-                    )
-                    or []
-                )
-                for c in await _comments(wiki, page_id):
-                    text = c["text"]
-                    if c["id"] in answered or is_agent_comment(text):
-                        continue
-                    if not mentions_trigger(text, keyword=keyword):
-                        continue
-                    events.append({**c, "page_id": page_id, "page_title": page.get("title") or ""})
-    except (httpx.HTTPError, ValueError) as exc:
-        logger.error(f"Confluence scan failed: {exc}", exc_info=True)
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "events": []}
-    logger.info(f"Confluence scan: {len(pages)} TDD page(s), {len(events)} comment(s) to answer")
-    return {
-        "ok": True,
-        "events": events,
-        "pages": len(pages),
-        "keyword": keyword,
-        "settings": settings.commands(),
-    }
-
-
 # How much of the project's earlier designs a new design is given.
 _EARLIER_DESIGNS = 5
 _EARLIER_EXCERPT = 1500
@@ -464,11 +425,10 @@ async def earlier_designs(issue_key: str) -> dict[str, Any]:
 @tool(name="confluence_comment")
 async def confluence_comment(page_id: str, comment_id: str) -> dict[str, Any]:
     """One comment, pushed by the Confluence webhook as it was posted (2026-10-14):
-    the same result as confluence_scan — with that comment as its only event,
-    or none and why. It must be on a TDD page, not answered yet, not one of the
-    agent's own replies, and start with the keyword — the scan's own rules."""
+    that comment as the only event, or none and why. It must be on a TDD page,
+    not answered yet, not one of the agent's own replies, and mention the keyword."""
     keyword = settings.trigger_keyword()
-    base = {"pages": 1, "keyword": keyword, "settings": settings.commands()}
+    base = {"pages": 1, "keyword": keyword, "settings": await with_repos(settings.commands())}
     try:
         async with _wiki() as wiki:
             resp = await wiki.get(
@@ -605,7 +565,7 @@ async def branch_defaults(issue_key: str, summary: str) -> dict[str, Any]:
     the one configured ("payments: org/payments@develop"), else the repository's
     default on GitHub. The first repository's is the plan's; a repository whose
     branch differs is named in ``per_repo``."""
-    entries = gh.repo_entries(settings.planning_repos())
+    entries = gh.repo_entries(await org_repos.planning_repos())
     defaults: dict[str, str] = {}
     for name, slug, configured in entries:
         defaults[name] = configured or await _default_branch(slug) or "main"

@@ -14,8 +14,8 @@ from typing import Any
 import pytest
 
 from agent.command_flow import Command, run_command
-from agent.confluence_flow import run_confluence_poll
-from agent.router_flow import run_github_poll, run_router
+from agent.confluence_flow import run_confluence_comment
+from agent.router_flow import run_github_event, run_router
 from routing.classify import classify_by_verb
 from routing.commands import BranchPlan, blocks_to_storage, branch_slug, parse_code_command
 from routing.compose import HELP_OPTIONS
@@ -449,7 +449,7 @@ async def test_a_page_comment_is_answered_under_it_and_a_pr_reaches_the_story() 
     event = {"id": "c7", "root_id": "c7", "page_id": "9001", "text": "@Aetherion code confirm"}
     plan = {"proposed": {"source": "main", "branch": "f", "target": "main"}}
     t = tools(
-        confluence_scan={
+        confluence_comment={
             "ok": True,
             "events": [event],
             "pages": 1,
@@ -460,7 +460,7 @@ async def test_a_page_comment_is_answered_under_it_and_a_pr_reaches_the_story() 
         confluence_update_reply={"updated": True},
         read_tdd={**PAGE, "code_plan": plan},
     )
-    out = await run_confluence_poll(t.execute, Agents().dispatch)
+    out = await run_confluence_comment(t.execute, Agents().dispatch, "9001", "c7")
 
     names = t.names()
     assert names.index("confluence_mark_answered") < names.index("confluence_reply"), "marked first"
@@ -473,7 +473,7 @@ async def test_a_page_comment_is_answered_under_it_and_a_pr_reaches_the_story() 
 async def test_a_page_comment_that_is_no_command_gets_the_page_help() -> None:
     event = {"id": "c9", "page_id": "9001", "text": "@Aetherion hello"}
     t = tools(
-        confluence_scan={
+        confluence_comment={
             "ok": True,
             "events": [event],
             "pages": 1,
@@ -482,7 +482,7 @@ async def test_a_page_comment_that_is_no_command_gets_the_page_help() -> None:
         },
         confluence_reply={"posted": True, "comment_id": "c10"},
     )
-    out = await run_confluence_poll(t.execute, Agents().dispatch)
+    out = await run_confluence_comment(t.execute, Agents().dispatch, "9001", "c9")
     assert out["answered"][0]["intent"] == "HELP"
     assert "update the TDD" in str(t.args("confluence_reply")[2])
 
@@ -512,12 +512,16 @@ async def test_a_merge_is_announced_on_the_story_after_the_graph_refresh() -> No
         "timeout_minutes": 15,
         "repos_text": "bank: o/r",
     }
-    t = Tools(github_scan=scan, github_event_done={"recorded": True}, announce_merge={"jira": True})
+    t = Tools(
+        github_event=scan, github_event_done={"recorded": True}, announce_merge={"jira": True}
+    )
 
     async def planning(name, payload, **options):
         return {"status": "success", "mode": "graph_sync"}
 
-    await run_github_poll(t.execute, planning)
+    await run_github_event(
+        t.execute, planning, {"github_event": "pull_request", "github_repo": "o/r", "pr_number": 2}
+    )
     assert t.args("announce_merge") == ("BGV-105", 2, "https://github.com/o/r/pull/2", "o/r")
 
 

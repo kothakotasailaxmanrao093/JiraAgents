@@ -500,24 +500,22 @@ and the run id. Admin alerts: subject `[Aetherion] ALERT — <what failed>`.
 
 ## GitHub → Planning agent (2026-10-03)
 
-A run with `{"github_poll": true}` — every minute, from Aetherion's Schedule or
-`scripts/run_local.sh --poll` on a laptop — reads the organization's pull
-requests (`ORCH_GITHUB_ORG`, read-only `GITHUB_TOKEN`) and gives the Planning
+Each GitHub webhook event (since 2026-10-16 the only way: polling was removed)
+for a watched repository (`ORCH_GITHUB_ORG`, read-only `GITHUB_TOKEN`) gives the Planning
 agent (`ORCH_PLANNING_AGENT`, default `planning_agent`) its one input,
 `issue_text`, for:
 
 | On GitHub | Planning gets |
 |---|---|
 | A PR merged into `ORCH_GITHUB_BRANCH` (main) | **graph refresh only** (2026-10-08): `repos` = that repository's line from `ORCH_PLANNING_REPOS` (else `name: org/name`), no `issue_text` — so the next design sees the merged code; no TDD is written |
-| New comments on a PR not merged in this check | "New comments on a pull request (open) in org/repo …" — the PR, and only the comments not given before — with every repository in `ORCH_PLANNING_REPOS` |
+| New comments on a PR | "New comments on a pull request (open) in org/repo …" — the PR, and only the comments not given before — with every repository in `ORCH_PLANNING_REPOS` |
 
 Watched: the organization's repositories and every repository in `ORCH_PLANNING_REPOS`
 (which may live outside it).
 
 - **Ignored:** PRs closed without merging, merges into other branches, bot comments, archived repos, repos outside `ORCH_GITHUB_REPOS` (when set).
-- **First sight of a repo:** watched from that moment; its history is not sent.
 - **Each once:** what was sent is remembered on the Jira project `ORCH_GITHUB_STATE_PROJECT` (project properties, invisible to users).
-- **Never lost:** an event is stored before it is handed out. A failed Planning run is retried at the next check, up to `ORCH_GITHUB_MAX_TRIES` (5), then the admins are emailed.
+- **Never lost:** an event is stored before it is handed out. A failed Planning run is retried with the next event, up to `ORCH_GITHUB_MAX_TRIES` (5), then the admins are emailed.
 - **The run's result** says how many repos were checked and what was sent or failed.
 
 ## After a build: Review → Planning → Coding (2026-10-08)
@@ -560,7 +558,7 @@ No Issue Key. Jira is only read, by Task Creation, for work that already exists.
 | 3 | gate | the score | below the minimum: stops, with the points to answer |
 | 4 | Planning | the request, the breakdown, the points, the code graph | the TDD (PDF) |
 | 5 | Coding | the TDD | a pull request; when it cannot, the reasons go back to Planning |
-| 6 | a person | the PR | the merge, which refreshes Planning's graph (GitHub check) |
+| 6 | a person | the PR | the merge, which refreshes Planning's graph (GitHub webhook) |
 
 The run's result lists each step (✅ ⏳ ❌ ➖), the download links (breakdown, every TDD
 version) and the PR links. On a laptop the PDFs are also in `docs-export/task-creation/`

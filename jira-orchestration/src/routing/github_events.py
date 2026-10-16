@@ -17,11 +17,8 @@ import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta
 
-# GitHub's "updated" times and our own clock can disagree by seconds, and a
-# merge can land while a check is running; every check re-reads this much of
-# the previous one, and what was already sent is skipped by its key.
-OVERLAP = timedelta(minutes=2)
-# How long a sent key is remembered: only the overlap is ever re-read.
+# How long a sent key is remembered: GitHub can deliver one webhook event more
+# than once, and what was already sent is skipped by its key.
 REMEMBER = timedelta(days=1)
 
 MAX_DESCRIPTION = 4000
@@ -112,12 +109,6 @@ def comments_from(
 
 def _login(item: dict) -> str:
     return str((item.get("user") or {}).get("login") or "someone")
-
-
-def merged_into(pr: dict, branch: str, since: datetime) -> bool:
-    """Merged into ``branch`` at or after ``since`` (closed without merging is not)."""
-    merged = parse_time(pr.get("merged_at"))
-    return bool(merged and merged >= since and (pr.get("base") or {}).get("ref") == branch)
 
 
 def jira_key(pr: dict, projects: tuple[str, ...] = ()) -> str:
@@ -274,6 +265,29 @@ def repo_entries(repos_text: str) -> list[tuple[str, str, str]]:
         if match:
             out.append((match.group(1).strip(), match.group(2), match.group(3) or ""))
     return out
+
+
+def with_org_repos(repos_text: str, org_repos: list[dict]) -> str:
+    """The configured services, then every other repository of the organization.
+
+    A configured line keeps its name and branch ("bank: org/bank-transfer-service")
+    — Planning keys its graph by that name, and a second name for the same code
+    once gave the graph two copies of it. An archived or empty repository is left
+    out: there is nothing to design against."""
+    lines = [line for line in repos_text.splitlines() if line.strip()]
+    known = {slug.lower() for slug in repo_slugs(repos_text)}
+    names = {name.lower() for name, _, _ in repo_entries(repos_text)}
+    for repo in sorted(org_repos, key=lambda r: str(r.get("full_name") or "").lower()):
+        slug = str(repo.get("full_name") or "")
+        if not slug or repo.get("archived") or not repo.get("size") or slug.lower() in known:
+            continue
+        name = slug.split("/", 1)[1]
+        if name.lower() in names:  # a configured service already uses that name
+            name = slug.replace("/", "-")
+        lines.append(f"{name}: {slug}")
+        known.add(slug.lower())
+        names.add(name.lower())
+    return "\n".join(lines)
 
 
 def repo_slugs(repos_text: str) -> list[str]:

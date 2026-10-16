@@ -1183,25 +1183,7 @@ async def run_health_check(dispatch: Dispatch, execute: Execute) -> dict[str, An
 # --- GitHub → Planning (2026-10-03) -----------------------------------------------
 
 _GITHUB_SCAN_TIMEOUT = timedelta(minutes=3)
-POLL_RUN_ID = "github-poll"
-
-
-async def run_github_poll(execute: Execute, dispatch: Dispatch) -> dict[str, Any]:
-    """One check of GitHub: every new merge into the main branch, and every new
-    batch of PR comments, goes to the Planning agent as its ``issue_text``.
-
-    Started every minute (Aetherion Schedule, or scripts/run_local.sh --poll):
-
-        {"github_poll": true}
-
-    An event is recorded as sent only after Planning reports success; a failed
-    run is retried at the next check, and the admins are told when the retries
-    run out. Never raises: the result says what happened.
-    """
-    scan = await _safe(execute, "github_scan", start_to_close_timeout=_GITHUB_SCAN_TIMEOUT)
-    if not scan.get("ok"):
-        return {"status": "github_poll", "error": scan.get("error") or "scan failed", "sent": 0}
-    return await _send_github_events(execute, dispatch, scan, "github_poll")
+EVENT_RUN_ID = "github-event"
 
 
 # The flat fields a GitHub webhook event carries (antennae unified-webhook,
@@ -1221,8 +1203,9 @@ async def run_github_event(
     """One GitHub webhook event, pushed as it happened (2026-10-14) — no polling.
 
     A merge into the main branch refreshes Planning's graph and is announced on
-    the story; a new PR comment goes to Planning. Handled by the same code as
-    the poll, so an event is never sent twice by the two together.
+    the story; a new PR comment goes to Planning. An event is recorded as sent
+    only after Planning reports success; a failed one is retried with the next
+    event, and the admins are told when the retries run out.
     """
     fields = {name: payload.get(name) for name in GITHUB_EVENT_FIELDS}
     scan = await _safe(execute, "github_event", fields, start_to_close_timeout=_GITHUB_SCAN_TIMEOUT)
@@ -1259,7 +1242,7 @@ async def _send_github_events(
                 "MERGE",
                 f"{event['repo']} #{event['pr_number']} merged — Planning's graph refreshed",
                 event["pr_url"],
-                POLL_RUN_ID,
+                EVENT_RUN_ID,
                 start_to_close_timeout=_POST_TIMEOUT,
             )
         done = await _safe(
@@ -1277,7 +1260,7 @@ async def _send_github_events(
                 f"PR #{event['pr_number']} in {event['repo']} could not be given to Planning",
                 f"{event['kind']} — {event['pr_url']}\nLast error: {message}\n"
                 "It will not be retried automatically.",
-                POLL_RUN_ID,
+                EVENT_RUN_ID,
                 start_to_close_timeout=_POST_TIMEOUT,
             )
         results.append({"event": event["key"], "ok": ok, "message": message})

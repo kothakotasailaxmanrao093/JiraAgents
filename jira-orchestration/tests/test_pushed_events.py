@@ -16,7 +16,7 @@ import httpx
 import pytest
 from fake_tools import Tools
 from test_commands import PAGE, PR, SETTINGS, Agents, tools
-from test_github_poll import REPO, T0, FakeGitHub, Planning, pr, world  # noqa: F401
+from test_github_events import REPO, T0, FakeGitHub, Planning, pr, world  # noqa: F401
 
 from agent import router_agent
 from agent.confluence_flow import run_confluence_comment

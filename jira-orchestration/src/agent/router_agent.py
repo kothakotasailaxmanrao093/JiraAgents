@@ -14,9 +14,9 @@ from typing import Any, Dict
 
 from aetherion_sdk import agent, agentExecutor, toolExecutor
 
-from agent.confluence_flow import run_confluence_comment, run_confluence_poll
+from agent.confluence_flow import run_confluence_comment
 from agent.request_flow import run_request
-from agent.router_flow import run_github_event, run_github_poll, run_health_check, run_router
+from agent.router_flow import run_github_event, run_health_check, run_router
 
 logger = logging.getLogger(__name__)
 
@@ -63,15 +63,15 @@ async def JiraOrchestration(payload: Dict[str, Any]) -> dict:
         logger.info("mode : health_check")
         return await run_health_check(_dispatch, toolExecutor.execute)
 
-    if payload.get("confluence_poll"):
-        # Every minute: new "@Aetherion" comments on the TDD pages.
-        logger.info("mode : confluence_poll")
-        return await run_confluence_poll(toolExecutor.execute, _dispatch)
-
-    if payload.get("github_poll"):
-        # Every minute: new merges and PR comments on GitHub, given to Planning.
-        logger.info("mode : github_poll")
-        return await run_github_poll(toolExecutor.execute, _dispatch)
+    if payload.get("confluence_poll") or payload.get("github_poll"):
+        # Polling was removed (2026-10-16): Confluence comments and GitHub events
+        # arrive by webhook only. A schedule left on gets this answer, not a run.
+        logger.warning("mode : poll — removed; switch this Aetherion Schedule off")
+        return {
+            "status": "ignored",
+            "reason": "Polling was removed: Confluence comments and GitHub events now "
+            "arrive by webhook. Switch this Aetherion Schedule off.",
+        }
 
     if payload.get("confluence_comment_id"):
         # Pushed by the Confluence webhook: one comment on a TDD page, as it was posted.

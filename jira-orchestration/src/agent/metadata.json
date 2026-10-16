@@ -38,7 +38,7 @@
                 "name": "issue_key",
                 "type": "str",
                 "required": false,
-                "description": "The Jira issue the comment was left on (e.g. ABC-123). Leave empty when you type a Requirement below, or for a GitHub check.",
+                "description": "The Jira issue the comment was left on (e.g. ABC-123). Leave empty when you type a Requirement below.",
                 "friendly_name": "Jira Issue Key"
             },
             {
@@ -103,22 +103,6 @@
                 "required": false,
                 "description": "Filled by the GitHub webhook — leave empty when running by hand.",
                 "friendly_name": "GitHub Comment Id"
-            },
-            {
-                "name": "github_poll",
-                "type": "boolean",
-                "required": false,
-                "default": false,
-                "description": "Check GitHub now: new merges into the main branch and new PR comments go to the Planning agent. Schedule this every minute.",
-                "friendly_name": "GitHub check"
-            },
-            {
-                "name": "confluence_poll",
-                "type": "boolean",
-                "required": false,
-                "default": false,
-                "description": "Check Confluence now: new \"@Aetherion\" comments on the TDD pages (explain why, why not, update the TDD, code) are answered under the comment. Schedule this every minute, as its own schedule.",
-                "friendly_name": "Confluence check"
             }
         ]
     }

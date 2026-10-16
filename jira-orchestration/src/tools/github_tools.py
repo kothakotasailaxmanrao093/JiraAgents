@@ -4,11 +4,12 @@ The network, the clock and the environment live here; which changes count, and
 how they are written out, live in ``routing/github_events.py``.
 
 The memory is kept on a Jira project, as properties (invisible to users):
-``aetherion-github-poll`` holds how far each repo was read and what was already
-sent; each event waiting to be sent — or to be retried after a failed Planning
-run — has its own property, so a long PR conversation never outgrows Jira's
-32 KB per property. An event is stored *before* it is handed out, so a check
-that dies half-way loses nothing: the next one finds it waiting.
+``aetherion-github-poll`` (named when GitHub was still polled; kept so nothing
+already sent is sent again) holds what was already sent; each event waiting to
+be sent — or to be retried after a failed Planning run — has its own property,
+so a long PR conversation never outgrows Jira's 32 KB per property. An event is
+stored *before* it is handed out, so a run that dies half-way loses nothing: the
+next webhook event finds it waiting.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from common_lib.utils.logger import setup_logger
 
 from routing import github_events as gh
 from routing import settings
+from tools import org_repos
 from tools.tools import _client
 
 logger = setup_logger(__name__)
@@ -55,7 +57,7 @@ def _not_configured() -> str:
         )
         if not value
     ]
-    return f"GitHub polling is not configured: set {', '.join(missing)}." if missing else ""
+    return f"GitHub events are not configured: set {', '.join(missing)}." if missing else ""
 
 
 # --- the memory on the Jira project ---------------------------------------------
@@ -135,89 +137,7 @@ async def _comments(
     return gh.comments_from(issue, lines, reviews)
 
 
-async def _repo_events(
-    client: httpx.AsyncClient, repo: str, mine: dict[str, Any], sent: dict[str, str], now: datetime
-) -> list[gh.Event]:
-    """This repo's new events since ``mine``'s cursor; moves the cursor on."""
-    since = (gh.parse_time(mine.get("cursor")) or now) - gh.OVERLAP
-    headers = {"If-None-Match": mine["etag"]} if mine.get("etag") else {}
-    resp = await client.get(
-        f"/repos/{repo}/pulls",
-        params={"state": "all", "sort": "updated", "direction": "desc", "per_page": 50},
-        headers=headers,
-    )
-    if resp.status_code == 304:  # no pull request changed (and the call is free)
-        mine["cursor"] = now.isoformat()
-        return []
-    resp.raise_for_status()
-    mine["etag"] = resp.headers.get("ETag", "")
-
-    events: list[gh.Event] = []
-    for pr in resp.json():
-        if (gh.parse_time(pr.get("updated_at")) or now) < since:
-            break  # sorted newest first: the rest did not change
-        number = pr["number"]
-        if gh.merged_into(pr, settings.github_branch(), since):
-            if gh.merge_key(repo, pr) in sent:
-                continue
-            files = await _pages(client, f"/repos/{repo}/pulls/{number}/files", {})
-            comments = await _comments(client, repo, number, None)
-            events.append(
-                gh.merged_event(repo, pr, files, comments, settings.allowed_project_keys())
-            )
-            continue
-        new = [
-            c
-            for c in await _comments(client, repo, number, since)
-            if gh.comment_key(repo, number, c) not in sent
-        ]
-        if new:
-            events.append(gh.comments_event(repo, pr, new, settings.allowed_project_keys()))
-    mine["cursor"] = now.isoformat()
-    return events
-
-
 # --- the tools --------------------------------------------------------------------
-
-
-@tool(name="github_scan")
-async def github_scan() -> dict[str, Any]:
-    """New merges into the branch and new PR comments, plus events waiting for a
-    retry — each stored before it is returned, so none can be lost."""
-    problem = _not_configured()
-    if problem:
-        return {"ok": False, "error": problem, "events": []}
-    now = datetime.now(UTC)
-    notes: list[str] = []
-    try:
-        async with _client() as jira, _github() as client:
-            memory = await _get(jira, settings.GITHUB_STATE_PROPERTY)
-            repos_memory: dict[str, Any] = memory.setdefault("repos", {})
-            sent = gh.prune(memory.get("sent") or {}, now)
-            pending: dict[str, int] = memory.get("pending") or {}  # key -> tries so far
-
-            repos = await _org_repos(client)
-            for repo in repos:
-                if repo not in repos_memory:
-                    # First sight of this repo: start from now, never its history.
-                    repos_memory[repo] = {"cursor": now.isoformat()}
-                    notes.append(f"{repo}: watching from now on")
-                    continue
-                try:
-                    found = await _repo_events(client, repo, repos_memory[repo], sent, now)
-                except httpx.HTTPError as exc:
-                    notes.append(f"{repo}: not read this time ({exc})")  # cursor stays put
-                    continue
-                await _store(jira, found, pending)
-
-            memory["sent"] = sent
-            events = await _save_and_list(jira, memory, pending)
-    except (httpx.HTTPError, ValueError) as exc:
-        logger.error(f"GitHub scan failed: {exc}", exc_info=True)
-        return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "events": []}
-
-    logger.info(f"GitHub scan: {len(repos)} repo(s), {len(events)} event(s) to send")
-    return _scan_result(events, len(repos), notes)
 
 
 async def _store(jira: httpx.AsyncClient, found: list[gh.Event], pending: dict[str, int]) -> None:
@@ -243,7 +163,9 @@ async def _save_and_list(
     return events
 
 
-def _scan_result(events: list[dict[str, Any]], repos: int, notes: list[str]) -> dict[str, Any]:
+async def _scan_result(
+    events: list[dict[str, Any]], repos: int, notes: list[str]
+) -> dict[str, Any]:
     return {
         "ok": True,
         "events": events,
@@ -252,7 +174,7 @@ def _scan_result(events: list[dict[str, Any]], repos: int, notes: list[str]) -> 
         "planning_agent": settings.planning_agent(),
         "planning_queue": settings.planning_task_queue(),
         # Which service each repository is, for Planning's graph.
-        "repos_text": settings.planning_repos(),
+        "repos_text": await org_repos.planning_repos(),
         "timeout_minutes": settings.planning_timeout_minutes(),
     }
 
@@ -276,7 +198,7 @@ async def _pushed_events(
     """(the events one pushed GitHub webhook stands for, or why there are none).
 
     The webhook only says what happened; the pull request, its files and its
-    comments are read from GitHub, exactly as a scan reads them."""
+    comments are read from GitHub."""
     repo = str(fields.get("github_repo") or "")
     kind = str(fields.get("github_event") or "")
     action = str(fields.get("github_action") or "")
@@ -327,10 +249,9 @@ async def _pushed_events(
 
 @tool(name="github_event")
 async def github_event(fields: dict[str, Any]) -> dict[str, Any]:
-    """One GitHub webhook event, pushed as it happened (2026-10-14): the same
-    result as github_scan — its events, plus any still waiting for a retry —
-    so the router sends both the same way. ``fields`` are the webhook's flat
-    ones: github_event, github_action, github_repo, pr_number, github_comment_id."""
+    """One GitHub webhook event, pushed as it happened (2026-10-14): its events,
+    plus any still waiting for a retry. ``fields`` are the webhook's flat ones:
+    github_event, github_action, github_repo, pr_number, github_comment_id."""
     problem = _not_configured()
     if problem:
         return {"ok": False, "error": problem, "events": []}
@@ -349,7 +270,7 @@ async def github_event(fields: dict[str, Any]) -> dict[str, Any]:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}", "events": []}
 
     logger.info(f"GitHub event: {len(found)} new, {len(events)} to send; {skipped or 'taken'}")
-    result = _scan_result(events, 1, [skipped] if skipped else [])
+    result = await _scan_result(events, 1, [skipped] if skipped else [])
     result["skipped"] = skipped
     return result
 
