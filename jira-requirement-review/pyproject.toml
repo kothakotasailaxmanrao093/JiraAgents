@@ -1,6 +1,6 @@
 [project]
 name = "jira-requirement-review"
-version = "2.2.26"
+version = "2.2.27"
 description = "Reviews a Jira requirement against its parent, sub-tasks, linked issues and attachments, and reports what is assumed, ambiguous or missing"
 authors = [{ name = "Kothakota Sai Laxman Rao", email = "kothakota.sailaxmanrao@calfus.com" }]
 readme = "README.md"
@@ -20,6 +20,9 @@ dependencies = [
     "pydantic>=2.7",
     "python-dotenv>=1.0.1",
     "python-docx>=1.2.0",
+    # Video/audio attachments: a static ffmpeg binary inside the wheel, so the
+    # platform pod needs no system ffmpeg (shared/video.py, 2026-10-21).
+    "imageio-ffmpeg>=0.6,<1.0",
 ]
 
 [dependency-groups]

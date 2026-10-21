@@ -23,16 +23,23 @@ from __future__ import annotations
 
 import asyncio
 import json
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from ._logging import get_logger
 from .transcripts import TRANSCRIPT_SUFFIXES, clean_transcript
+from .video import VideoReadError, extract_video
 
 logger = get_logger(__name__)
 
 DEFAULT_MAX_FILE_BYTES = 10 * 1024 * 1024  # 10 MB per attachment
 DEFAULT_MAX_FILES = 10
 DEFAULT_MAX_CHARS_PER_FILE = 20_000
+# Video/audio files are naturally much bigger than a PDF or screenshot; a
+# separate, larger cap avoids forcing every other attachment type's limit up
+# just to let a 20-minute meeting recording through.
+DEFAULT_MAX_MEDIA_BYTES = 100 * 1024 * 1024  # 100 MB
+_FRAME_READ_CONCURRENCY = 4
 
 # Extension -> the file_utils extractor that handles it. Images go through the
 # vision path, which needs the AI Gateway; everything else is local parsing.
@@ -47,6 +54,12 @@ _IMAGE_LIKE = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".tif"
 
 _DOCUMENT_LIKE = {".pdf", ".docx", ".doc", ".xlsx", ".xls", ".pptx", ".csv"}
 
+# A screen recording or a voice memo. Frames go through the same vision path as
+# an image; the audio track is extracted but not yet transcribed (2026-10-21
+# — no speech-to-text model confirmed on the AI Gateway). See shared/video.py.
+_VIDEO_LIKE = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
+_AUDIO_LIKE = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac"}
+
 
 @dataclass(frozen=True)
 class Limits:
@@ -60,6 +73,8 @@ class Limits:
     max_file_bytes: int = DEFAULT_MAX_FILE_BYTES
     max_chars: int = DEFAULT_MAX_CHARS_PER_FILE
     read_images: bool = True
+    max_media_bytes: int = DEFAULT_MAX_MEDIA_BYTES
+    max_video_frames: int = 12
 
 
 def default_limits() -> Limits:
@@ -197,7 +212,7 @@ def fit_to_budget(text: str, limit: int) -> tuple[str, str]:
     return joined, note
 
 
-def _extract_sync(data: bytes, filename: str) -> str:
+def _extract_sync(data: bytes, filename: str, *, max_video_frames: int = 12) -> str:
     """Dispatch to the platform extractor for this file type.
 
     Deliberately uses the public per-type helpers rather than the private
@@ -207,6 +222,8 @@ def _extract_sync(data: bytes, filename: str) -> str:
     from agent_lib.utils import file_utils
 
     ext = suffix(filename)
+    if ext in _VIDEO_LIKE | _AUDIO_LIKE:
+        return _extract_video_sync(data, filename, file_utils, max_video_frames)
     if ext in _TEXT_LIKE:
         return data.decode("utf-8", errors="replace")
     if ext in _TRANSCRIPT_LIKE:
@@ -232,6 +249,54 @@ def _extract_sync(data: bytes, filename: str) -> str:
     raise ValueError(f"unsupported attachment type '{ext or filename}'")
 
 
+def _extract_video_sync(data: bytes, filename: str, file_utils, max_frames: int) -> str:
+    """Frames described one by one, in order, plus a note on the audio track.
+
+    Each frame goes through the same vision extractor an image attachment
+    uses, so a screen recording reads like a numbered series of screenshots —
+    "at 0:45 the screen shows …" — rather than nothing at all.
+    """
+    extraction = extract_video(data, filename, max_frames=max_frames)
+
+    if not extraction.frames:
+        # Audio only (a voice memo, or a video whose picture could not be read):
+        # nothing readable until speech-to-text exists, and the caller's
+        # empty-text note says exactly that rather than pretending it was read.
+        return ""
+
+    lines: list[str] = []
+    if extraction.duration_seconds is not None:
+        minutes, seconds = divmod(int(extraction.duration_seconds), 60)
+        lines.append(
+            f"[Video, {minutes}:{seconds:02d} long, {len(extraction.frames)} screen(s) read]"
+        )
+
+    def describe(frame) -> str:
+        try:
+            described = file_utils.extract_text_from_image(frame.png_bytes)
+        except Exception as exc:  # noqa: BLE001 — one bad frame must not drop the rest
+            described = f"(could not read this frame: {exc})"
+        return (described or "").strip() or "(no readable content)"
+
+    # Four vision calls at a time: twelve in a row took about a minute, which a
+    # second video would push past the Review agent's 2-minute reading step.
+    with ThreadPoolExecutor(max_workers=_FRAME_READ_CONCURRENCY) as pool:
+        descriptions = list(pool.map(describe, extraction.frames))
+
+    for frame, described in zip(extraction.frames, descriptions, strict=True):
+        minutes, seconds = divmod(int(frame.timestamp_seconds), 60)
+        lines.append(f"[{minutes}:{seconds:02d}] {described}")
+
+    if extraction.audio_present:
+        lines.append(
+            "[This video also has spoken audio. Speech-to-text is not available on the "
+            "platform yet, so only the screens above were read — attach the meeting "
+            "transcript (.vtt or .docx) for what was said.]"
+        )
+
+    return "\n".join(lines)
+
+
 def supported(filename: str, *, read_images: bool = True) -> bool:
     """True when this file type can be read at all.
 
@@ -242,7 +307,9 @@ def supported(filename: str, *, read_images: bool = True) -> bool:
     ext = suffix(filename)
     if ext in _IMAGE_LIKE:
         return read_images
-    return ext in _TEXT_LIKE | _JSON_LIKE | _TRANSCRIPT_LIKE | _DOCUMENT_LIKE
+    if ext in _VIDEO_LIKE:
+        return read_images  # frames go through the same vision path as an image
+    return ext in _TEXT_LIKE | _JSON_LIKE | _TRANSCRIPT_LIKE | _DOCUMENT_LIKE | _AUDIO_LIKE
 
 
 async def extract(
@@ -272,15 +339,27 @@ async def extract(
             info.note = f"Unsupported attachment type '{ext or 'unknown'}'; not read."
         return info
 
-    if len(data) > limits.max_file_bytes:
+    ext = suffix(filename)
+    is_media = ext in _VIDEO_LIKE | _AUDIO_LIKE
+    byte_cap = limits.max_media_bytes if is_media else limits.max_file_bytes
+    if len(data) > byte_cap:
         info.note = (
-            f"Attachment is {len(data) // 1024} KB, over the "
-            f"{limits.max_file_bytes // 1024} KB limit; not read."
+            f"Attachment is {len(data) // 1024} KB, over the {byte_cap // 1024} KB limit; not read."
         )
         return info
 
     try:
-        text = await asyncio.to_thread(_extract_sync, data, filename)
+        if is_media:
+            try:
+                text = await asyncio.to_thread(
+                    _extract_sync, data, filename, max_video_frames=limits.max_video_frames
+                )
+            except VideoReadError as exc:
+                logger.warning(f"Could not read {filename!r} as audio/video: {exc}")
+                info.note = "Could not read this file as audio or video."
+                return info
+        else:
+            text = await asyncio.to_thread(_extract_sync, data, filename)
     except Exception as exc:  # noqa: BLE001 — one bad file must not fail the run
         logger.warning(f"Could not extract text from {filename!r}: {exc}")
         info.note = f"Could not read this attachment: {exc}"
@@ -290,12 +369,19 @@ async def extract(
     if not text:
         # An image that comes back empty was usually NOT read (the vision model
         # was unavailable), not an image without text — say both (2026-10-06).
-        info.note = (
-            "No text could be read from this image — it may hold no text, or image "
-            "reading was unavailable for this run."
-            if suffix(filename) in _IMAGE_LIKE
-            else "No text content found in this attachment."
-        )
+        if ext in _AUDIO_LIKE | _VIDEO_LIKE:
+            info.note = (
+                "Voice recording: speech-to-text is not available on the platform yet, "
+                "so the spoken audio was not read. Please attach the meeting transcript "
+                "(.vtt or .docx) as well."
+            )
+        else:
+            info.note = (
+                "No text could be read from this image — it may hold no text, or image "
+                "reading was unavailable for this run."
+                if ext in _IMAGE_LIKE
+                else "No text content found in this attachment."
+            )
         return info
 
     text, note = fit_to_budget(text, limits.max_chars)

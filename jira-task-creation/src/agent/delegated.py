@@ -63,7 +63,7 @@ AGENT_DISPLAY_NAME = "JiraTaskCreation"
 # It is kept in step by scripts/publish.py, which writes all three (pyproject,
 # metadata.json and this constant) together, and by
 # tests/test_version_agreement.py, which fails if they ever diverge.
-AGENT_VERSION = "4.3.56"
+AGENT_VERSION = "4.3.57"
 
 
 def agent_version() -> str:

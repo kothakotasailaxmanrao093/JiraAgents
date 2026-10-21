@@ -1,6 +1,6 @@
 [project]
 name = "jira-task-creation"
-version = "4.3.56"
+version = "4.3.57"
 description = "LaxmanTicketWise — validates requirements, classifies them Small/Medium/Large, decomposes them into Epics/Stories/Subtasks, and creates the Jira hierarchy"
 authors = [{ name = "Kothakota Sai Laxman Rao", email = "kothakota.sailaxmanrao@calfus.com" }]
 readme = "README.md"
@@ -26,6 +26,9 @@ dependencies = [
     # The platform already installs it to read PDF attachments; pinned to that
     # version so a platform change cannot silently remove what we use directly.
     "pymupdf==1.26.4",
+    # Video/audio attachments: a static ffmpeg binary inside the wheel, so the
+    # platform pod needs no system ffmpeg (shared/video.py, 2026-10-21).
+    "imageio-ffmpeg>=0.6,<1.0",
 ]
 
 [dependency-groups]
