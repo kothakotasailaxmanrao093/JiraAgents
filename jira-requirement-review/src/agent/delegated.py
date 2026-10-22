@@ -196,6 +196,14 @@ def _to_contract(result: dict[str, Any], *, run_id: str) -> AgentResult:
     elif outcome is Outcome.FAILED:
         headline = "Requirement review could not run"
         summary = result.get("message") or "The review did not complete."
+    elif result.get("review_kind") == "bug":
+        investigation = result.get("investigation") or {}
+        headline = (
+            "Bug investigation — likely cause found"
+            if str(investigation.get("root_cause") or "").strip()
+            else "Bug investigation — more information needed"
+        )
+        summary = _readiness_line(readiness) or summarise(read, missing)
     else:
         headline = _headline(readiness_level, len(findings))
         summary = _readiness_line(readiness) or summarise(read, missing)
@@ -221,6 +229,8 @@ def _to_contract(result: dict[str, Any], *, run_id: str) -> AgentResult:
         # A number, so the router can hold a build back after a poor review
         # without reading it out of the summary's wording.
         readiness_score=_score(readiness),
+        # A bug's cause, files and fix; empty for a requirement review.
+        investigation=dict(result.get("investigation") or {}),
         # A review never creates anything. Stated as empty rather than omitted,
         # because the router renders "Created in Jira" from this list.
         created=[],

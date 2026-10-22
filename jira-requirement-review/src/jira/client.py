@@ -155,6 +155,8 @@ class JiraClient:
             "comments": comments,
             "parent_key": parent.get("key"),
             "is_subtask": bool((fields.get("issuetype") or {}).get("subtask")),
+            # "Bug" turns a review into a bug investigation (2026-10-22).
+            "issue_type": (fields.get("issuetype") or {}).get("name") or "",
             "subtask_total": len(subtask_keys),  # full count, before the cap
             "subtask_keys": subtask_keys[:MAX_SUBTASKS],
             "linked_issues_total": len(linked_issues),  # full count, before the cap

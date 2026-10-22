@@ -10,8 +10,6 @@ from src.classification import decompose as decomposer
 from src.classification.decompose import (
     DecompositionError,
     build_breakdown,
-    classify,
-    heuristic_breakdown,
     llm_breakdown,
     llm_triage,
     split_capabilities,
@@ -19,6 +17,7 @@ from src.classification.decompose import (
 )
 from src.classification.validate import ProjectContext
 from src.models.schemas import NOT_SPECIFIED, Classification, ResultStatus
+from tests.heuristic_breakdown import heuristic_breakdown
 
 SMALL = "Allow users to update their preferred language."
 MEDIUM = "Send email and SMS notifications and allow users to manage notification preferences."
@@ -45,19 +44,19 @@ def fake_chat(monkeypatch):
     return _install
 
 
-# --- classification -------------------------------------------------------
+# --- how many capabilities a requirement asks for ---------------------------
 
 
-def test_small_requirement_is_classified_small():
-    assert classify(SMALL) is Classification.SMALL
+def test_small_requirement_asks_for_one_capability():
+    assert len(split_capabilities(SMALL)) == 1
 
 
-def test_medium_requirement_is_classified_medium():
-    assert classify(MEDIUM) is Classification.MEDIUM
+def test_medium_requirement_asks_for_two_to_four_capabilities():
+    assert 2 <= len(split_capabilities(MEDIUM)) <= 4
 
 
-def test_large_requirement_is_classified_large():
-    assert classify(LARGE) is Classification.LARGE
+def test_large_requirement_asks_for_five_or_more_capabilities():
+    assert len(split_capabilities(LARGE)) >= 5
 
 
 def test_classification_follows_scope_not_description_length():
@@ -67,7 +66,7 @@ def test_classification_follows_scope_not_description_length():
         "change it is to contact support, which is slow for everyone involved and "
         "generates avoidable tickets every single week of the year."
     )
-    assert classify(verbose_single) is Classification.SMALL
+    assert len(split_capabilities(verbose_single)) == 1
 
 
 def test_bulleted_requirements_are_split_by_bullet():
@@ -284,7 +283,7 @@ def test_bullet_markers_do_not_reach_a_jira_summary() -> None:
     """An Epic built from a list was summarised with its markers still in it:
     "Add: - driver shift roster - fuel spend by depot - tyre replacement log".
     """
-    from src.classification.decompose import _flatten_list_markers
+    from tests.heuristic_breakdown import _flatten_list_markers
 
     assert (
         _flatten_list_markers(
@@ -383,7 +382,7 @@ def test_the_agents_own_reply_cannot_rule_work_out() -> None:
 
 def test_an_acronym_keeps_its_capitals() -> None:
     """Lowercasing the first letter produced Stories reading "sMS notifications"."""
-    from src.classification.decompose import to_infinitive
+    from tests.heuristic_breakdown import to_infinitive
 
     assert to_infinitive("SMS notifications") == "SMS notifications"
     assert to_infinitive("API access") == "API access"

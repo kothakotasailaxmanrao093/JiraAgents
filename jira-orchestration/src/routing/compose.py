@@ -75,7 +75,20 @@ LAYOUT: dict[Outcome, tuple[str, ...]] = {
     # questions used to reach the reply only inside the child's status block;
     # once that block was dropped they vanished (BGV-32, 2026-09-24).
     Outcome.ALREADY_EXISTS: ("what_happened", "duplicates", "questions", "read", "missing"),
-    Outcome.REVIEWED: ("readiness", "findings", "questions", "read", "missing"),
+    # "behaviour", "cause", "files", "fix", "info": a bug investigation
+    # (2026-10-22); each is left out for an ordinary review.
+    Outcome.REVIEWED: (
+        "readiness",
+        "behaviour",
+        "cause",
+        "files",
+        "fix",
+        "info",
+        "findings",
+        "questions",
+        "read",
+        "missing",
+    ),
     Outcome.NEEDS_INFO: ("what_happened", "questions", "read", "missing"),
     Outcome.NOT_A_REQUIREMENT: ("what_happened", "read", "missing"),
     Outcome.FAILED: ("what_happened", "read", "missing", "problems"),
@@ -159,6 +172,9 @@ def _section(name: str, result: AgentResult) -> Section | None:
     if name == "readiness":
         return Section("Readiness", result.summary) if result.summary else None
 
+    if name in ("behaviour", "cause", "files", "fix", "info"):
+        return _investigation_section(name, result.investigation or {})
+
     if name == "findings":
         items = []
         for finding in result.findings:
@@ -188,6 +204,68 @@ def _section(name: str, result: AgentResult) -> Section | None:
     if name == "problems":
         items = _lines(result.errors)
         return Section("Problems", items) if items else None
+
+    return None
+
+
+def _investigation_section(name: str, found: dict) -> Section | None:
+    """One part of a bug investigation, or None when it has nothing to say."""
+    if not found:
+        return None
+
+    if name == "behaviour":
+        items = _lines(
+            [
+                f"Actual: {found.get('actual')}" if found.get("actual") else "",
+                f"Expected: {found.get('expected')}" if found.get("expected") else "",
+            ]
+        )
+        return Section("What is wrong", items) if items else None
+
+    if name == "cause":
+        cause = str(found.get("root_cause") or "").strip()
+        if not cause:
+            return None
+        confidence = str(found.get("root_cause_confidence") or "").strip().lower()
+        heading = (
+            f"Likely root cause ({confidence} confidence)" if confidence else "Likely root cause"
+        )
+        evidence = _lines([str(e) for e in found.get("evidence") or []])
+        return Section(heading, [cause, *[f"Evidence: {e}" for e in evidence]])
+
+    if name == "files":
+        items = []
+        for entry in found.get("affected_files") or []:
+            if isinstance(entry, dict):
+                path = str(entry.get("path") or "").strip()
+                why = str(entry.get("why") or "").strip()
+                if path:
+                    items.append(f"{path} — {why}" if why else path)
+            elif str(entry).strip():
+                items.append(str(entry).strip())
+        note = str(found.get("code_note") or "").strip()
+        if not items and note:
+            return Section("Affected files", note)
+        if note:
+            items.append(note)
+        return Section("Affected files", items) if items else None
+
+    if name == "fix":
+        fix = str(found.get("proposed_fix") or "").strip()
+        if not fix:
+            return None
+        return Section(
+            "Proposed fix — not implemented",
+            [
+                fix,
+                'Nothing was changed. Say "@Aetherion create TDD" for the design, or '
+                '"@Aetherion code" to implement it.',
+            ],
+        )
+
+    if name == "info":
+        items = _lines([str(i) for i in found.get("missing_information") or []])
+        return Section("Information still needed", items) if items else None
 
     return None
 
@@ -278,11 +356,21 @@ AMBIGUOUS_OPTIONS = [
     '"@Aetherion review" — I assess how clear it is and list what is missing, ' "creating nothing",
 ]
 
+# What a Bug card can ask for instead of a build (2026-10-22).
+BUG_OPTIONS = [
+    '"@Aetherion investigate" — find the likely root cause, the affected files and a '
+    "proposed fix, creating nothing",
+    '"@Aetherion create TDD" — write the Technical Design Document for the fix',
+    '"@Aetherion code" — implement the fix from the TDD, when you are ready',
+]
+
 HELP_OPTIONS = [
     '"@Aetherion build <requirement>" — break the requirement, or this ticket\'s requirements, '
     "into Jira work items (a Story gets Sub-tasks, an Epic gets Stories)",
     '"@Aetherion review" — review this ticket: findings, gaps, missing information and open '
     "questions. Answer them in the comments and ask again",
+    '"@Aetherion investigate" — on a bug: find the likely root cause, the affected files '
+    "and a proposed fix, creating nothing",
     '"@Aetherion explain this card" — explain what this ticket is asking for',
     '"@Aetherion explain why this approach and why not another approach" — the Planning agent '
     "explains the design's reasoning and weighs the alternative",

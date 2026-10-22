@@ -49,7 +49,8 @@ logger = setup_logger(__name__)
 _TIMEOUT = 30.0
 # Fields the router needs, and no more. It routes; it does not gather context.
 # description and attachment: what a review reads, for the unchanged-ticket fingerprint.
-_ISSUE_FIELDS = "summary,labels,project,subtasks,comment,description,attachment"
+# issuetype: a Bug is investigated, never broken down (2026-10-22).
+_ISSUE_FIELDS = "summary,labels,project,subtasks,comment,description,attachment,issuetype"
 
 
 def _client() -> httpx.AsyncClient:
@@ -184,6 +185,8 @@ async def ingress_check(
                 # A signal the classifier uses: an issue that already has
                 # sub-tasks has almost certainly been broken down already.
                 "has_children": bool(fields.get("subtasks")),
+                # "Bug", "Story", … — decides investigate vs build (2026-10-22).
+                "issue_type": str((fields.get("issuetype") or {}).get("name") or ""),
                 "idempotency_key": key,
                 "trigger_keyword": settings.trigger_keyword(),
                 "processed_label": settings.processed_label(),
@@ -263,9 +266,12 @@ async def classify_intent(comment_body: str, issue_summary: str = "") -> dict[st
     prompt = (
         "Classify what this Jira comment is asking for. Answer with ONLY a JSON "
         "object of confidences summing to 1.0, over exactly these keys: "
-        '{"BUILD": 0.0, "REVIEW": 0.0, "QUESTION": 0.0, "CHATTER": 0.0}.\n\n'
+        '{"BUILD": 0.0, "REVIEW": 0.0, "BUG": 0.0, "QUESTION": 0.0, "CHATTER": 0.0}.\n\n'
         "BUILD    — asking for the work to be broken into Jira issues.\n"
         "REVIEW   — asking whether the requirement is clear, complete or ready.\n"
+        "BUG      — reporting that something that already exists is broken or "
+        "wrong (an error, a wrong value, a failing page or API), or asking to "
+        "investigate or find the cause of a fault.\n"
         "QUESTION — asking about this ticket, wanting an explanation.\n"
         "CHATTER  — anything else: greetings, questions about the world, "
         "comments not addressed to an automated system.\n\n"
@@ -274,7 +280,8 @@ async def classify_intent(comment_body: str, issue_summary: str = "") -> dict[st
         'record a tyre pressure check"), is a request for the work — weight '
         "BUILD over REVIEW for it. Reserve REVIEW for comments that actually "
         "ask about completeness, gaps or readiness, not merely comments that "
-        "happen to read like a spec.\n\n"
+        "happen to read like a spec. A report of broken existing behaviour is BUG, "
+        "never BUILD: a bug is investigated, not broken into new work items.\n\n"
         f"Ticket: {issue_summary}\n"
         f"Comment: {comment_body}"
     )
@@ -327,7 +334,7 @@ def _parse_scores(text: str) -> dict[str, float]:
     except json.JSONDecodeError:
         return {}
 
-    valid = {"BUILD", "REVIEW", "QUESTION", "CHATTER"}
+    valid = {"BUILD", "REVIEW", "BUG", "QUESTION", "CHATTER"}
     out: dict[str, float] = {}
     for key, value in (data or {}).items():
         name = str(key).strip().upper()

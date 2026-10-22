@@ -10,7 +10,7 @@ import pytest
 
 from src.jira import api as jira
 from src.models.schemas import ExistingIssue, ResultStatus, WorkBreakdown
-from src.tools.tools import create_jira_issues, jira_configuration_status
+from src.tools.tools import create_jira_issues
 from tests.test_schemas import make_epic, make_story, make_subtask
 
 REQUIREMENT = "Send email and SMS notifications and let users manage preferences."
@@ -326,22 +326,6 @@ async def test_a_different_requirement_is_not_treated_as_a_duplicate(fake_jira, 
     )
     assert result["reused_existing"] is False
     assert result["status"] == ResultStatus.JIRA_CREATED.value
-
-
-# --- configuration status -------------------------------------------------
-
-
-async def test_configuration_status_reports_not_ready_without_credentials():
-    status = await jira_configuration_status()
-    assert status["ready"] is False
-    assert status["token_set"] is False
-
-
-async def test_configuration_status_reports_ready(jira_env):
-    status = await jira_configuration_status()
-    assert status["ready"] is True
-    assert status["project_key"] == "ABC"
-    assert status["issue_types"]["subtask"] == "Sub-task"
 
 
 # --- attaching sub-tasks to a ticket, twice ---------------------------------

@@ -14,6 +14,7 @@ have to know that those variable names exist.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -90,6 +91,8 @@ def limits() -> Limits:
         max_file_bytes=max_file_bytes(),
         max_chars=max_chars(),
         read_images=images_enabled(),
+        # Videos are read and explained by this agent's own model (2026-10-22).
+        video_model=os.environ.get("TASK_LLM_MODEL", "").strip() or Limits.video_model,
     )
 
 
@@ -98,14 +101,20 @@ def supported(filename: str) -> bool:
     return _shared_supported(filename, read_images=images_enabled())
 
 
-async def extract(data: bytes, filename: str, mime_type: str = "") -> AttachmentText:
-    """Extract text from one attachment. Never raises."""
+async def extract(
+    data: bytes, filename: str, mime_type: str = "", context: str = ""
+) -> AttachmentText:
+    """Extract text from one attachment. Never raises.
+
+    ``context`` is the ticket's subject, so a video is explained in its terms.
+    """
     result = await _shared_extract(
         data,
         filename,
         mime_type,
         limits=limits(),
         images_off_hint=IMAGES_OFF_HINT,
+        context=context,
     )
     return AttachmentText(
         filename=result.filename,
@@ -135,6 +144,7 @@ __all__ = [
 async def read_all(
     items: list[dict[str, Any]],
     download: Callable[[str], Awaitable[bytes]],
+    context: str = "",
 ) -> tuple[list[AttachmentText], list[str]]:
     """Read Jira's attachment list: capped, in parallel, never failing the run.
 
@@ -167,7 +177,7 @@ async def read_all(
                     mime_type=mime,
                     note=f"Could not download this attachment: {exc}",
                 )
-            return await extract(data, filename, mime)
+            return await extract(data, filename, mime, context)
 
     wanted = items[:limit]
     read = await asyncio.gather(*(read_one(item) for item in wanted), return_exceptions=True)

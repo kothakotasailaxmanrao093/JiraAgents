@@ -61,7 +61,6 @@ class RootPreview:
     type_before: str
     type_after: str
     summary_before: str
-    summary_after: str
     priority: str = ""
     reason: str = ""
     # What would go under it: "3 Sub-tasks", "2 Stories with their Sub-tasks",

@@ -28,9 +28,17 @@ from agent.command_flow import Command, run_command
 from agent.pipeline_flow import Chain, attach_to_ticket, jira_planning_source
 from routing import github_events as gh
 from routing.catalog import AgentSpec, by_intent, display_name_for
-from routing.classify import WORKFLOW_INTENTS, Decision, classify, classify_by_verb
+from routing.classify import (
+    BUG_NOT_BUILT,
+    WORKFLOW_INTENTS,
+    Decision,
+    classify,
+    classify_by_verb,
+    for_issue_type,
+)
 from routing.compose import (
     AMBIGUOUS_OPTIONS,
+    BUG_OPTIONS,
     HELP_OPTIONS,
     compose,
     handled_by,
@@ -138,6 +146,10 @@ async def run_router(
             has_children=bool(gate.get("has_children")),
             keyword=keyword,
         )
+
+    # A Bug card is investigated, never broken down (2026-10-22).
+    issue_type = str(gate.get("issue_type") or "")
+    decision = for_issue_type(decision, issue_type)
 
     logger.info(
         f"run {run_id}: {issue_key} classified {decision.intent} "
@@ -1015,6 +1027,21 @@ def _answer_directly(
                 "What I can do",
                 routed_to=decision.reason,
                 options=HELP_OPTIONS,
+            ),
+            [],
+            None,
+        )
+
+    if decision.intent == BUG_NOT_BUILT:
+        return (
+            router_only(
+                "Nothing was created — this ticket is a Bug",
+                routed_to=decision.reason,
+                what_happened=(
+                    "A bug is investigated, not broken into Stories, Tasks or Sub-tasks, so "
+                    "nothing was created and nothing was changed. Mention the agent again with:"
+                ),
+                options=BUG_OPTIONS,
             ),
             [],
             None,

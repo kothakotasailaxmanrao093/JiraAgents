@@ -484,15 +484,6 @@ class DuplicateMatch(_Strict):
     existing_type: str = ""
     existing_url: str = ""
 
-    def explain(self) -> str:
-        """Why this counts as already-covered, in one sentence."""
-        where = "title" if self.matched_on == "summary" else "description"
-        return (
-            f'"{self.proposed_title}" is already covered by {self.existing_key} '
-            f'("{self.existing_summary}", {self.existing_status or "status unknown"}) '
-            f"— matched on its {where}, similarity {self.score}."
-        )
-
 
 class OverlapReport(_Strict):
     """Whether existing work covers all, some, or none of a proposal."""
@@ -510,10 +501,6 @@ class OverlapReport(_Strict):
     def is_partial(self) -> bool:
         """Some of it exists and some does not."""
         return bool(self.covered_titles) and bool(self.remaining_titles)
-
-    @property
-    def blocked(self) -> bool:
-        return bool(self.covered_titles)
 
 
 class JiraContext(_Strict):

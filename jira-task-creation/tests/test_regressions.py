@@ -275,17 +275,15 @@ async def test_bug_c_create_path_also_returns_sorted_keys(run_agent, fake_jira, 
 # BUGS D, E, F, G — heuristic output quality
 # ==========================================================================
 
-from src.classification.decompose import (  # noqa: E402
+from src.classification.decompose import split_capabilities  # noqa: E402
+from src.classification.validate import ProjectContext, has_action_intent  # noqa: E402
+from tests.heuristic_breakdown import (  # noqa: E402
     MAX_SUMMARY_CHARS,
-    classify,
     extract_actor,
     heuristic_breakdown,
     normalise_capability,
-    split_capabilities,
     truncate,
 )
-from src.classification.validate import ProjectContext, has_action_intent  # noqa: E402
-from src.models.schemas import Classification  # noqa: E402
 
 CTX = ProjectContext(name="TenantSpace")
 
@@ -660,7 +658,6 @@ def test_r2_explanation_ends_the_capability_list():
     caps = split_capabilities(R2_EXPLANATION)
     assert len(caps) == 1, caps
     assert not any("spreadsheet" in c.lower() for c in caps)
-    assert classify(R2_EXPLANATION) is Classification.SMALL
 
 
 def test_r2_explanation_case_produces_one_story_and_no_epic():
@@ -686,7 +683,6 @@ def test_r2_the_dropped_capability_is_kept():
     caps = split_capabilities(R2_DROPPED_CAPABILITY)
     assert len(caps) == 2, caps
     assert any("alert" in c.lower() for c in caps)
-    assert classify(R2_DROPPED_CAPABILITY) is Classification.MEDIUM
 
 
 @pytest.mark.parametrize(
@@ -800,7 +796,7 @@ async def test_read_only_mode_refuses_every_write(run_agent, fake_jira, jira_env
 
 def test_benefit_clause_varies_with_the_verb():
     """One fixed 'so that' on every story was the round-1 complaint."""
-    from src.classification.decompose import _benefit
+    from tests.heuristic_breakdown import _benefit
 
     assert _benefit("assign a job to a driver") != _benefit("export the list as CSV")
     assert "hand-off" in _benefit("assign a job")

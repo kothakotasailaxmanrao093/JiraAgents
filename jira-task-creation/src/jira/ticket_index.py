@@ -177,8 +177,3 @@ def forget_tickets(project_key: str, keys: set[str]) -> None:
     index = _INDEXES.get(project_key.upper())
     for key in keys if index else ():
         index.drop(key)
-
-
-def forget() -> None:
-    """Drop every index (tests; a worker restart does the same)."""
-    _INDEXES.clear()

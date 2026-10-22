@@ -400,3 +400,60 @@ def classify(
         )
 
     return classify_by_model(scores, has_children=has_children)
+
+
+# --------------------------------------------------------------------------
+# The card's own type (2026-10-22)
+# --------------------------------------------------------------------------
+
+BUG_TYPES = frozenset({"bug", "defect"})
+BUG_NOT_BUILT = "BUG_NOT_BUILT"
+
+
+def is_bug_type(issue_type: str | None) -> bool:
+    return (issue_type or "").strip().lower() in BUG_TYPES
+
+
+def for_issue_type(decision: Decision, issue_type: str | None) -> Decision:
+    """Adjust a decision for a Bug card: investigate it, never break it down.
+
+    Only REVIEW and BUILD change. A review of a Bug becomes a bug investigation
+    (root cause, affected files, proposed fix). A build on a Bug is refused and
+    answered by the router itself, so no Story, Task or Sub-task can be
+    created for a bug. Everything else — help, status, questions, and the
+    explicit TDD, design and code commands — is the person's explicit choice
+    and runs as asked.
+    """
+    if not is_bug_type(issue_type):
+        return decision
+
+    if decision.intent == "REVIEW":
+        bug = by_intent("BUG")
+        if bug is None:
+            return decision
+        return Decision(
+            intent="BUG",
+            agent=bug,
+            layer=decision.layer,
+            reason=(
+                f"{decision.reason.rstrip('.')}; the ticket is a {issue_type}, so it was "
+                "investigated for its root cause rather than reviewed as a requirement."
+            ),
+            confidence=decision.confidence,
+            scores=decision.scores,
+        )
+
+    if decision.intent == "BUILD":
+        return Decision(
+            intent=BUG_NOT_BUILT,
+            agent=None,
+            layer=decision.layer,
+            reason=(
+                f"{decision.reason.rstrip('.')}; the ticket is a {issue_type}, and a bug is "
+                "investigated, not broken into Stories, Tasks or Sub-tasks."
+            ),
+            confidence=decision.confidence,
+            scores=decision.scores,
+        )
+
+    return decision

@@ -6,8 +6,9 @@
 Uses ``imageio-ffmpeg``, which ships a static ffmpeg binary inside the pip
 package, so this works on a platform pod without a system ffmpeg install.
 
-Video is reduced to a handful of evenly-spaced frames (read through the same
-vision path as an image attachment) plus the audio track. Voice is not
+Video is reduced to the frames where the screen changes, plus a few evenly
+spaced ones (read by the vision model, then explained as one story by
+shared/video_understanding.py), plus the audio track. Voice is not
 transcribed yet — no speech-to-text model is confirmed on the Aetherion AI
 Gateway (2026-10-21) — so the extracted audio is currently unused and a note
 says so. Wiring in a transcription call once a model is confirmed is a small
@@ -80,34 +81,94 @@ def _probe_duration(path: Path) -> float | None:
     return int(hours) * 3600 + int(minutes) * 60 + int(seconds) + int(centis) / 100
 
 
-def _extract_frames(path: Path, duration: float | None, max_frames: int) -> list[VideoFrame]:
+# How much the picture must change to count as a new screen (ffmpeg's scene
+# score, 0-1). Low on purpose: in a screen recording a dialog opening or an error
+# appearing changes only part of the screen.
+SCENE_THRESHOLD = 0.06
+_MAX_SCENE_FRAMES = 60
+# Evenly spaced frames added on top of the screen changes, so slow changes the
+# scene score misses (typing into a field) are still seen.
+_EXTRA_EVEN_FRAMES = 4
+_PTS_RE = re.compile(r"pts_time:\s*([0-9.]+)")
+
+
+def _run_frames(path: Path, vf: str, limit: int) -> list[VideoFrame]:
+    """Frames ffmpeg selects with filter ``vf``, each with its real timestamp."""
     with tempfile.TemporaryDirectory() as tmp:
         out_dir = Path(tmp)
-        duration = duration or float(max_frames)  # unknown duration: still take a spread
-        interval = max(duration / max_frames, 0.5)
-        pattern = out_dir / "frame_%04d.png"
         cmd = [
             _ffmpeg_exe(),
             "-y",
             "-i",
             str(path),
             "-vf",
-            f"fps=1/{interval:.3f}",
-            "-vframes",
-            str(max_frames),
-            str(pattern),
+            f"{vf},showinfo",
+            "-vsync",
+            "vfr",
+            "-frames:v",
+            str(limit),
+            str(out_dir / "frame_%04d.png"),
         ]
-        proc = subprocess.run(cmd, capture_output=True, timeout=120)
-        frames: list[VideoFrame] = []
-        for i, frame_path in enumerate(sorted(out_dir.glob("frame_*.png"))):
-            frames.append(
-                VideoFrame(
-                    timestamp_seconds=round(i * interval, 1), png_bytes=frame_path.read_bytes()
-                )
+        proc = subprocess.run(cmd, capture_output=True, timeout=180)
+        stamps = [float(s) for s in _PTS_RE.findall((proc.stderr or b"").decode(errors="replace"))]
+        files = sorted(out_dir.glob("frame_*.png"))
+        if not files and proc.returncode != 0:
+            raise VideoReadError((proc.stderr or b"").decode(errors="replace")[-500:])
+        return [
+            VideoFrame(
+                timestamp_seconds=round(stamps[i] if i < len(stamps) else 0.0, 1),
+                png_bytes=f.read_bytes(),
             )
-        if not frames and proc.returncode != 0:
-            raise VideoReadError((proc.stderr or b"").decode(errors="replace")[:500])
+            for i, f in enumerate(files)
+        ]
+
+
+def _spread(frames: list[VideoFrame], count: int) -> list[VideoFrame]:
+    """``count`` frames spread evenly across ``frames``, first and last kept."""
+    if len(frames) <= count:
         return frames
+    if count <= 1:
+        return frames[:1]
+    step = (len(frames) - 1) / (count - 1)
+    return [frames[round(i * step)] for i in range(count)]
+
+
+def _extract_frames(path: Path, duration: float | None, max_frames: int) -> list[VideoFrame]:
+    """The moments worth reading: every change of screen, plus a few even ones.
+
+    A screen recording is mostly still: the same page for ten seconds, then a
+    click, a new page, an error. Frames taken every N seconds read the same page
+    five times and can miss the error entirely, so frames are taken where the
+    picture changes (ffmpeg's scene score), with a few evenly spaced frames added
+    so slow changes are not missed. Exact repeats are dropped.
+    """
+    scene = _run_frames(
+        path, f"select='eq(n\\,0)+gt(scene\\,{SCENE_THRESHOLD})'", _MAX_SCENE_FRAMES
+    )
+    length = duration or float(max_frames)
+    interval = max(length / max(_EXTRA_EVEN_FRAMES, 1), 0.5)
+    # select= keeps each frame's real time; fps= would show a later picture
+    # under an earlier timestamp.
+    even = _run_frames(
+        path,
+        f"select='isnan(prev_selected_t)+gte(t-prev_selected_t\\,{interval:.3f})'",
+        _EXTRA_EVEN_FRAMES,
+    )
+
+    # Screen changes first: their timestamps are exact, while an evenly spaced
+    # frame can show the next screen under an earlier time.
+    seen: set[bytes] = set()
+    merged: list[VideoFrame] = []
+    for frame in [*scene, *even]:
+        digest = frame.png_bytes[-4096:]
+        if digest in seen:
+            continue
+        if any(abs(m.timestamp_seconds - frame.timestamp_seconds) < 0.5 for m in merged):
+            continue  # the same moment from both selections
+        seen.add(digest)
+        merged.append(frame)
+    merged.sort(key=lambda f: f.timestamp_seconds)
+    return _spread(merged, max_frames)
 
 
 def _extract_audio(path: Path) -> tuple[bytes | None, bool]:
@@ -138,7 +199,7 @@ def _extract_audio(path: Path) -> tuple[bytes | None, bool]:
 def extract_video(
     data: bytes, filename: str, *, max_frames: int = DEFAULT_MAX_FRAMES
 ) -> VideoExtraction:
-    """Evenly-spaced frames plus the audio track of one video/audio file.
+    """The frames worth reading plus the audio track of one video/audio file.
 
     Runs ffmpeg synchronously; callers already extract attachments in a worker
     thread (see :mod:`shared.attachments`), which is where this belongs too.

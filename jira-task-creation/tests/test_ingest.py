@@ -196,8 +196,8 @@ def test_context_sections_are_kept_out_of_the_heuristic_breakdown() -> None:
     heuristic fallback cannot read that, so it gets the requirement sections
     alone. Found live on TT2-107, where a comment became its own Story.
     """
-    from src.classification.decompose import heuristic_breakdown
     from src.classification.validate import ProjectContext
+    from tests.heuristic_breakdown import heuristic_breakdown
 
     source = SourceIssue(
         key="TT2-107",
@@ -285,8 +285,8 @@ def test_a_bare_keyword_used_as_a_subject_is_not_stripped() -> None:
 
 
 def test_a_mention_never_reaches_a_story_title() -> None:
-    from src.classification.decompose import heuristic_breakdown
     from src.classification.validate import ProjectContext
+    from tests.heuristic_breakdown import heuristic_breakdown
 
     source = SourceIssue(
         key="TT2-200",
@@ -382,8 +382,8 @@ def requested(request: str) -> SourceIssue:
 
 
 def test_a_mention_in_the_request_never_reaches_a_story_title() -> None:
-    from src.classification.decompose import heuristic_breakdown
     from src.classification.validate import ProjectContext
+    from tests.heuristic_breakdown import heuristic_breakdown
 
     source = requested(
         "@Aetherion Create a login feature for all users, including email and "
@@ -627,9 +627,9 @@ def test_a_contradicting_page_is_left_out_of_the_work_items() -> None:
     Customers may store up to five saved cards" — the contradiction baked into
     the work item. Saying the ticket was used has to be true.
     """
-    from src.classification.decompose import heuristic_breakdown
     from src.classification.validate import ProjectContext
     from src.context.ingest import assemble_requirement
+    from tests.heuristic_breakdown import heuristic_breakdown
 
     source = _payments(
         "Customers may store one saved card per customer.",
@@ -646,9 +646,9 @@ def test_a_contradicting_page_is_left_out_of_the_work_items() -> None:
 
 def test_a_page_that_agrees_is_still_used() -> None:
     """The counterweight: only a contradicting page is dropped."""
-    from src.classification.decompose import heuristic_breakdown
     from src.classification.validate import ProjectContext
     from src.context.ingest import assemble_requirement
+    from tests.heuristic_breakdown import heuristic_breakdown
 
     source = _payments(
         "Customers may store one saved card.",

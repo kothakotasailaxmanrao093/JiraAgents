@@ -184,12 +184,13 @@ def text(blocks) -> str:
 # --- help and routing ----------------------------------------------------------------
 
 
-def test_help_lists_the_eight_commands() -> None:
-    """2026-10-15: "status" joined the seven."""
+def test_help_lists_the_nine_commands() -> None:
+    """2026-10-15: "status" joined the seven; 2026-10-22: "investigate" for bugs."""
     joined = " ".join(HELP_OPTIONS)
     for cmd in (
         "build",
         "review",
+        "investigate",
         "explain this card",
         "explain why",
         "create TDD",
@@ -198,7 +199,7 @@ def test_help_lists_the_eight_commands() -> None:
         "help",
     ):
         assert f"@Aetherion {cmd}" in joined, cmd
-    assert len(HELP_OPTIONS) == 8
+    assert len(HELP_OPTIONS) == 9
 
 
 @pytest.mark.parametrize(

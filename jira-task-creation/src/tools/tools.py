@@ -1308,27 +1308,6 @@ async def _create_jira_issues(
     return result.model_dump(mode="json")
 
 
-@tool()
-async def jira_configuration_status() -> dict[str, Any]:
-    """Report whether Jira is configured, without creating anything.
-
-    Useful from the local test form to confirm credentials before a real run.
-    """
-    base_url, email, token = jira.jira_creds()
-    key = jira.target_project_key()
-    return {
-        "base_url_set": bool(base_url),
-        "email_set": bool(email),
-        "token_set": bool(token),
-        "project_key": key,
-        "issue_types": jira.issue_type_names(),
-        "llm_model": os.environ.get("TASK_LLM_MODEL", "gpt-4o"),
-        "allowed_project_keys": list(jira.allowed_project_keys()) or ["<any>"],
-        "read_only": jira.read_only(),
-        "ready": bool(base_url and email and token and key),
-    }
-
-
 # --------------------------------------------------------------------------
 # Webhook ingestion, notification and write-back
 # --------------------------------------------------------------------------
@@ -1393,7 +1372,9 @@ async def _read_attachments(
         return [], []
     with stage("read_attachments", files=min(len(items), attachments_mod.max_files())):
         return await attachments_mod.read_all(
-            items, lambda url: jira.download_attachment(client, url)
+            items,
+            lambda url: jira.download_attachment(client, url),
+            context=str(fields.get("summary") or ""),
         )
 
 
@@ -1905,7 +1886,6 @@ async def _root_preview(
         type_before=root["type"],
         type_after=root["type"],
         summary_before=root["summary"],
-        summary_after=root["summary"],
         reason=plan.reason,
         children=children,
     )

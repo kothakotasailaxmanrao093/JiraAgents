@@ -12,8 +12,10 @@ from . import (  # noqa: F401
     analyze_requirement_tool,
     build_review_report_tool,
     gather_context_tool,
+    gather_documents_tool,
     jira_search_tool,
     post_review_tool,
     render_review_tool,
+    search_code_tool,
     send_review_report_email_tool,
 )

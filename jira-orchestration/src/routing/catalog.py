@@ -122,6 +122,21 @@ CATALOG: tuple[AgentSpec, ...] = (
         timeout_minutes=4,  # see the note on the BUILD entry above
         forced_payload={"mode": "delegated", "post_to_jira": False},
     ),
+    # A bug is investigated, never broken down (2026-10-22): the Review agent
+    # in bug mode reads the ticket, its files and the organisation's code
+    # (read-only) and reports root cause, affected files and a proposed fix.
+    # It creates nothing and changes no code.
+    AgentSpec(
+        agent_name="JiraRequirementReview",
+        display_name="Bug Investigation",
+        intent="BUG",
+        verbs=("investigate", "debug", "root cause", "find the root cause", "find the cause"),
+        confidence=0.60,
+        writes_to_jira=False,
+        # Code search and reading source files add to a review's time.
+        timeout_minutes=6,
+        forced_payload={"mode": "delegated", "post_to_jira": False, "review_kind": "bug"},
+    ),
 )
 
 

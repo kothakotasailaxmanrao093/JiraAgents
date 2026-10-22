@@ -33,8 +33,8 @@ from typing import Any
 # changes nothing, so it is never queued behind anything.
 TRACKED = ("BUILD", "REVIEW")
 
-WORKING = {"BUILD": "Building", "REVIEW": "Reviewing"}
-NOUN = {"BUILD": "build", "REVIEW": "review"}
+WORKING = {"BUILD": "Building", "REVIEW": "Reviewing", "BUG": "Investigating"}
+NOUN = {"BUILD": "build", "REVIEW": "review", "BUG": "investigation"}
 
 
 class Next(str, Enum):

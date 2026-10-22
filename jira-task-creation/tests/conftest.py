@@ -114,6 +114,7 @@ def _stand_in_model_breakdown(monkeypatch: pytest.MonkeyPatch, request) -> None:
     """
     from src.classification import decompose
     from src.tools import tools
+    from tests import heuristic_breakdown
 
     real = tools.build_breakdown
 
@@ -127,7 +128,10 @@ def _stand_in_model_breakdown(monkeypatch: pytest.MonkeyPatch, request) -> None:
             cause = exc.__cause__
             if cause is None or isinstance(cause, decompose.DecompositionError | ValidationError):
                 raise
-            return decompose.heuristic_breakdown(requirement, context), decompose.GENERATOR_LLM
+            return (
+                heuristic_breakdown.heuristic_breakdown(requirement, context),
+                decompose.GENERATOR_LLM,
+            )
 
     monkeypatch.setattr(tools, "build_breakdown", _fake)
 
@@ -491,7 +495,7 @@ def _fresh_ticket_index() -> None:
     """Each test reads its own fake project: the in-memory index starts empty."""
     from src.jira import ticket_index
 
-    ticket_index.forget()
+    ticket_index._INDEXES.clear()
 
 
 @pytest.fixture(autouse=True)

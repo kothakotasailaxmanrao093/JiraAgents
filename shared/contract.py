@@ -133,6 +133,12 @@ class AgentResult:
     # REVIEWED: readiness, 1-5 (0 = not scored). The router keeps it, so a later
     # build on the same unchanged ticket knows how ready it was judged.
     readiness_score: int = 0
+    # REVIEWED, for a bug (2026-10-22): what the investigation found.
+    # {"actual", "expected", "root_cause", "root_cause_confidence",
+    #  "evidence": [...], "affected_files": [{"path", "why"}],
+    #  "proposed_fix", "missing_information": [...], "code_note"}.
+    # Empty for an ordinary requirement review.
+    investigation: dict[str, Any] = field(default_factory=dict)
     # Files the child made, kept in the agents' shared storage, for the next
     # agent to read: [{"name": "…pdf", "file_key": "…"}] (2026-10-08).
     documents: list[dict[str, str]] = field(default_factory=list)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from context.budget import dropped_documents, trim_documents_to_budget
+from context.budget import trim_documents_to_budget
 
 
 def _doc(label, kind, n):
@@ -111,15 +111,3 @@ def test_an_unregistered_kind_ranks_below_everything_known():
     ]
     kept, _ = trim_documents_to_budget(docs, budget=100)
     assert [d["source_label"] for d in kept] == ["Subtask ABC-2 (comments)"]
-
-
-def test_dropped_documents_names_what_was_left_out():
-    """Completeness reporting has to say so — a document dropped for budget
-    looks identical to one that never existed."""
-    docs = [
-        _doc("Target ABC-1 (description)", "requirement", 100),
-        _doc("Subtask ABC-2 (comments)", "subtask_comments", 100),
-    ]
-    kept, _ = trim_documents_to_budget(docs, budget=100)
-    dropped = dropped_documents(docs, kept)
-    assert [d["source_label"] for d in dropped] == ["Subtask ABC-2 (comments)"]

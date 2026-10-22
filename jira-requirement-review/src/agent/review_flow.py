@@ -62,6 +62,21 @@ def resolve_transcript_file_keys(payload: dict[str, Any]) -> list[str]:
 PREVIOUS_REVIEW_LABEL = "Previous review's open questions"
 
 
+# Card types investigated as bugs rather than reviewed as requirements.
+BUG_TYPES = frozenset({"bug", "defect"})
+
+# What the code search reads the report from: what the person wrote, never the
+# bot's own earlier replies or the previous review.
+_REPORT_KINDS = ("trigger_comment", "requirement", "target_comments", "attachment")
+_REPORT_CHARS = 20_000
+
+
+def report_text(documents: list[dict[str, Any]]) -> str:
+    """The bug report's own words, for picking code search terms."""
+    parts = [str(d.get("text") or "") for d in documents if d.get("kind") in _REPORT_KINDS]
+    return "\n".join(parts)[:_REPORT_CHARS]
+
+
 def previous_review_document(questions: list[str]) -> dict[str, Any]:
     """The last review's questions, for this review to check against the comments.
 
@@ -120,6 +135,7 @@ async def _review_one_issue(
     workflow_id: str | None,
     document_keys: list[str] | None = None,
     previous_questions: list[str] | None = None,
+    review_kind: str = "requirement",
 ) -> dict[str, Any]:
     """Run the full context-gather -> analyze -> render -> (optional post) pipeline
     for one issue and return a single structured result dict.
@@ -173,6 +189,21 @@ async def _review_one_issue(
     documents = list(ctx.get("documents", []))
     if previous_questions:
         documents.append(previous_review_document(previous_questions))
+
+    # A bug is investigated against the code (2026-10-22): asked for by the
+    # router (review_kind="bug"), or because the card itself is a Bug.
+    target_type = str((ctx.get("target_bundle") or {}).get("issue_type") or "")
+    is_bug = review_kind == "bug" or target_type.strip().lower() in BUG_TYPES
+    code: dict[str, Any] = {}
+    if is_bug and not document_keys:
+        code = await execute(
+            "search_code",
+            issue_key,
+            ctx.get("issue_summary") or "",
+            report_text(documents),
+            start_to_close_timeout=timedelta(seconds=90),
+        )
+        documents.extend(code.get("documents") or [])
     analysis = await execute(
         "analyze_requirement",
         documents,
@@ -180,6 +211,7 @@ async def _review_one_issue(
         ctx.get("issue_summary"),
         model_id,
         bool((ctx.get("target_bundle") or {}).get("is_subtask")),
+        "bug" if is_bug else "requirement",
         start_to_close_timeout=timedelta(minutes=5),
     )
     if analysis.get("error") and not analysis.get("findings"):
@@ -204,7 +236,21 @@ async def _review_one_issue(
     draft = rendered.get("comment_markdown", "")
     findings = analysis.get("findings", [])
     by_category = rendered.get("by_category", {})
-    warnings = ctx.get("warnings", [])
+    warnings = list(ctx.get("warnings", []))
+    investigation = dict(analysis.get("investigation") or {})
+    if is_bug:
+        note = str(code.get("note") or "").strip()
+        searched = str(code.get("searched") or "").strip()
+        if note:
+            investigation["code_note"] = note
+        elif searched:
+            investigation["code_note"] = f"Code searched for: {searched}."
+        dropped = investigation.pop("files_dropped", 0)
+        if dropped:
+            warnings.append(
+                f"{dropped} file(s) the model named were not among the files read, "
+                "so they were left out."
+            )
 
     result: dict[str, Any] = {
         "issue_key": issue_key,
@@ -213,12 +259,14 @@ async def _review_one_issue(
         "by_category": by_category,
         "findings": findings,
         "readiness": readiness,
+        "review_kind": "bug" if is_bug else "requirement",
+        "investigation": investigation,
         # Open questions the ticket already lists — not repeated as findings.
         "known_questions": analysis.get("known_questions") or [],
         "warnings": warnings,
         # Carried so the delegated path can account for what was read and what
         # was not. Unused by the direct path, which reports through the draft.
-        "documents": ctx.get("documents") or [],
+        "documents": [*(ctx.get("documents") or []), *(code.get("documents") or [])],
         "target_bundle": ctx.get("target_bundle") or {},
         "counts": ctx.get("counts") or {},
     }
@@ -331,6 +379,7 @@ async def run_review(
         previous_questions=[
             str(q) for q in payload.get("previous_questions") or [] if str(q).strip()
         ],
+        review_kind=str(payload.get("review_kind") or "requirement").strip().lower(),
     )
     generate_docx = flag(payload, "generate_docx")
     # TEMPORARILY DISABLED: email delivery is not exposed as a trigger (see

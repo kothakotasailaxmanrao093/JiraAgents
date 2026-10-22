@@ -9,6 +9,7 @@ from typing import Any, Dict
 from aetherion_sdk import agent, toolExecutor
 from common_lib.utils.logger import setup_logger
 
+from src.agent.bug_rules import BUG_HEADLINE, bug_refusal, is_bug_type
 from src.agent.delegated import _sources_missing, _sources_read, agent_version, to_contract
 from src.models.schemas import (
     Classification,
@@ -717,6 +718,28 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
                 notification=notification,
             )
 
+        # ---- Gate 0d-bug: a Bug is investigated, never broken down ----------
+        # 2026-10-22: "@Aetherion build" on a Bug created Sub-tasks (or a Task
+        # with Sub-tasks). A bug needs its cause found, not a work breakdown;
+        # the router sends it to the Review agent's bug investigation. Checked
+        # before any model call, and nothing is created or changed.
+        if source.get("ticket_is_root") and is_bug_type(source.get("issue_type")):
+            reason, options = bug_refusal(str(source.get("key") or issue_key))
+            await _report(
+                issue_key,
+                headline=BUG_HEADLINE,
+                situation=reason,
+                questions=options,
+                answered_comment_id=trigger_comment_id,
+            )
+            return _result(
+                status=ResultStatus.CLARIFICATION_REQUIRED,
+                message=reason,
+                headline=BUG_HEADLINE,
+                clarifying_questions=options,
+                source_issue=source,
+            )
+
         # ---- Gate 0e: this ticket was already built as a root --------------
         # Its description was rewritten by that build, so the request would
         # hash differently and the idempotency label could not find it. The
@@ -1017,6 +1040,30 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
     duplicates = breakdown_result.get("duplicate_matches", [])
     best_match = breakdown_result.get("best_match")
     logger.info(f"classification : {classification.value} | counts : {counts}")
+
+    # ---- Gate 3a: a defect is investigated, never broken down -------------
+    # The model calls broken existing behaviour "defect" (prompts/templates.py).
+    # That label was recorded and then ignored, so a bug report became a Task
+    # with Sub-tasks (2026-10-22). Nothing is created for it.
+    if str(breakdown.get("work_kind") or "").lower() == "defect":
+        key = str((source or {}).get("key") or issue_key or "this ticket")
+        reason, options = bug_refusal(key, described=True)
+        await _report(
+            issue_key,
+            headline=BUG_HEADLINE,
+            situation=reason,
+            questions=options,
+            context_notes=_unreadable_notes(source),
+            answered_comment_id=trigger_comment_id,
+        )
+        return _result(
+            status=ResultStatus.CLARIFICATION_REQUIRED,
+            message=reason,
+            headline=BUG_HEADLINE,
+            clarifying_questions=options,
+            jira_context=context,
+            source_issue=source,
+        )
 
     # PDF mode or tickets? Asked before the overlap check (2026-10-06): a PDF
     # creates nothing, so work that already exists does not stop it — the PDF

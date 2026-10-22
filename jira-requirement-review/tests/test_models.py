@@ -72,7 +72,7 @@ def test_grouped_sorted_and_nonempty_types():
 
 
 def test_empty_review():
-    assert Review().is_empty()
+    assert not Review().findings
     assert Review().non_empty_types() == []
 
 

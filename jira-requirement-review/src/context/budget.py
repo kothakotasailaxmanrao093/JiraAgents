@@ -97,15 +97,3 @@ def trim_documents_to_budget(
         f"lower-priority document(s)"
     )
     return kept, warning
-
-
-def dropped_documents(
-    documents: list[dict[str, Any]], kept: list[dict[str, Any]]
-) -> list[dict[str, Any]]:
-    """Which documents the trim removed — needed so the review can say so.
-
-    Completeness reporting has to name anything that was left out; a document
-    silently dropped for budget looks identical to one that never existed.
-    """
-    kept_ids = {id(d) for d in kept}
-    return [d for d in documents if id(d) not in kept_ids]

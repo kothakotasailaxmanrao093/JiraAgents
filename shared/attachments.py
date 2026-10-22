@@ -20,12 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from ._logging import get_logger
 from .transcripts import TRANSCRIPT_SUFFIXES, clean_transcript
 from .video import VideoReadError, extract_video
+from .video_understanding import understand_video
 
 logger = get_logger(__name__)
 
@@ -36,7 +36,6 @@ DEFAULT_MAX_CHARS_PER_FILE = 20_000
 # separate, larger cap avoids forcing every other attachment type's limit up
 # just to let a 20-minute meeting recording through.
 DEFAULT_MAX_MEDIA_BYTES = 100 * 1024 * 1024  # 100 MB
-_FRAME_READ_CONCURRENCY = 4
 
 # Extension -> the file_utils extractor that handles it. Images go through the
 # vision path, which needs the AI Gateway; everything else is local parsing.
@@ -72,6 +71,9 @@ class Limits:
     read_images: bool = True
     max_media_bytes: int = DEFAULT_MAX_MEDIA_BYTES
     max_video_frames: int = 12
+    # The model that reads video frames and explains the video (2026-10-22).
+    # Each agent passes its own; this default is what both use today.
+    video_model: str = "gpt-5.1"
 
 
 def default_limits() -> Limits:
@@ -209,7 +211,7 @@ def fit_to_budget(text: str, limit: int) -> tuple[str, str]:
     return joined, note
 
 
-def _extract_sync(data: bytes, filename: str, *, max_video_frames: int = 12) -> str:
+def _extract_sync(data: bytes, filename: str) -> str:
     """Dispatch to the platform extractor for this file type.
 
     Deliberately uses the public per-type helpers rather than the private
@@ -219,8 +221,6 @@ def _extract_sync(data: bytes, filename: str, *, max_video_frames: int = 12) -> 
     from agent_lib.utils import file_utils
 
     ext = suffix(filename)
-    if ext in _VIDEO_LIKE | _AUDIO_LIKE:
-        return _extract_video_sync(data, filename, file_utils, max_video_frames)
     if ext in _TEXT_LIKE:
         return data.decode("utf-8", errors="replace")
     if ext in _TRANSCRIPT_LIKE:
@@ -246,54 +246,6 @@ def _extract_sync(data: bytes, filename: str, *, max_video_frames: int = 12) -> 
     raise ValueError(f"unsupported attachment type '{ext or filename}'")
 
 
-def _extract_video_sync(data: bytes, filename: str, file_utils, max_frames: int) -> str:
-    """Frames described one by one, in order, plus a note on the audio track.
-
-    Each frame goes through the same vision extractor an image attachment
-    uses, so a screen recording reads like a numbered series of screenshots —
-    "at 0:45 the screen shows …" — rather than nothing at all.
-    """
-    extraction = extract_video(data, filename, max_frames=max_frames)
-
-    if not extraction.frames:
-        # Audio only (a voice memo, or a video whose picture could not be read):
-        # nothing readable until speech-to-text exists, and the caller's
-        # empty-text note says exactly that rather than pretending it was read.
-        return ""
-
-    lines: list[str] = []
-    if extraction.duration_seconds is not None:
-        minutes, seconds = divmod(int(extraction.duration_seconds), 60)
-        lines.append(
-            f"[Video, {minutes}:{seconds:02d} long, {len(extraction.frames)} screen(s) read]"
-        )
-
-    def describe(frame) -> str:
-        try:
-            described = file_utils.extract_text_from_image(frame.png_bytes)
-        except Exception as exc:  # noqa: BLE001 — one bad frame must not drop the rest
-            described = f"(could not read this frame: {exc})"
-        return (described or "").strip() or "(no readable content)"
-
-    # Four vision calls at a time: twelve in a row took about a minute, which a
-    # second video would push past the Review agent's 2-minute reading step.
-    with ThreadPoolExecutor(max_workers=_FRAME_READ_CONCURRENCY) as pool:
-        descriptions = list(pool.map(describe, extraction.frames))
-
-    for frame, described in zip(extraction.frames, descriptions, strict=True):
-        minutes, seconds = divmod(int(frame.timestamp_seconds), 60)
-        lines.append(f"[{minutes}:{seconds:02d}] {described}")
-
-    if extraction.audio_present:
-        lines.append(
-            "[This video also has spoken audio. Speech-to-text is not available on the "
-            "platform yet, so only the screens above were read — attach the meeting "
-            "transcript (.vtt or .docx) for what was said.]"
-        )
-
-    return "\n".join(lines)
-
-
 def supported(filename: str, *, read_images: bool = True) -> bool:
     """True when this file type can be read at all.
 
@@ -316,6 +268,7 @@ async def extract(
     *,
     limits: Limits | None = None,
     images_off_hint: str = "",
+    context: str = "",
 ) -> Extracted:
     """Extract text from one already-downloaded attachment. Never raises.
 
@@ -347,14 +300,20 @@ async def extract(
 
     try:
         if is_media:
+            # A video is understood, not just read (2026-10-22): the frames where
+            # the screen changes are read by the vision model and explained as one
+            # story — what was done, what the system showed, what went wrong.
             try:
-                text = await asyncio.to_thread(
-                    _extract_sync, data, filename, max_video_frames=limits.max_video_frames
+                extraction = await asyncio.to_thread(
+                    extract_video, data, filename, max_frames=limits.max_video_frames
                 )
             except VideoReadError as exc:
                 logger.warning(f"Could not read {filename!r} as audio/video: {exc}")
                 info.note = "Could not read this file as audio or video."
                 return info
+            text = await understand_video(
+                filename, extraction, model=limits.video_model, context=context
+            )
         else:
             text = await asyncio.to_thread(_extract_sync, data, filename)
     except Exception as exc:  # noqa: BLE001 — one bad file must not fail the run

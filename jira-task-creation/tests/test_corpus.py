@@ -12,9 +12,10 @@ from __future__ import annotations
 
 import pytest
 
-from src.classification.decompose import extract_actor, heuristic_breakdown, split_capabilities
+from src.classification.decompose import split_capabilities
 from src.classification.validate import ProjectContext, validate_input
 from src.models.schemas import Classification
+from tests.heuristic_breakdown import extract_actor, heuristic_breakdown
 
 CTX = ProjectContext(name="FleetLink", description="Delivery fleet management platform.")
 GENERIC_ACTOR = "user of this product"

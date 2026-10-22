@@ -201,7 +201,6 @@ def _doc(**over: Any) -> pdf.BreakdownDocument:
             "Task",
             "Task",
             "Monthly client invoicing",
-            "Monthly client invoicing",
             children="4 Sub-tasks",
         ),
         related_keys=["BGV-30 — Email invoices (relates to)"],

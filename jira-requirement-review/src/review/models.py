@@ -118,6 +118,3 @@ class Review(BaseModel):
         """Finding types that actually have findings, in canonical display order."""
         groups = self.grouped()
         return [ft for ft in FINDING_TYPE_ORDER if groups.get(ft)]
-
-    def is_empty(self) -> bool:
-        return not self.findings
