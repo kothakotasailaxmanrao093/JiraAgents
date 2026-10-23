@@ -200,7 +200,10 @@ async def search_code(
         note = ""
     else:
         why = f" ({'; '.join(problems[:3])})" if problems else ""
-        note = f"No code in {org} matched this report ({searched}){why}."
+        note = (
+            f"The code for this bug was not found in the repositories this agent can read "
+            f"({org}); searched for: {searched}{why}. The cause above comes from the report."
+        )
     logger.info(
         "search_code %s: words=%s, %d candidate(s), %d file(s) kept, problems=%s",
         issue_key,

@@ -19,6 +19,7 @@ this agent never posts to Jira unless explicitly asked to. Email delivery
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
@@ -68,12 +69,28 @@ BUG_TYPES = frozenset({"bug", "defect"})
 # What the code search reads the report from: what the person wrote, never the
 # bot's own earlier replies or the previous review.
 _REPORT_KINDS = ("trigger_comment", "requirement", "target_comments", "attachment")
+# An @mention of the agent, and a line of one of its own replies.
+_MENTION = re.compile(r"@\w+")
+_AGENT_LINE = re.compile(r"AetherionAgent\s*·|automated reply", re.IGNORECASE)
 _REPORT_CHARS = 20_000
 
 
 def report_text(documents: list[dict[str, Any]]) -> str:
-    """The bug report's own words, for picking code search terms."""
-    parts = [str(d.get("text") or "") for d in documents if d.get("kind") in _REPORT_KINDS]
+    """The bug report's own words, for picking code search terms.
+
+    Not the agent's replies or the @mentions asking it (2026-10-23): on BTS-31
+    the search looked for "aetherionagent", "aetherion" and "agent".
+    """
+    parts = []
+    for d in documents:
+        if d.get("kind") not in _REPORT_KINDS:
+            continue
+        lines = [
+            _MENTION.sub(" ", line)
+            for line in str(d.get("text") or "").splitlines()
+            if not _AGENT_LINE.search(line)
+        ]
+        parts.append("\n".join(lines))
     return "\n".join(parts)[:_REPORT_CHARS]
 
 
@@ -243,6 +260,12 @@ async def _review_one_issue(
         searched = str(code.get("searched") or "").strip()
         if note:
             investigation["code_note"] = note
+        elif searched and not investigation.get("affected_files"):
+            # Files were read, but none of them is where this bug lives.
+            investigation["code_note"] = (
+                f"No file read from the repositories this agent can access is about this bug "
+                f"(searched for: {searched}). The cause above comes from the report."
+            )
         elif searched:
             investigation["code_note"] = f"Code searched for: {searched}."
         dropped = investigation.pop("files_dropped", 0)

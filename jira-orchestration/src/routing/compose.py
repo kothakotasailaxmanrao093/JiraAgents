@@ -173,7 +173,8 @@ def _section(name: str, result: AgentResult) -> Section | None:
         return Section("Readiness", result.summary) if result.summary else None
 
     if name in ("behaviour", "cause", "files", "fix", "info"):
-        return _investigation_section(name, result.investigation or {})
+        ready = (result.readiness_score or 0) >= 4
+        return _investigation_section(name, result.investigation or {}, ready)
 
     if name == "findings":
         items = []
@@ -208,7 +209,7 @@ def _section(name: str, result: AgentResult) -> Section | None:
     return None
 
 
-def _investigation_section(name: str, found: dict) -> Section | None:
+def _investigation_section(name: str, found: dict, ready: bool = False) -> Section | None:
     """One part of a bug investigation, or None when it has nothing to say."""
     if not found:
         return None
@@ -265,7 +266,14 @@ def _investigation_section(name: str, found: dict) -> Section | None:
 
     if name == "info":
         items = _lines([str(i) for i in found.get("missing_information") or []])
-        return Section("Information still needed", items) if items else None
+        if not items:
+            return None
+        # A report that is ready to fix needs nothing more; anything left is
+        # worth checking while fixing, not a reason to wait (BTS-31, 2026-10-23).
+        title = (
+            "Worth confirming while fixing (not blocking)" if ready else "Information still needed"
+        )
+        return Section(title, items)
 
     return None
 

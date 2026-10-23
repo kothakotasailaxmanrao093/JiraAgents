@@ -181,8 +181,8 @@ Assumption | Dependency Question",
     }
   ],
   "overall_readiness": "ready | needs_minor_clarification | needs_major_clarification | not_ready",
-  "readiness_score": "<integer 1-5: how ready this bug is to be fixed — \
-5 = cause and fix are clear, 1 = cannot be investigated without more information>",
+  "readiness_score": "<integer 1-5: how complete the REPORT is for an engineer to fix \
+the bug — see READINESS below>",
   "executive_summary": "1-2 sentences: the most likely cause, or what blocks finding it"
 }
 
@@ -190,8 +190,24 @@ RULES:
 - "root_cause_confidence" is "high" only when a provided source file shows the faulty \
 logic; "medium" when the sources strongly suggest it without the code proving it; \
 "low" otherwise. With no source code provided, never use "high".
-- When no "Code …" source is provided, leave "affected_files" empty and say in \
-"missing_information" that the code was not available.
+- When no "Code …" source is provided, or none of them is about this bug, leave \
+"affected_files" empty. That the code was not available is reported separately: never \
+put it, or a request for file names, paths, frameworks or code, in \
+"missing_information".
+- "missing_information" lists only facts the REPORTER or the team can supply about the \
+bug itself (an environment, a data condition, an expected behaviour that is truly \
+ambiguous). Leave it empty when the report already gives enough to fix it.
+
+READINESS (judge the report the way a senior engineer would, 2026-10-23):
+- 5: the report gives the steps to reproduce, the actual behaviour, the expected \
+behaviour (stated, or unambiguous from the report — "silently fails with no error" \
+means it should surface an error or succeed), and the trigger or condition.
+- 4: one of those is thin but an engineer can still fix it without asking.
+- 3: an engineer would need to ask one real question first.
+- 1-2: the bug cannot be reproduced or understood from the report.
+Whether you could see the code does NOT change readiness: it is about the report, \
+not about your access. "overall_readiness" follows the score (5-4 ready, 3 \
+needs_minor_clarification, 2 needs_major_clarification, 1 not_ready).
 - Every finding must set "evidence_source" to one of the exact source labels. It is \
 correct to return few findings, or none.
 - Facts only from the sources: never invent behaviour, data, users or error messages.

@@ -217,3 +217,62 @@ async def test_the_contract_carries_the_investigation_and_creates_nothing() -> N
     assert result["investigation"]["proposed_fix"] == "Save the debit first."
     assert result["created"] == []
     assert any("TransferService.java" in s for s in result["sources_read"])
+
+
+# --- BTS-31 (2026-10-23): judged on the report, not on the agent's access ----------
+
+
+def test_search_terms_ignore_the_agent_and_its_mentions() -> None:
+    docs = [
+        {"kind": "trigger_comment", "text": "@Aetherion investigate"},
+        {
+            "kind": "target_comments",
+            "text": "AetherionAgent · Nothing was created\n— automated reply",
+        },
+        {"kind": "requirement", "text": "approveDeferredReport is never sent"},
+    ]
+    text = report_text(docs)
+    assert "approveDeferredReport" in text
+    assert "Aetherion" not in text and "automated" not in text
+
+
+def test_the_bug_prompt_scores_the_report_not_the_code_access() -> None:
+    from review.prompt import BUG_SYSTEM_PROMPT
+
+    assert "Whether you could see the code does NOT change readiness" in BUG_SYSTEM_PROMPT
+    assert "never \\\nput it, or a request for file names" not in BUG_SYSTEM_PROMPT  # wrapped text
+    assert "request for file names, paths, frameworks or code" in BUG_SYSTEM_PROMPT.replace(
+        "\n", " "
+    )
+
+
+async def test_unrelated_code_is_reported_as_not_found_not_asked_for() -> None:
+    responses = _responses("Bug")
+    responses["analyze_requirement"] = {
+        **responses["analyze_requirement"],
+        "investigation": {
+            **responses["analyze_requirement"]["investigation"],
+            "affected_files": [],
+        },
+    }
+    ex = FakeExecute(responses)
+    out = await run_review({"issue_key": "BTS-31"}, ex)
+    note = out[0]["investigation"]["code_note"]
+    assert note.startswith("No file read from the repositories this agent can access")
+    assert "comes from the report" in note
+
+
+def test_the_reporter_is_never_asked_for_code() -> None:
+    raw = {
+        "investigation": {
+            "root_cause": "Untrimmed phone input fails the anchored regex.",
+            "missing_information": [
+                "Exact client-side code (form library, validation function and submit handler).",
+                "Whether other fields use the same internationalPhoneNumber regex.",
+            ],
+        }
+    }
+    found = parse_investigation(raw, [])
+    assert found["missing_information"] == [
+        "Whether other fields use the same internationalPhoneNumber regex."
+    ]

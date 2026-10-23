@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 
 from config import MAX_COMMENTS_CHARS
+from shared.keywords import is_agent_comment
 
 from .base import ContextDocument, ContextSource, FetchContext
 
@@ -59,12 +60,19 @@ def _issue_documents(
 def _render_comments(comments: list[dict], limit: int = MAX_COMMENTS_CHARS) -> str:
     """Every comment in full, the newest kept when together they pass ``limit``.
 
+    The agent's own replies are left out (2026-10-23): they are posted from a
+    person's account, so on BTS-31 the review read its earlier "information
+    still needed" as if someone had said it, and repeated it. Earlier questions
+    reach the review on their own, as the previous review's points.
+
     The newest are kept because that is where the answers to the review's
     questions are; the note says how many older ones were left out, so the
     review never reads a shortened discussion as the whole one.
     """
     lines = [
-        f"- {c.get('author') or 'Unknown'}: {c.get('body', '')}" for c in comments if c.get("body")
+        f"- {c.get('author') or 'Unknown'}: {c.get('body', '')}"
+        for c in comments
+        if c.get("body") and not is_agent_comment(str(c.get("body")))
     ]
     kept: list[str] = []
     used = 0

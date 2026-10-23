@@ -135,14 +135,14 @@ async def test_a_build_on_a_story_still_builds() -> None:
 # --- the reply shows the investigation ------------------------------------------
 
 
-def _investigated(**investigation: Any) -> AgentResult:
+def _investigated(score: int = 4, **investigation: Any) -> AgentResult:
     return AgentResult(
         produced_by="JiraRequirementReview",
         display_name="JiraRequirementReview",
         outcome=Outcome.REVIEWED,
         headline="Bug investigation — likely cause found",
         summary="Needs minor clarification (4/5). The balance is read before the debit commits.",
-        readiness_score=4,
+        readiness_score=score,
         investigation=investigation,
         sources_read=["BTS-30 description"],
         email_kind=EmailKind.NONE,
@@ -174,7 +174,19 @@ def test_the_reply_shows_cause_files_and_fix() -> None:
     assert "Likely root cause (high confidence)" in text
     assert "Org/repo/src/TransferService.java — saves late" in text
     assert "Proposed fix — not implemented" in text and "Nothing was changed" in text
-    assert "Information still needed" in text
+    # 4/5: ready to fix, so what is left does not block it (BTS-31, 2026-10-23)
+    assert "Worth confirming while fixing (not blocking)" in text
+    assert "Information still needed" not in text
+
+
+def test_a_report_that_is_not_ready_still_lists_what_is_needed() -> None:
+    result = _investigated(
+        score=2,
+        root_cause="Unknown without the steps to reproduce.",
+        missing_information=["The steps that lead to the stale balance"],
+    )
+    text = _text(compose(result, routed_to="bug", ran=["Bug Investigation"]))
+    assert "Information still needed" in text and "not blocking" not in text
 
 
 def test_an_ordinary_review_has_no_investigation_sections() -> None:

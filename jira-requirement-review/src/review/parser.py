@@ -8,6 +8,7 @@ we coerce common casing/synonym variations, drop rows we cannot make sense of
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from .models import Confidence, Finding, FindingType, Priority, Readiness, ReadinessLevel, Review
@@ -220,6 +221,15 @@ def _grounded_path(claimed: str, read: dict[str, str]) -> str | None:
     return None
 
 
+# A "missing information" item that asks the reporter for code (2026-10-23): the
+# code is the agent's to read, and whether it could is reported in code_note.
+_ASKS_FOR_CODE = re.compile(
+    r"\b(code|source files?|files?|modules?|functions?|handlers?|librar(y|ies)|frameworks?"
+    r"|components?|repositor(y|ies)|implementation|class(es)?)\b",
+    re.IGNORECASE,
+)
+
+
 def parse_investigation(
     raw: dict[str, Any] | None, documents: list[dict[str, Any]]
 ) -> dict[str, Any]:
@@ -262,7 +272,9 @@ def parse_investigation(
         "affected_files": files[:_MAX_LIST],
         "proposed_fix": _text(block.get("proposed_fix")),
         "missing_information": [
-            _text(m, 400) for m in (block.get("missing_information") or []) if _text(m)
+            _text(m, 400)
+            for m in (block.get("missing_information") or [])
+            if _text(m) and not _ASKS_FOR_CODE.search(_text(m))
         ][:_MAX_LIST],
     }
     if dropped:
