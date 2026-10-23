@@ -1,8 +1,10 @@
 """The TDD, design and code commands: their rules, with no I/O (2026-10-08).
 
     on the Jira story      @Aetherion create TDD      readiness check, then the TDD in Confluence
+                                                      (unchanged story: the same TDD again)
     on the TDD page        @Aetherion explain why …   the Planning agent answers
-                           @Aetherion why not …       … and weighs the alternative
+                           @Aetherion why not …       … weighs it; revises the TDD when
+                                                      the alternative is better
                            @Aetherion update the TDD  the Planning agent revises the page
                            @Aetherion code            the branches are confirmed, then Coding
 

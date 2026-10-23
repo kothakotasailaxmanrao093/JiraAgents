@@ -567,6 +567,7 @@ async def _run_command(
         comment_id=comment_id,
         previous_questions=previous_review_points(state),
         reusable_review=reusable,
+        fingerprint=fingerprint,
     )
     result = await run_command(cmd)
     if result.review is not None:

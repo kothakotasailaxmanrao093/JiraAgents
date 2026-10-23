@@ -12,9 +12,9 @@ Nothing is emailed.
 | Jira story / epic | `@Aetherion build` | **Task Creation**: a Story gets Sub-tasks, an Epic gets Stories; the card itself is never changed; the reply links every new issue |
 | Jira story | `@Aetherion explain this card` | what the ticket asks for |
 | Jira story | `@Aetherion status` | what is running on the ticket now and every step so far (review, build, TDD, code, merge), with times and run ids — no agent is called |
-| Jira story | `@Aetherion create TDD` | a readiness review first (4/5 needed; otherwise the questions are posted); then **Planning** writes the TDD from the story, its sub-tasks and the code graph; it is published in the project's **Confluence** space and linked on the story |
+| Jira story | `@Aetherion create TDD` | a readiness review first (4/5 needed; otherwise the questions are posted); then **Planning** writes the TDD from the story, its sub-tasks and the code graph; it is published in the project's **Confluence** space and linked on the story. Asked again while the story is unchanged, it returns the same TDD (no new run, no new version) |
 | TDD page | `@Aetherion explain why this approach was selected` | **Planning** answers under the comment, from the TDD, the discussion and the code |
-| TDD page | `@Aetherion why can't we use <alternative>?` | Planning weighs the alternative; it suggests a change when one is warranted |
+| TDD page | `@Aetherion why can't we use <alternative>?` | Planning weighs the alternative against the code. When it is better, the TDD is revised at once (new version, linked in the reply); otherwise the reply explains why the current approach stays |
 | TDD page | `@Aetherion update the TDD[: what to change]` | Planning revises the design; the page gets a new version |
 | TDD page | `@Aetherion code` | proposes the branches (source, new branch, target) and waits |
 | TDD page | `@Aetherion code confirm` or `@Aetherion code source=main branch=feature/X target=main` | **Coding** implements the TDD, runs the repository's tests, opens a pull request — linked on the page and on the story. If it cannot implement the design, or the PR's tests fail, the reasons go back to Planning, the TDD is revised and Coding tries again (the failed PR is closed) |

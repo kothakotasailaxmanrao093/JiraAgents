@@ -65,6 +65,9 @@ class Command:
     previous_questions: list[str] = field(default_factory=list)
     # A review of the unchanged story, already done, to reuse (a dict, or None).
     reusable_review: dict[str, Any] | None = None
+    # What the story says now (summary, description, attachments, people's
+    # comments), hashed; "" when asked on a TDD page.
+    fingerprint: str = ""
 
 
 @dataclass
@@ -163,6 +166,9 @@ async def create_tdd(cmd: Command) -> CommandResult:
                 ("Problems", ["ORCH_PLANNING_REPOS is not set, so Planning has no code to read."]),
             )
         )
+    unchanged = await _unchanged_tdd(cmd, story)
+    if unchanged is not None:
+        return unchanged
 
     ran: list[str] = []
     await cmd.say(_working("Checking the story is ready (Requirement Review)…", "1 of 3"))
@@ -284,6 +290,46 @@ async def _readiness(cmd: Command, ran: list[str]) -> AgentResult | None:
     return AgentResult.from_dict(out)
 
 
+async def _unchanged_tdd(cmd: Command, story: dict[str, Any]) -> CommandResult | None:
+    """The story's TDD as it is, when the story has not changed since it was written.
+
+    Asking twice wrote a second, different design (BTS-25 v1.0 -> v1.1,
+    2026-10-23): the same story must give the same TDD. A new version comes from
+    a changed story, or from the discussion on the page.
+    """
+    known = story.get("tdd") or {}
+    if not (
+        cmd.fingerprint and known.get("page_id") and known.get("fingerprint") == cmd.fingerprint
+    ):
+        return None
+    page = await _tool(cmd, "read_tdd", str(known["page_id"]))
+    if not page.get("ok"):
+        return None  # the page is gone: write it again
+    version = known.get("tdd_version") or known.get("version") or ""
+    title = known.get("title") or "Technical Design Document"
+    return CommandResult(
+        reply(
+            f"{title} — unchanged",
+            (
+                "What happened",
+                f"{cmd.issue_key} has not changed since its TDD was written, so this is the "
+                f"same design ({version}): [{title}]({known.get('url')}). "
+                "Nothing was regenerated.",
+            ),
+            (
+                "To change it",
+                [
+                    "Edit the story or answer its open questions here, then ask again; or",
+                    f'on the TDD page: "@{cmd.keyword} why this approach?" or '
+                    f'"@{cmd.keyword} why not <alternative>?" — the design is revised when '
+                    "the alternative is better",
+                ],
+            ),
+        ),
+        links={"tdd": str(known.get("url") or "")},
+    )
+
+
 # --- explain why / why not ---------------------------------------------------------
 
 
@@ -318,23 +364,37 @@ async def design_question(cmd: Command) -> CommandResult:
             )
         )
     sections: list[tuple[str, object]] = [("Answer", str(out.get("answer") or ""))]
-    if out.get("change_recommended"):
+    if not out.get("change_recommended"):
+        sections.append(("The design", "Kept as it is: the current approach is the better one."))
+        return CommandResult(reply(f"About the design — {question[:80]}", *sections), [PLANNING])
+
+    # The architect agrees the alternative is better: the design is revised now
+    # (2026-10-23), instead of waiting for a separate "update the TDD".
+    change = str(out.get("proposed_change") or "").strip() or str(out.get("answer") or "")
+    revised = await update_tdd(cmd, agreed=f"{question} — agreed change: {change}")
+    url = revised.links.get("tdd")
+    if url:
+        sections.append(("The design was revised", f"{change} New version: {url}"))
+        headline = f"Design revised — {question[:70]}"
+    else:
         sections.append(
             (
-                "Suggested change to the design",
-                f'{out.get("proposed_change") or "See the answer."} — reply '
-                f'"@{cmd.keyword} update the TDD" to apply it.',
+                "Agreed change, not applied yet",
+                [change, f'{_headline(revised)}. Reply "@{cmd.keyword} update the TDD" to retry.'],
             )
         )
-    else:
-        sections.append(("The design", "No change recommended."))
-    return CommandResult(reply(f"About the design — {question[:80]}", *sections), [PLANNING])
+        headline = f"About the design — {question[:70]}"
+    return CommandResult(reply(headline, *sections), [PLANNING], links=revised.links)
 
 
 # --- update the TDD -------------------------------------------------------------------
 
 
-async def update_tdd(cmd: Command, reasons: list[str] | None = None) -> CommandResult:
+async def update_tdd(
+    cmd: Command, reasons: list[str] | None = None, agreed: str = ""
+) -> CommandResult:
+    """The design revised: with the page's discussion, Coding's ``reasons``, or a
+    change the architect ``agreed`` to in answer to a question."""
     page = await _the_page(cmd)
     if not page.get("ok"):
         return CommandResult(
@@ -347,7 +407,7 @@ async def update_tdd(cmd: Command, reasons: list[str] | None = None) -> CommandR
         )
     await cmd.say(_working("The Planning agent is revising the design…", ""))
     earlier = await _earlier_designs(cmd)
-    document, problem = await _revise(cmd, story, page, reasons, earlier)
+    document, problem = await _revise(cmd, story, page, reasons, earlier, agreed)
     if not document:
         return CommandResult(reply("The TDD was not updated", ("Problems", [problem])))
     published = await _publish(cmd, story, document, earlier)
@@ -386,6 +446,7 @@ async def _revise(
     page: dict[str, Any],
     reasons: list[str] | None,
     earlier: list[dict[str, str]] | None = None,
+    agreed: str = "",
 ) -> tuple[dict[str, Any] | None, str]:
     """A revised design: the story, the whole current design, and what to change."""
     base = await _tool(
@@ -404,7 +465,8 @@ async def _revise(
         + str(page.get("text") or "")[:_CURRENT_DESIGN_CHARS]
         + "\n\nThe discussion on the design page (oldest first):\n"
         + "\n".join(f"- {c}" for c in changes[-20:])
-        + (f"\n\nAsked now: {asked}" if asked and not reasons else "")
+        + (f"\n\nAgreed now, apply it: {agreed}" if agreed else "")
+        + (f"\n\nAsked now: {asked}" if asked and not reasons and not agreed else "")
         + _earlier_text(earlier or [])
     )
     return await _plan(cmd, text, attempt=2)
@@ -677,6 +739,7 @@ async def _publish(
         str(document.get("confluence_html") or ""),
         cmd.run_id,
         [{"title": d["title"], "url": d["url"]} for d in earlier or []],
+        cmd.fingerprint,
     )
 
 

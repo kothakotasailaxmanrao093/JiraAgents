@@ -46,7 +46,7 @@ async def test_a_new_design_is_given_the_earlier_designs_and_links_them() -> Non
     assert "Earlier designs in this project — decisions already made. Keep them" in issue_text
     assert "Cannot transfer to the same account" in issue_text
     assert "getHistoryFor returns an unmodifiable list" in issue_text
-    assert t.args("publish_tdd")[-1] == [
+    assert t.args("publish_tdd")[7] == [
         {"title": "BTS-4 - TDD v1.0", "url": "https://site/wiki/spaces/BTS/pages/4"},
         {"title": "BTS-1 - TDD v1.0", "url": "https://site/wiki/spaces/BTS/pages/1"},
     ]
@@ -58,7 +58,7 @@ async def test_the_first_design_in_a_project_reads_as_before() -> None:
     assert agents.payload("planning_agent")["issue_text"] == (
         "Requirement BGV-105: Daily transfer limit"
     )
-    assert t.args("publish_tdd")[-1] == []
+    assert t.args("publish_tdd")[7] == []
 
 
 async def test_a_revision_gets_the_whole_current_design_and_keeps_it() -> None:
@@ -78,7 +78,7 @@ async def test_a_revision_gets_the_whole_current_design_and_keeps_it() -> None:
     assert "This is a REVISION of the technical design below, not a new one" in issue_text
     assert "Keep every requirement, decision, file change, test and item of existing" in issue_text
     assert "Cannot transfer to the same account" in issue_text
-    assert t.args("publish_tdd")[-1] == [
+    assert t.args("publish_tdd")[7] == [
         {"title": "BTS-4 - TDD v1.0", "url": "https://site/wiki/spaces/BTS/pages/4"}
     ]
 

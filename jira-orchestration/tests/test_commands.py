@@ -283,26 +283,108 @@ async def test_the_review_reads_the_answers_to_its_previous_questions() -> None:
 # --- design questions and updates -----------------------------------------------------
 
 
+AGREED = {
+    "status": "success",
+    "answer": "The history already has every transfer.",
+    "change_recommended": True,
+    "proposed_change": "Keep a running total per day.",
+}
+REVISED = {"status": "success", "results": [], "document": DOCUMENT}
+
+
 async def test_a_design_question_goes_to_planning_with_the_tdd() -> None:
     t = tools()
-    agents = Agents(
-        planning_agent=[
-            {
-                "status": "success",
-                "answer": "The history already has every transfer.",
-                "change_recommended": True,
-                "proposed_change": "Keep a running total per day.",
-            }
-        ]
-    )
-    result = await run_command(
+    agents = Agents(planning_agent=[AGREED, REVISED])
+    await run_command(
         command("DESIGN", "@Aetherion why not a separate limits table?", t, agents, page_id="9001")
     )
     sent = agents.payload("planning_agent")
     assert sent["mode"] == "discuss" and sent["question"] == "why not a separate limits table?"
     assert sent["tdd_text"] == PAGE["text"] and sent["discussion"] == PAGE["discussion"]
-    assert "Keep a running total per day." in text(result.blocks)
-    assert '"@Aetherion update the TDD"' in text(result.blocks)
+
+
+async def test_a_better_alternative_revises_the_design_at_once() -> None:
+    # 2026-10-23: the architect agreed, so the TDD is revised in the same reply.
+    t = tools()
+    agents = Agents(planning_agent=[AGREED, REVISED])
+    result = await run_command(
+        command("DESIGN", "@Aetherion why not a running total?", t, agents, page_id="9001")
+    )
+    revision = agents.payload("planning_agent", 1)["issue_text"]
+    assert "Agreed now, apply it: why not a running total? — agreed change: " in revision
+    assert "Keep a running total per day." in revision
+    assert t.count("publish_tdd") == 1
+    body = text(result.blocks)
+    assert "Design revised" in body and "The design was revised" in body
+    assert PAGE["url"] in body and "Keep a running total per day." in body
+
+
+async def test_when_the_current_approach_is_better_nothing_changes() -> None:
+    t = tools()
+    kept = {**AGREED, "change_recommended": False, "proposed_change": ""}
+    agents = Agents(planning_agent=[kept])
+    result = await run_command(
+        command("DESIGN", "@Aetherion why a Clock?", t, agents, page_id="9001")
+    )
+    assert agents.names() == ["planning_agent"]  # no revision run
+    assert t.count("publish_tdd") == 0
+    assert "Kept as it is" in text(result.blocks)
+
+
+async def test_an_agreed_change_that_fails_to_publish_says_how_to_retry() -> None:
+    t = tools(publish_tdd={"ok": False, "error": "Confluence is down"})
+    agents = Agents(planning_agent=[AGREED, REVISED])
+    result = await run_command(
+        command("DESIGN", "@Aetherion why not a running total?", t, agents, page_id="9001")
+    )
+    body = text(result.blocks)
+    assert "Agreed change, not applied yet" in body and '"@Aetherion update the TDD"' in body
+
+
+# --- the same story gives the same TDD -------------------------------------------------
+
+KNOWN_TDD = {
+    "page_id": "9001",
+    "url": PAGE["url"],
+    "title": PAGE["title"],
+    "tdd_version": "v1.0",
+    "fingerprint": "abc123",
+}
+
+
+async def test_an_unchanged_story_gets_the_same_tdd_without_a_new_run() -> None:
+    t = tools(story_context={**STORY, "tdd": KNOWN_TDD})
+    agents = Agents()
+    result = await run_command(
+        command("TDD", "@Aetherion create TDD", t, agents, fingerprint="abc123")
+    )
+    assert agents.calls == []  # no review, no planning
+    assert t.count("publish_tdd") == 0
+    body = text(result.blocks)
+    assert "unchanged" in body and "v1.0" in body and PAGE["url"] in body
+    assert result.links == {"tdd": PAGE["url"]}
+
+
+async def test_a_changed_story_gets_a_new_version() -> None:
+    t = tools(story_context={**STORY, "tdd": KNOWN_TDD})
+    agents = Agents()
+    await run_command(command("TDD", "@Aetherion create TDD", t, agents, fingerprint="def456"))
+    assert "planning_agent" in agents.names()
+    assert t.args("publish_tdd")[-1] == "def456"  # the new story is remembered
+
+
+async def test_a_deleted_page_is_written_again() -> None:
+    t = tools(story_context={**STORY, "tdd": KNOWN_TDD}, read_tdd={"ok": False, "error": "404"})
+    agents = Agents()
+    await run_command(command("TDD", "@Aetherion create TDD", t, agents, fingerprint="abc123"))
+    assert "planning_agent" in agents.names()
+
+
+async def test_a_tdd_written_before_fingerprints_is_written_again() -> None:
+    t = tools(story_context={**STORY, "tdd": {**KNOWN_TDD, "fingerprint": ""}})
+    agents = Agents()
+    await run_command(command("TDD", "@Aetherion create TDD", t, agents, fingerprint="abc123"))
+    assert "planning_agent" in agents.names()
 
 
 async def test_without_a_tdd_the_story_is_told_to_create_one() -> None:

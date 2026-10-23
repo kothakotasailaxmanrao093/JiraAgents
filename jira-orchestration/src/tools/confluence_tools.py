@@ -203,10 +203,13 @@ async def publish_tdd(
     html_body: str,
     run_id: str,
     related: list[dict[str, str]] | None = None,
+    fingerprint: str = "",
 ) -> dict[str, Any]:
     """The TDD as a Confluence page in the project's space — a new version of the
     story's page when it has one — and the link kept on both sides. ``related``:
-    the project's earlier designs, linked in the page's header."""
+    the project's earlier designs, linked in the page's header. ``fingerprint``:
+    the story it was written from; a revision asked on the page keeps the one
+    already recorded, since the story did not change."""
     issue_key = issue_key.strip().upper()
     base, _, _ = settings.jira_credentials()
     story_url = f"{base}/browse/{issue_key}"
@@ -286,6 +289,7 @@ async def publish_tdd(
                 "version": version,
                 "tdd_version": commands.tdd_version(version),
                 "updated": datetime.now(UTC).isoformat(timespec="seconds"),
+                "fingerprint": fingerprint or str(known.get("fingerprint") or ""),
             }
             put = await jira.put(
                 f"/rest/api/3/issue/{issue_key}/properties/{settings.TDD_PROPERTY}", json=record
