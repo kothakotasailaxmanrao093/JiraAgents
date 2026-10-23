@@ -214,9 +214,18 @@ async def create_tdd(cmd: Command) -> CommandResult:
             ran,
         )
     earlier = await _earlier_designs(cmd)
-    document, problem = await _plan(
-        cmd, str(text["issue_text"]) + _earlier_text(earlier), attempt=1
-    )
+    current = await _current_design(cmd, story)
+    if current is not None:
+        # The story already has a TDD: the new version starts from it, so what
+        # was decided there (BTS-25 v1.1's integer paise) is not lost to a
+        # fresh run (v1.2 went back to double, 2026-10-23).
+        document, problem = await _revise(
+            cmd, story, current, None, earlier, agreed=_STORY_CHANGED, review=review.to_dict()
+        )
+    else:
+        document, problem = await _plan(
+            cmd, str(text["issue_text"]) + _earlier_text(earlier), attempt=1
+        )
     if not document:
         return CommandResult(
             reply("Planning wrote no design", ("Problems", [problem])), ran, review.to_dict()
@@ -328,6 +337,24 @@ async def _unchanged_tdd(cmd: Command, story: dict[str, Any]) -> CommandResult |
         ),
         links={"tdd": str(known.get("url") or "")},
     )
+
+
+_STORY_CHANGED = (
+    "The TDD was asked for again because the story changed (or this design was written "
+    "before changes were tracked). Bring the design up to date with the story as it is "
+    "now. Keep every decision already in the current design and its discussion — for "
+    "example how money is calculated, the validation order, the tests — unless the "
+    "story now contradicts it; say what changed and why."
+)
+
+
+async def _current_design(cmd: Command, story: dict[str, Any]) -> dict[str, Any] | None:
+    """The story's TDD page as it stands, or None when it has none (or it is gone)."""
+    page_id = str((story.get("tdd") or {}).get("page_id") or "")
+    if not page_id:
+        return None
+    page = await _tool(cmd, "read_tdd", page_id)
+    return page if page.get("ok") else None
 
 
 # --- explain why / why not ---------------------------------------------------------
@@ -447,10 +474,11 @@ async def _revise(
     reasons: list[str] | None,
     earlier: list[dict[str, str]] | None = None,
     agreed: str = "",
+    review: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """A revised design: the story, the whole current design, and what to change."""
     base = await _tool(
-        cmd, "planning_input", cmd.issue_key, list(story.get("subtask_keys") or []), [], None
+        cmd, "planning_input", cmd.issue_key, list(story.get("subtask_keys") or []), [], review
     )
     asked = strip_mention(cmd.text, cmd.keyword)
     changes = [*(page.get("discussion") or [])]

@@ -839,3 +839,23 @@ async def test_one_pull_request_has_no_order_section() -> None:
         command("CODE", "@Aetherion code confirm", t, agents, page_id="9001")
     )
     assert "Merge and deploy in this order" not in text(result.blocks)
+
+
+async def test_a_changed_story_is_revised_from_its_current_tdd() -> None:
+    # 2026-10-23: BTS-25 v1.2 was written from scratch and lost v1.1's integer
+    # paise; a new version now starts from the current design and keeps it.
+    t = tools(story_context={**STORY, "tdd": KNOWN_TDD})
+    agents = Agents()
+    await run_command(command("TDD", "@Aetherion create TDD", t, agents, fingerprint="def456"))
+    sent = agents.payload("planning_agent")["issue_text"]
+    assert "This is a REVISION of the technical design below" in sent
+    assert PAGE["text"] in sent
+    assert "Keep every decision already in the current design" in sent
+    assert t.args("publish_tdd")[-1] == "def456"
+
+
+async def test_a_first_tdd_is_written_fresh() -> None:
+    t = tools()
+    agents = Agents()
+    await run_command(command("TDD", "@Aetherion create TDD", t, agents, fingerprint="abc123"))
+    assert "REVISION" not in agents.payload("planning_agent")["issue_text"]
