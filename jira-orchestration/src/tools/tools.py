@@ -37,6 +37,7 @@ from routing import settings
 from routing.catalog import CATALOG
 from routing.ingress import IgnoreReason, IngressOutcome, idempotency_key, screen_comment
 from routing.orchestration import FINISHED_LABEL, RUNNING_LABEL, STATUS_LABELS
+from routing.pipeline import requirement_words
 from shared import llm
 from shared.adf import blocks_to_doc, comment_text
 from shared.keywords import is_agent_comment, mentions_trigger
@@ -571,11 +572,15 @@ def content_fingerprint(fields: dict[str, Any], keyword: str = "Aetherion") -> s
     attachments = sorted(
         f"{a.get('id')}:{a.get('filename')}" for a in fields.get("attachment") or []
     )
-    comments = [
-        f"{c.get('id')}:{c.get('updated') or c.get('created') or ''}"
-        for c in ((fields.get("comment") or {}).get("comments") or [])
-        if _is_answer(comment_text(c.get("body"), keep=keyword), keyword)
-    ]
+    comments = []
+    for c in (fields.get("comment") or {}).get("comments") or []:
+        text = comment_text(c.get("body"), keep=keyword)
+        if _is_answer(text, keyword):
+            comments.append(f"{c.get('id')}:{c.get('updated') or c.get('created') or ''}")
+        elif not is_agent_comment(text) and requirement_words(text, keyword):
+            # A request that adds to the requirement ("… the limit is per
+            # account") counts too, so the story is checked again (2026-10-26).
+            comments.append(f"{c.get('id')}:{requirement_words(text, keyword)}")
     material = json.dumps(
         [fields.get("summary") or "", fields.get("description"), attachments, comments],
         sort_keys=True,

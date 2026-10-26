@@ -111,6 +111,17 @@ def _lines(items: list[str]) -> list[str]:
     return [item for item in items if item and item.strip()]
 
 
+# A reply is read in a Jira comment: the most important points, not all of them
+# (2026-10-26). The rest is named as a count so nothing is silently hidden.
+MAX_LIST = 6
+
+
+def _capped(items: list[str], where: str = "the full review") -> list[str]:
+    if len(items) <= MAX_LIST:
+        return items
+    return [*items[:MAX_LIST], f"…and {len(items) - MAX_LIST} more in {where}."]
+
+
 def _missing_lines(missing: list[MissingSource]) -> list[str]:
     return _lines([m.as_sentence() for m in missing])
 
@@ -184,11 +195,11 @@ def _section(name: str, result: AgentResult) -> Section | None:
             if not text:
                 continue
             items.append(f"{category.capitalize()}: {text}" if category else text)
-        return Section(f"Findings ({len(items)})", items) if items else None
+        return Section(f"Findings ({len(items)})", _capped(items)) if items else None
 
     if name == "questions":
         items = _lines(result.questions)
-        return Section("What I need to know", items) if items else None
+        return Section("What I need to know", _capped(items)) if items else None
 
     if name == "read":
         items = _lines(result.sources_read)

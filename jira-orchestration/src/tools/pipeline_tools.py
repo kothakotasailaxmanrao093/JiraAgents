@@ -57,6 +57,7 @@ async def planning_input(
     try:
         async with _client() as client:
             root = await _ticket(client, issue_key)
+            discussion = await _discussion(client, issue_key)
             keys = [k for k in ticket_keys if k and k.upper() != issue_key]
             for key in keys[: pipeline.MAX_TICKETS]:
                 try:
@@ -68,8 +69,35 @@ async def planning_input(
     except (httpx.HTTPError, ValueError) as exc:
         logger.error(f"Planning input: could not read {issue_key}: {exc}", exc_info=True)
         return {"issue_text": "", "error": f"Could not read {issue_key}: {exc}"}
-    text = pipeline.planning_text(root, tickets, list(proposed or []), review)
+    text = pipeline.planning_text(root, tickets, list(proposed or []), review, discussion)
     return {"issue_text": text, "tickets": len(tickets), "unread": unread}
+
+
+async def _discussion(client: httpx.AsyncClient, issue_key: str) -> list[dict[str, str]]:
+    """Every comment on the story, oldest first: people's comments and requests,
+    and the agent's own replies (2026-10-26) — the design reads the conversation."""
+    keyword = settings.trigger_keyword()
+    try:
+        resp = await client.get(f"/rest/api/3/issue/{issue_key}", params={"fields": "comment"})
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        logger.warning(f"Planning input: could not read the comments of {issue_key}: {exc}")
+        return []
+    out = []
+    for c in ((resp.json().get("fields") or {}).get("comment") or {}).get("comments") or []:
+        text = comment_text(c.get("body"), keep=keyword)
+        if not text.strip():
+            continue
+        author = str((c.get("author") or {}).get("displayName") or "Person")
+        if is_agent_comment(text):
+            out.append({"who": "agent", "author": "Agent", "text": text})
+        elif mentions_trigger(text, keyword=keyword):
+            command, rest = pipeline.request_content(text, keyword)
+            words = f"asked: {command}" + (f" — {rest}" if rest else "") if command else rest
+            out.append({"who": "person", "author": author, "text": words})
+        else:
+            out.append({"who": "person", "author": author, "text": text})
+    return out
 
 
 @tool(name="story_text")
@@ -108,12 +136,15 @@ async def story_text(issue_key: str, ticket_keys: list[str]) -> dict[str, Any]:
     comments = []
     for c in (fields.get("comment") or {}).get("comments") or []:
         text = comment_text(c.get("body"), keep=keyword)
-        if (
-            text.strip()
-            and not is_agent_comment(text)
-            and not mentions_trigger(text, keyword=keyword)
-        ):
-            comments.append(text)
+        if not text.strip() or is_agent_comment(text):
+            continue
+        if mentions_trigger(text, keyword=keyword):
+            # A request counts only for the words it adds to the requirement.
+            added = pipeline.requirement_words(text, keyword)
+            if added:
+                comments.append(added)
+            continue
+        comments.append(text)
     text = memory.story_text(root, tickets, comments)
     return {"ok": True, "text": text, "hash": memory.normalised_hash(text)}
 

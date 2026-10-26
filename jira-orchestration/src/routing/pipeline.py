@@ -36,6 +36,19 @@ STEP_NAMES = {
 MAX_TICKETS = 40  # tickets described to Planning; the rest are named only
 MAX_DESCRIPTION = 3000  # characters of each ticket's description
 MAX_POINTS = 12  # review points handed on
+MAX_DISCUSSION = 40  # comments handed on, newest kept
+MAX_DISCUSSION_CHARS = 12_000
+MAX_AGENT_REPLY = 500  # characters of each agent reply: its point, not its whole text
+# A request that only names a command ("@Aetherion create TDD") says nothing about
+# the requirement; words after the command may ("… — the limit is per account").
+_COMMAND = re.compile(
+    r"^(please\s+)?(create\s+(the\s+)?tdd|review|build|investigate|status|help|"
+    r"explain(\s+this\s+card)?|code(\s+confirm)?|update\s+the\s+tdd(\s+anyway)?|why\s+not|why)\b"
+    r"[\s,:;.\-–—]*",
+    re.IGNORECASE,
+)
+# Requests whose extra words describe the requirement (not a design question or change).
+_REQUIREMENT_VERBS = ("create", "review", "build", "investigate")
 
 
 @dataclass(frozen=True)
@@ -121,11 +134,78 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit].rstrip() + " …"
 
 
+def request_content(text: str, keyword: str = "Aetherion") -> tuple[str, str]:
+    """(command, the words after it) of a comment that mentions the agent."""
+    body = re.sub(rf"@?\b{re.escape(keyword)}\b[\s,:\-–—]*", "", text or "", count=1).strip()
+    match = _COMMAND.match(body)
+    if not match:
+        return "", body
+    return match.group(2).lower(), body[match.end() :].strip()
+
+
+def requirement_words(text: str, keyword: str = "Aetherion") -> str:
+    """What a request adds to the requirement, or "" (2026-10-26).
+
+    "@Aetherion create TDD — the limit is per account" adds a rule; a bare
+    command, a design question or a change request does not (those go through
+    the change validator instead).
+    """
+    command, rest = request_content(text, keyword)
+    if not command.startswith(_REQUIREMENT_VERBS) or len(rest.split()) < 4:
+        return ""
+    return rest
+
+
+# Sections of an agent reply that say how it ran, not what it found.
+_PLUMBING = ("Handled by", "Routed to", "What I read", "Space", "Next, on the TDD page")
+
+
+def agent_gist(text: str) -> str:
+    """An agent reply cut to its point: the headline and what it found."""
+    lines, skip = [], False
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if not line or "automated reply" in line or line.startswith("—"):
+            continue
+        if line in _PLUMBING:
+            skip = True  # drop the heading and the line under it
+            continue
+        if skip:
+            skip = False
+            continue
+        lines.append(line)
+    gist = " ".join(lines).replace("AetherionAgent · ", "", 1)
+    return gist if len(gist) <= MAX_AGENT_REPLY else gist[: MAX_AGENT_REPLY - 1].rstrip() + "…"
+
+
+def discussion_lines(comments: list[dict[str, str]]) -> list[str]:
+    """The story's comments, oldest first, as Planning reads them: who said what.
+
+    ``comments``: ``{"who": "person" | "agent", "author": …, "text": …}``. The
+    agent's questions are kept (shortened) so a person's "yes, per account" is
+    read with the question it answers. The newest are kept when it runs long.
+    """
+    lines = []
+    for c in comments:
+        raw = str(c.get("text") or "")
+        # The agent's reply is cut to its point first: it needs its line breaks.
+        text = agent_gist(raw) if c.get("who") == "agent" else " ".join(raw.split())
+        if not text:
+            continue
+        who = "Agent" if c.get("who") == "agent" else (c.get("author") or "Person")
+        lines.append(f"- {who}: {text}")
+    lines = lines[-MAX_DISCUSSION:]
+    while lines and sum(len(line) for line in lines) > MAX_DISCUSSION_CHARS:
+        lines.pop(0)
+    return lines
+
+
 def planning_text(
     root: dict[str, Any],
     tickets: list[dict[str, Any]],
     proposed: list[str],
     review: dict[str, Any] | None,
+    discussion: list[dict[str, str]] | None = None,
 ) -> str:
     """Planning's ``issue_text``: the request, the tickets and what the review found.
 
@@ -159,6 +239,14 @@ def planning_text(
         score = f" — readiness {result.readiness_score}/5" if result.readiness_score else ""
         lines += ["", f"Requirement review{score}. Open points to design for or call out:"]
         lines += [f"- {p}" for p in points] or ["- none"]
+    said = discussion_lines(list(discussion or []))
+    if said:
+        lines += [
+            "",
+            "Discussion on the story (oldest first) — answers here are part of the "
+            "requirement; the agent's lines are its earlier questions and replies:",
+            *said,
+        ]
     return "\n".join(lines).strip()
 
 

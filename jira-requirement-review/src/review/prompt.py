@@ -128,8 +128,10 @@ section does not already cover, and say in "executive_summary" how many open \
 questions the ticket already lists (e.g. "3 open questions are already listed on \
 the ticket").
 
-TONE: factual and specific. Reference ticket keys and concrete terms from the \
-sources. Each description is one crisp sentence. Return ONLY the JSON object."""
+TONE: factual and specific, in plain words a non-specialist understands. Reference \
+ticket keys and concrete terms from the sources. Each description is one crisp \
+sentence of at most 25 words. Report at most 6 findings, the most important first; \
+leave out minor ones. Return ONLY the JSON object."""
 
 
 # A bug is investigated, not reviewed as a requirement (2026-10-22). Same
@@ -189,6 +191,8 @@ RULES:
 - Every finding must set "evidence_source" to one of the exact source labels. It is \
 correct to return few findings, or none.
 - Facts only from the sources: never invent behaviour, data, users or error messages.
+- Keep it short and simple: each finding one sentence of at most 25 words, at most \
+6 findings, the most important first.
 - Return ONLY the JSON object."""
 
 
