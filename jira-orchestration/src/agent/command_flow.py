@@ -552,6 +552,8 @@ async def _discuss(cmd: Command, page: dict[str, Any], request: str, kind: str) 
         "tdd_text": page["text"],
         "discussion": page.get("discussion") or [],
         "issue_key": cmd.issue_key,
+        # The page's discussion is one Memsy session in Planning (2026-10-26).
+        "page_id": str(page.get("page_id") or cmd.page_id or ""),
         "run_id": cmd.run_id,
     }
     if kind:

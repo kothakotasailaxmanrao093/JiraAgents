@@ -411,3 +411,11 @@ async def test_planning_failing_still_replies_with_reviews_part() -> None:
     reply = tools_.reply_text()
     assert "Actual: Submit does nothing" in reply
     assert "The code could not be investigated: RuntimeError: worker gone" in reply
+
+
+async def test_a_design_question_tells_planning_which_page_it_is_on() -> None:
+    # The page's discussion is one Memsy session in Planning (2026-10-26).
+    t = tools()
+    agents = Agents(planning_agent=[{"status": "success", "answer": "x", "verdict": "answer_only"}])
+    await run_command(command("DESIGN", "@Aetherion why paise?", t, agents, page_id="9001"))
+    assert agents.payload("planning_agent")["page_id"] == "9001"
