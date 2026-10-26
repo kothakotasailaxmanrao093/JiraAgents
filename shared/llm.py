@@ -11,6 +11,10 @@ Both come only from ``scripts/local_worker.py`` / ``scripts/run_local.sh`` (the
 key from the git-ignored ``.env.local``), never from an agent's own ``.env``,
 which is packed into the published agent. So on Aetherion this branch can
 never switch on, whatever the platform puts in the environment.
+
+The OpenAI address itself is set by the launcher too (``LOCAL_OPENAI_CHAT_URL``,
+2026-10-26): the platform refuses to publish an agent whose code names a model
+provider's address directly, so the published code holds none.
 """
 
 from __future__ import annotations
@@ -19,7 +23,8 @@ import os
 
 import httpx
 
-OPENAI_CHAT_URL = "https://api.openai.com/v1/chat/completions"
+# Set only by scripts/local_worker.py, beside AETHERION_LOCAL_RUN.
+CHAT_URL_VAR = "LOCAL_OPENAI_CHAT_URL"
 # A model named for another provider (e.g. an Anthropic one through the
 # gateway) is answered by this OpenAI model locally.
 DEFAULT_LOCAL_MODEL = "gpt-4o"
@@ -34,8 +39,10 @@ LOCAL_RUN_FLAG = "AETHERION_LOCAL_RUN"
 
 def direct_openai() -> bool:
     """True only in a laptop run started by the local launcher, with a key."""
-    return os.environ.get(LOCAL_RUN_FLAG) == "1" and bool(
-        os.environ.get("OPENAI_API_KEY", "").strip()
+    return (
+        os.environ.get(LOCAL_RUN_FLAG) == "1"
+        and bool(os.environ.get("OPENAI_API_KEY", "").strip())
+        and bool(os.environ.get(CHAT_URL_VAR, "").strip())
     )
 
 
@@ -67,7 +74,8 @@ async def openai_chat(*, transport: httpx.AsyncBaseTransport | None = None, **re
     """The model's reply text. Raises on any HTTP error, as the gateway client does."""
     headers = {"Authorization": f"Bearer {os.environ['OPENAI_API_KEY'].strip()}"}
     async with httpx.AsyncClient(timeout=300, transport=transport) as client:
-        resp = await client.post(OPENAI_CHAT_URL, json=openai_request(**request), headers=headers)
+        url = os.environ[CHAT_URL_VAR].strip()
+        resp = await client.post(url, json=openai_request(**request), headers=headers)
         resp.raise_for_status()
     choices = resp.json().get("choices") or [{}]
     return (choices[0].get("message") or {}).get("content") or ""

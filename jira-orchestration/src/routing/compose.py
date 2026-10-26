@@ -383,7 +383,11 @@ HELP_OPTIONS = [
     '"@Aetherion explain why this approach and why not another approach" — the Planning agent '
     "explains the design's reasoning and weighs the alternative",
     '"@Aetherion create TDD" — on a Story: check the requirement is ready, then write the '
-    "Technical Design Document in Confluence and link it here",
+    "Technical Design Document in Confluence and link it here; asked again, a story whose "
+    "requirement has not changed (only its words) keeps the same TDD",
+    '"@Aetherion update the TDD: <change>" — the change is checked against the story, the code '
+    'and the decisions already agreed, and applied only when it is valid; "update the TDD '
+    'anyway: <change>" applies it as asked',
     '"@Aetherion code" — start coding from the Confluence TDD, after confirming the branches; '
     "the pull request is linked here and on the TDD page",
     '"@Aetherion status" — what has happened on this ticket so far, and what is running now',

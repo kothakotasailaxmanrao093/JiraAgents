@@ -382,6 +382,13 @@ def tdd_min_readiness() -> int:
     return env_int("ORCH_TDD_MIN_READINESS", 4, minimum=0)
 
 
+def memory_enabled() -> bool:
+    """``ORCH_MEMORY`` (2026-10-26): "on" (default) asks Planning whether a story's
+    requirement changed and checks every change to a TDD; "off" is the behaviour
+    before that (any text change rewrites, every update is applied)."""
+    return os.environ.get("ORCH_MEMORY", "").strip().lower() not in ("off", "false", "0", "no")
+
+
 def commands() -> dict[str, object]:
     """What the TDD, design and code commands run with, as data for the workflow."""
     return {
@@ -395,6 +402,7 @@ def commands() -> dict[str, object]:
         "coding_attempts": coding_attempts(),
         "tdd_min_readiness": tdd_min_readiness(),
         "task_queue_overrides": task_queue_overrides(),
+        "memory": memory_enabled(),
     }
 
 

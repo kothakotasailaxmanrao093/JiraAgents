@@ -15,8 +15,9 @@ import httpx
 from aetherion_sdk import tool
 from common_lib.utils.logger import setup_logger
 
-from routing import pipeline, settings
-from shared.adf import to_text
+from routing import memory, pipeline, settings
+from shared.adf import comment_text, to_text
+from shared.keywords import is_agent_comment, mentions_trigger
 from tools.org_repos import with_repos
 from tools.tools import _client
 
@@ -69,6 +70,52 @@ async def planning_input(
         return {"issue_text": "", "error": f"Could not read {issue_key}: {exc}"}
     text = pipeline.planning_text(root, tickets, list(proposed or []), review)
     return {"issue_text": text, "tickets": len(tickets), "unread": unread}
+
+
+@tool(name="story_text")
+async def story_text(issue_key: str, ticket_keys: list[str]) -> dict[str, Any]:
+    """The story as a requirement, for Planning's memory (2026-10-26).
+
+    Its summary and description, its sub-tasks, and the comments people wrote
+    about it — never the agent's own replies or the comments asking the agent
+    something, which say nothing about the requirement.
+    """
+    issue_key = issue_key.strip().upper()
+    keyword = settings.trigger_keyword()
+    try:
+        async with _client() as client:
+            resp = await client.get(
+                f"/rest/api/3/issue/{issue_key}",
+                params={"fields": "summary,description,issuetype,comment"},
+            )
+            resp.raise_for_status()
+            fields = resp.json().get("fields") or {}
+            root = {
+                "key": issue_key,
+                "summary": fields.get("summary") or "",
+                "description": to_text(fields["description"]) if fields.get("description") else "",
+            }
+            tickets = []
+            for key in [k for k in ticket_keys if k and k.upper() != issue_key][
+                : pipeline.MAX_TICKETS
+            ]:
+                try:
+                    tickets.append(await _ticket(client, key))
+                except httpx.HTTPError as exc:
+                    logger.warning(f"Story text: could not read {key}: {exc}")
+    except (httpx.HTTPError, ValueError) as exc:
+        return {"ok": False, "error": f"Could not read {issue_key}: {exc}"}
+    comments = []
+    for c in (fields.get("comment") or {}).get("comments") or []:
+        text = comment_text(c.get("body"), keep=keyword)
+        if (
+            text.strip()
+            and not is_agent_comment(text)
+            and not mentions_trigger(text, keyword=keyword)
+        ):
+            comments.append(text)
+    text = memory.story_text(root, tickets, comments)
+    return {"ok": True, "text": text, "hash": memory.normalised_hash(text)}
 
 
 @tool(name="attach_tdd")

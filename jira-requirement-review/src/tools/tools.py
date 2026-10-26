@@ -16,6 +16,5 @@ from . import (  # noqa: F401
     jira_search_tool,
     post_review_tool,
     render_review_tool,
-    search_code_tool,
     send_review_report_email_tool,
 )

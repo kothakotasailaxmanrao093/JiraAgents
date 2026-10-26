@@ -90,6 +90,10 @@ def _outcome_for(result: dict[str, Any]) -> Outcome:
     agent can act.
     """
     status = result.get("status")
+    if result.get("analysis_error") and not result.get("findings"):
+        # The AI step failed (2026-10-26): there is no review, and calling it
+        # REVIEWED let the router keep and reuse an empty result.
+        return Outcome.FAILED
     if status == "error":
         # "no requirement text" is not a crash — it is a finding about the
         # ticket, reported the same way any other unreadable source is.
@@ -196,12 +200,17 @@ def _to_contract(result: dict[str, Any], *, run_id: str) -> AgentResult:
     elif outcome is Outcome.FAILED:
         headline = "Requirement review could not run"
         summary = result.get("message") or "The review did not complete."
+        if result.get("analysis_error"):
+            summary = (
+                f"The AI review step failed ({result['analysis_error']}), so nothing was "
+                "reviewed. Ask again to retry."
+            )
     elif result.get("review_kind") == "bug":
-        investigation = result.get("investigation") or {}
+        # Review judges the report; the code is investigated by Planning (2026-10-26).
         headline = (
-            "Bug investigation — likely cause found"
-            if str(investigation.get("root_cause") or "").strip()
-            else "Bug investigation — more information needed"
+            "Bug report reviewed — ready to investigate"
+            if _score(readiness) >= 4
+            else "Bug report reviewed — more information needed"
         )
         summary = _readiness_line(readiness) or summarise(read, missing)
     else:
@@ -229,7 +238,8 @@ def _to_contract(result: dict[str, Any], *, run_id: str) -> AgentResult:
         # A number, so the router can hold a build back after a poor review
         # without reading it out of the summary's wording.
         readiness_score=_score(readiness),
-        # A bug's cause, files and fix; empty for a requirement review.
+        # A bug report's actual / expected / missing information; empty for a
+        # requirement review. Planning adds the cause, files and fix.
         investigation=dict(result.get("investigation") or {}),
         # A review never creates anything. Stated as empty rather than omitted,
         # because the router renders "Created in Jira" from this list.
@@ -266,7 +276,10 @@ def _questions_from(findings: list[dict[str, Any]]) -> list[str]:
     wanted = {"open_question", "dependency_question"}
     out: list[str] = []
     for finding in findings:
-        category = str(finding.get("category") or "").strip().lower()
+        # Findings carry ``finding_type`` ("Open Question"); this read ``category``,
+        # which no finding has, so no question was ever listed (2026-10-26).
+        kind = finding.get("finding_type") or finding.get("category") or ""
+        category = str(kind).strip().lower().replace(" ", "_")
         text = str(finding.get("description") or finding.get("title") or "").strip()
         if category in wanted and text and text not in out:
             out.append(text)

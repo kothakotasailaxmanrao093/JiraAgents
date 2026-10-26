@@ -265,6 +265,7 @@ async def test_on_a_laptop_the_breakdown_asks_openai(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "agent_lib.gateway.ai", module)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("AETHERION_LOCAL_RUN", "1")
+    monkeypatch.setenv("LOCAL_OPENAI_CHAT_URL", "https://openai.example/v1/chat/completions")
     asked: list[dict[str, Any]] = []
 
     async def openai_chat(**request: Any) -> str:

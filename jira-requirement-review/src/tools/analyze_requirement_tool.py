@@ -118,7 +118,7 @@ async def analyze_requirement(
     )
     return {
         "findings": findings,
-        "investigation": parse_investigation(raw, documents) if review_kind == "bug" else {},
+        "investigation": parse_investigation(raw) if review_kind == "bug" else {},
         "readiness": readiness.model_dump(mode="json") if readiness else None,
         "known_questions": known,
         # Review's own quality metric: findings dropped for citing nothing read.

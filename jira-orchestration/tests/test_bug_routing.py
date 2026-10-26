@@ -115,11 +115,12 @@ async def test_review_on_a_bug_runs_the_investigation_not_the_breakdown() -> Non
 
     await run_router(PAYLOAD, tools.execute, children.dispatch)
 
-    assert len(children.calls) == 1
+    # Review judges the report, then Planning looks for the cause (2026-10-26).
+    assert [c[0] for c in children.calls] == ["JiraRequirementReview", "planning_agent"]
     agent_name, payload, options = children.calls[0]
-    assert agent_name == "JiraRequirementReview"
     assert payload["review_kind"] == "bug" and payload["post_to_jira"] is False
     assert options["workflow_id"].startswith("bug-")
+    assert children.calls[1][1]["mode"] == "investigate"
 
 
 async def test_a_build_on_a_story_still_builds() -> None:

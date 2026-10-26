@@ -27,10 +27,17 @@ from typing import Any
 
 from temporalio.common import RetryPolicy
 
+from routing import memory
 from routing import pipeline as rules
 from routing.catalog import AgentSpec
 from routing.classify import strip_mention
-from routing.commands import BranchPlan, branch_question, parse_code_command
+from routing.commands import (
+    BranchPlan,
+    branch_question,
+    design_kind,
+    parse_code_command,
+    parse_update,
+)
 from shared.contract import AgentResult, Outcome
 from shared.keywords import AGENT_FOOTER, AGENT_SIGNATURE
 
@@ -169,6 +176,13 @@ async def create_tdd(cmd: Command) -> CommandResult:
     unchanged = await _unchanged_tdd(cmd, story)
     if unchanged is not None:
         return unchanged
+    # Did the requirement change, or only its words? (Planning's memory, 2026-10-26)
+    facts = await _story_facts(cmd, story)
+    if facts is not None and facts.get("verdict") in memory.KEEP_TDD:
+        kept = await _kept_tdd(cmd, story, facts)
+        if kept is not None:
+            return kept
+    changes = memory.change_lines((facts or {}).get("changes") or [])
 
     ran: list[str] = []
     await cmd.say(_working("Checking the story is ready (Requirement Review)…", "1 of 3"))
@@ -219,8 +233,13 @@ async def create_tdd(cmd: Command) -> CommandResult:
         # The story already has a TDD: the new version starts from it, so what
         # was decided there (BTS-25 v1.1's integer paise) is not lost to a
         # fresh run (v1.2 went back to double, 2026-10-23).
+        agreed = _STORY_CHANGED + (
+            "\n\nWhat changed in the requirement:\n" + "\n".join(f"- {c}" for c in changes)
+            if changes
+            else ""
+        )
         document, problem = await _revise(
-            cmd, story, current, None, earlier, agreed=_STORY_CHANGED, review=review.to_dict()
+            cmd, story, current, None, earlier, agreed=agreed, review=review.to_dict()
         )
     else:
         document, problem = await _plan(
@@ -238,6 +257,7 @@ async def create_tdd(cmd: Command) -> CommandResult:
         return CommandResult(
             reply("The TDD could not be published", ("Problems", [page.get("error", "")])), ran
         )
+    await _remember(cmd, story, page, document, facts)
     where = f"{page.get('space_name') or page['space_key']} ({page['space_key']})"
     return CommandResult(
         reply(
@@ -249,6 +269,7 @@ async def create_tdd(cmd: Command) -> CommandResult:
                 f"[{page['title']}]({page['url']})"
                 + (" (a new version of the existing page)." if not page.get("created") else "."),
             ),
+            ("What changed in the requirement", changes),
             (
                 "Space",
                 f"{where}" + (" — created for this project" if page.get("space_created") else ""),
@@ -259,7 +280,8 @@ async def create_tdd(cmd: Command) -> CommandResult:
                 [
                     f'"@{cmd.keyword} explain why this approach was selected"',
                     f'"@{cmd.keyword} why can\'t we use <alternative>?"',
-                    f'"@{cmd.keyword} update the TDD" — apply what the discussion agreed',
+                    f'"@{cmd.keyword} update the TDD: <change>" — checked first, applied when '
+                    "valid",
                     f'"@{cmd.keyword} code" — implement it as a pull request',
                 ],
             ),
@@ -357,7 +379,152 @@ async def _current_design(cmd: Command, story: dict[str, Any]) -> dict[str, Any]
     return page if page.get("ok") else None
 
 
-# --- explain why / why not ---------------------------------------------------------
+# --- Planning's memory (2026-10-26) -----------------------------------------------------
+
+
+def _memory(cmd: Command) -> bool:
+    """ORCH_MEMORY: ask Planning before rewriting or changing a TDD."""
+    return bool(cmd.settings.get("memory"))
+
+
+async def _planning(
+    cmd: Command, payload: dict[str, Any], name: str
+) -> tuple[dict[str, Any] | None, str]:
+    return await _call(
+        cmd,
+        str(cmd.settings.get("planning_agent") or "planning_agent"),
+        payload,
+        f"{name}-{cmd.run_id}",
+        int(cmd.settings.get("planning_timeout_minutes") or 15),
+        str(cmd.settings.get("planning_queue") or ""),
+    )
+
+
+async def _story_facts(cmd: Command, story: dict[str, Any]) -> dict[str, Any] | None:
+    """Planning's verdict on the story against its current TDD: same, reworded,
+    changed, unsure or new. None when memory is off or Planning cannot say — the
+    TDD is then written as before, never skipped."""
+    if not _memory(cmd):
+        return None
+    text = await _tool(cmd, "story_text", cmd.issue_key, list(story.get("subtask_keys") or []))
+    if not text.get("ok") or not text.get("text"):
+        logger.warning(f"run {cmd.run_id}: no story text for the facts check: {text.get('error')}")
+        return None
+    out, problem = await _planning(
+        cmd,
+        {
+            "mode": "facts",
+            "issue_key": cmd.issue_key,
+            "story_text": text["text"],
+            "run_id": cmd.run_id,
+        },
+        "tdd-facts",
+    )
+    if out is None or out.get("status") != "success" or not out.get("verdict"):
+        logger.warning(f"run {cmd.run_id}: the facts check failed: {problem or out}")
+        return None
+    return {**out, "story_text": text["text"], "story_text_hash": text.get("hash", "")}
+
+
+_KEPT_BECAUSE = {
+    memory.SAME: "has not changed since its TDD was written",
+    memory.REWORDED: (
+        "was reworded, but its requirement is the same: Planning compared its facts, and "
+        "every rule, limit and acceptance criterion still means the same"
+    ),
+    memory.UNSURE: (
+        "changed in wording, and Planning could not be sure that the meaning changed, "
+        "so the TDD was kept"
+    ),
+}
+
+
+async def _kept_tdd(
+    cmd: Command, story: dict[str, Any], facts: dict[str, Any]
+) -> CommandResult | None:
+    """The current TDD, when Planning found the requirement unchanged. None when
+    the story has no readable TDD (it is written then)."""
+    known = story.get("tdd") or {}
+    if not known.get("page_id"):
+        return None
+    page = await _tool(cmd, "read_tdd", str(known["page_id"]))
+    if not page.get("ok"):
+        return None
+    # The next identical request is answered at once, without asking Planning.
+    await _tool(cmd, "remember_fingerprint", cmd.issue_key, cmd.fingerprint)
+    verdict = str(facts.get("verdict"))
+    version = known.get("tdd_version") or known.get("version") or ""
+    title = known.get("title") or "Technical Design Document"
+    sections: list[tuple[str, object]] = [
+        (
+            "What happened",
+            f"{cmd.issue_key} {_KEPT_BECAUSE.get(verdict, _KEPT_BECAUSE[memory.SAME])}. "
+            f"This is the same design ({version}): [{title}]({known.get('url')}). "
+            "Nothing was regenerated.",
+        ),
+        ("Why", str(facts.get("reason") or "")),
+    ]
+    if verdict == memory.UNSURE:
+        sections.append(
+            (
+                "If the new wording was meant to change the requirement",
+                f'Comment "@{cmd.keyword} update the TDD: <what changed>" — the change is '
+                "checked and applied when it is valid.",
+            )
+        )
+    sections.append(
+        (
+            "To change it",
+            [
+                "Change a rule, limit or acceptance criterion in the story, then ask again; or",
+                f'on the TDD page: "@{cmd.keyword} why not <alternative>?" — the design is '
+                "revised when the alternative is better",
+            ],
+        )
+    )
+    return CommandResult(
+        reply(f"{title} — unchanged", *sections), [PLANNING], links={"tdd": str(known.get("url"))}
+    )
+
+
+async def _remember(
+    cmd: Command,
+    story: dict[str, Any],
+    page: dict[str, Any],
+    document: dict[str, Any],
+    facts: dict[str, Any] | None = None,
+    new_decisions: list[dict[str, Any]] | None = None,
+    supersedes: list[str] | None = None,
+    source: str = "",
+) -> None:
+    """Tell Planning a TDD version was published: its facts and the decisions in
+    it. Best effort — the TDD is published either way; a miss is logged."""
+    if not _memory(cmd):
+        return
+    payload: dict[str, Any] = {
+        "mode": "record",
+        "issue_key": cmd.issue_key,
+        "project_key": str(story.get("project_key") or cmd.issue_key.split("-")[0]),
+        "tdd_version": str(page.get("tdd_version") or page.get("version") or ""),
+        "page_id": str(page.get("page_id") or ""),
+        "decisions": [*(document.get("decisions") or []), *(new_decisions or [])],
+        "superseded": list(supersedes or []),
+        "source": source or str(page.get("url") or ""),
+        "run_id": cmd.run_id,
+    }
+    if facts:
+        payload |= {
+            "facts": facts.get("facts") or [],
+            "facts_hash": str(facts.get("facts_hash") or ""),
+            "story_text_hash": str(facts.get("story_text_hash") or ""),
+            "story_text": str(facts.get("story_text") or ""),
+        }
+    out, problem = await _planning(cmd, payload, "tdd-record")
+    if out is None or out.get("status") != "success":
+        logger.warning(f"run {cmd.run_id}: Planning did not record the TDD: {problem or out}")
+
+
+# --- explain why / why not / update the TDD ------------------------------------------
 
 
 async def design_question(cmd: Command) -> CommandResult:
@@ -367,22 +534,29 @@ async def design_question(cmd: Command) -> CommandResult:
             reply("No TDD to discuss yet", ("What happened", page.get("error", "")))
         )
     question = strip_mention(cmd.text, cmd.keyword)
+    kind = design_kind(cmd.text, cmd.keyword) if _memory(cmd) else ""
+    return await _discuss(cmd, page, question, kind)
+
+
+async def _discuss(cmd: Command, page: dict[str, Any], request: str, kind: str) -> CommandResult:
+    """Planning answers, and checks a proposed change before it is applied.
+
+    question → an answer only; proposal / update → applied only when Planning
+    finds it valid (the story's facts, the code, the decisions in force, not
+    already in the TDD); update_override → a person insists, applied as asked.
+    """
     await cmd.say(_working("The Planning agent is looking at the design and the code…", ""))
-    out, problem = await _call(
-        cmd,
-        str(cmd.settings.get("planning_agent") or "planning_agent"),
-        {
-            "mode": "discuss",
-            "question": question,
-            "tdd_text": page["text"],
-            "discussion": page.get("discussion") or [],
-            "issue_key": cmd.issue_key,
-            "run_id": cmd.run_id,
-        },
-        f"design-{cmd.run_id}",
-        int(cmd.settings.get("planning_timeout_minutes") or 15),
-        str(cmd.settings.get("planning_queue") or ""),
-    )
+    payload: dict[str, Any] = {
+        "mode": "discuss",
+        "question": request,
+        "tdd_text": page["text"],
+        "discussion": page.get("discussion") or [],
+        "issue_key": cmd.issue_key,
+        "run_id": cmd.run_id,
+    }
+    if kind:
+        payload["kind"] = kind
+    out, problem = await _planning(cmd, payload, "design")
     if out is None or out.get("status") != "success":
         return CommandResult(
             reply(
@@ -390,38 +564,86 @@ async def design_question(cmd: Command) -> CommandResult:
                 ("Problems", [problem or rules.planning_problem(out)]),
             )
         )
-    sections: list[tuple[str, object]] = [("Answer", str(out.get("answer") or ""))]
-    if not out.get("change_recommended"):
-        sections.append(("The design", "Kept as it is: the current approach is the better one."))
-        return CommandResult(reply(f"About the design — {question[:80]}", *sections), [PLANNING])
+    verdict = memory.verdict_of(out)
+    answer = str(out.get("answer") or "")
+    refused = memory.refused_lines(out)
+    sections: list[tuple[str, object]] = [("Answer", answer)]
+    topic = request[:70]
 
-    # The architect agrees the alternative is better: the design is revised now
-    # (2026-10-23), instead of waiting for a separate "update the TDD".
-    change = str(out.get("proposed_change") or "").strip() or str(out.get("answer") or "")
-    revised = await update_tdd(cmd, agreed=f"{question} — agreed change: {change}")
+    if verdict == memory.ANSWER_ONLY:
+        if kind != "question":
+            sections.append(
+                ("The design", "Kept as it is: the current approach is the better one.")
+            )
+        return CommandResult(reply(f"About the design — {topic}", *sections), [PLANNING])
+    if verdict == memory.ALREADY_PRESENT:
+        sections.append(("The design", "Already in the TDD, so no new version was written."))
+        return CommandResult(reply(f"Already in the design — {topic}", *sections), [PLANNING])
+    if verdict == memory.REFUSE:
+        sections.append(("Not applied", refused or ["See the answer for why."]))
+        sections.append(
+            (
+                "If you still want it",
+                f'Comment "@{cmd.keyword} update the TDD anyway: <the change>" — it is applied '
+                "as asked and recorded as your decision.",
+            )
+        )
+        return CommandResult(reply(f"Not changed — {topic}", *sections), [PLANNING])
+
+    # apply / partial: the agreed part is applied now.
+    changes = memory.to_apply(out) or [answer]
+    agreed = f"{request} — agreed change: " + "; ".join(changes)
+    revised = await _revise_and_publish(
+        cmd,
+        agreed=agreed,
+        new_decisions=list(out.get("new_decisions") or []),
+        supersedes=[str(s) for s in out.get("supersedes") or []],
+    )
     url = revised.links.get("tdd")
     if url:
-        sections.append(("The design was revised", f"{change} New version: {url}"))
-        headline = f"Design revised — {question[:70]}"
+        sections.append(("The design was revised", [*changes, f"New version: {url}"]))
+        headline = f"Design revised — {topic}"
     else:
         sections.append(
             (
                 "Agreed change, not applied yet",
-                [change, f'{_headline(revised)}. Reply "@{cmd.keyword} update the TDD" to retry.'],
+                [
+                    *changes,
+                    f'{_headline(revised)}. Reply "@{cmd.keyword} update the TDD" to retry.',
+                ],
             )
         )
-        headline = f"About the design — {question[:70]}"
+        headline = f"About the design — {topic}"
+    if refused:
+        sections.append(("Not applied", refused))
     return CommandResult(reply(headline, *sections), [PLANNING], links=revised.links)
-
-
-# --- update the TDD -------------------------------------------------------------------
 
 
 async def update_tdd(
     cmd: Command, reasons: list[str] | None = None, agreed: str = ""
 ) -> CommandResult:
-    """The design revised: with the page's discussion, Coding's ``reasons``, or a
-    change the architect ``agreed`` to in answer to a question."""
+    """The design revised: with Coding's ``reasons`` or an ``agreed`` change as
+    before; a person's "update the TDD: X" is checked first (memory on)."""
+    if reasons or agreed or not _memory(cmd):
+        return await _revise_and_publish(cmd, reasons, agreed)
+    page = await _the_page(cmd)
+    if not page.get("ok"):
+        return CommandResult(
+            reply("No TDD to update yet", ("What happened", page.get("error", "")))
+        )
+    kind, change = parse_update(cmd.text, cmd.keyword)
+    return await _discuss(cmd, page, change, kind)
+
+
+async def _revise_and_publish(
+    cmd: Command,
+    reasons: list[str] | None = None,
+    agreed: str = "",
+    new_decisions: list[dict[str, Any]] | None = None,
+    supersedes: list[str] | None = None,
+) -> CommandResult:
+    """Revise the TDD (the discussion, Coding's ``reasons`` or an ``agreed``
+    change), publish it as a new version, and tell Planning's memory."""
     page = await _the_page(cmd)
     if not page.get("ok"):
         return CommandResult(
@@ -445,6 +667,9 @@ async def update_tdd(
             ),
             [PLANNING],
         )
+    await _remember(
+        cmd, story, published, document, None, new_decisions, supersedes, published.get("url", "")
+    )
     return CommandResult(
         reply(
             f"TDD updated — {published.get('tdd_version') or published.get('version')}",
@@ -738,6 +963,8 @@ async def _plan(cmd: Command, issue_text: str, attempt: int) -> tuple[dict[str, 
             "repos": cmd.settings.get("repos") or "",
             "return_document": True,
             "issue_key": cmd.issue_key,
+            # Planning loads the story's and the project's decisions in force.
+            "project_key": cmd.issue_key.split("-")[0],
             "run_id": cmd.run_id,
         },
         f"tdd-plan-{cmd.run_id}-{attempt}",

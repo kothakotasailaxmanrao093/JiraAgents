@@ -119,13 +119,15 @@ CATALOG: tuple[AgentSpec, ...] = (
         # delegated path forces draft-only. Being wrong costs one comment.
         confidence=0.60,
         writes_to_jira=False,
-        timeout_minutes=4,  # see the note on the BUILD entry above
+        # Above the Review agent's own budget: its AI step alone may take 5 minutes
+        # (2026-10-26). See also the note on the BUILD entry above.
+        timeout_minutes=8,
         forced_payload={"mode": "delegated", "post_to_jira": False},
     ),
-    # A bug is investigated, never broken down (2026-10-22): the Review agent
-    # in bug mode reads the ticket, its files and the organisation's code
-    # (read-only) and reports root cause, affected files and a proposed fix.
-    # It creates nothing and changes no code.
+    # A bug is investigated, never broken down (2026-10-22). Since 2026-10-26
+    # the Review agent judges the REPORT only (steps, actual, expected, trigger);
+    # the router then asks Planning for the cause in the code it already holds
+    # (router_flow._investigate_code). Nothing is created; no code is changed.
     AgentSpec(
         agent_name="JiraRequirementReview",
         display_name="Bug Investigation",
@@ -133,8 +135,8 @@ CATALOG: tuple[AgentSpec, ...] = (
         verbs=("investigate", "debug", "root cause", "find the root cause", "find the cause"),
         confidence=0.60,
         writes_to_jira=False,
-        # Code search and reading source files add to a review's time.
-        timeout_minutes=6,
+        # Review's part only; Planning's code step has its own budget.
+        timeout_minutes=8,
         forced_payload={"mode": "delegated", "post_to_jira": False, "review_kind": "bug"},
     ),
 )

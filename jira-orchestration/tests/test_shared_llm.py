@@ -18,14 +18,28 @@ from shared import llm
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
-    for name in ("OPENAI_API_KEY", "AETHERION_LOCAL_RUN", "LOCAL_OPENAI_MODEL"):
+    for name in (
+        "OPENAI_API_KEY",
+        "AETHERION_LOCAL_RUN",
+        "LOCAL_OPENAI_MODEL",
+        "LOCAL_OPENAI_CHAT_URL",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
 @pytest.mark.parametrize(
     "env,expected",
     [
-        ({"AETHERION_LOCAL_RUN": "1", "OPENAI_API_KEY": "sk-test"}, True),
+        (
+            {
+                "AETHERION_LOCAL_RUN": "1",
+                "OPENAI_API_KEY": "sk-test",
+                "LOCAL_OPENAI_CHAT_URL": "https://openai.example/v1/chat/completions",
+            },
+            True,
+        ),
+        # The address comes only from the launcher (2026-10-26): without it, no OpenAI.
+        ({"AETHERION_LOCAL_RUN": "1", "OPENAI_API_KEY": "sk-test"}, False),
         # On Aetherion the launcher's flag is never set: a key the platform may
         # have in its environment must not switch a published agent off the gateway.
         ({"OPENAI_API_KEY": "sk-test"}, False),
@@ -83,6 +97,7 @@ def test_another_providers_model_is_answered_by_the_local_default(monkeypatch):
 
 async def test_the_reply_text_comes_back(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("LOCAL_OPENAI_CHAT_URL", "https://openai.example/v1/chat/completions")
     seen = {}
 
     def answer(request: httpx.Request) -> httpx.Response:
@@ -103,6 +118,7 @@ async def test_the_reply_text_comes_back(monkeypatch):
 
 async def test_an_http_error_is_raised_like_the_gateways(monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "sk-bad")
+    monkeypatch.setenv("LOCAL_OPENAI_CHAT_URL", "https://openai.example/v1/chat/completions")
     transport = httpx.MockTransport(lambda r: httpx.Response(401, json={"error": "bad key"}))
     with pytest.raises(httpx.HTTPStatusError):
         await llm.openai_chat(transport=transport, provider="openai", model="gpt-4o", prompt="Q")

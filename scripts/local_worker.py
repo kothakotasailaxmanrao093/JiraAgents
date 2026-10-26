@@ -54,6 +54,8 @@ async def main(agent: str) -> None:
     # The only switch for model calls to go to OpenAI (shared/llm.py): set here,
     # never in an agent's .env, so a published agent always uses the gateway.
     os.environ["AETHERION_LOCAL_RUN"] = "1"
+    # The address too: published code may not name a model provider's address.
+    os.environ.setdefault("LOCAL_OPENAI_CHAT_URL", "https://api.openai.com/v1/chat/completions")
     # Any agent started from here — a child, a health-check probe — goes to
     # that agent's local worker; tools stay on this worker's own queue.
     agent_map = local_agent_map()
@@ -65,6 +67,12 @@ async def main(agent: str) -> None:
 
     if install_local_vision():
         print(f"{agent}: images are read with OpenAI vision on this laptop", flush=True)
+    # Planning and Coding call OpenAI on a laptop; their published code cannot
+    # build that client itself (the platform requires the gateway).
+    from local_openai import install as install_local_openai
+
+    if install_local_openai(agent):
+        print(f"{agent}: model calls go to OpenAI on this laptop", flush=True)
     # Files picked on the local form are kept on this laptop (local_files.py).
     from local_files import install_storage
 

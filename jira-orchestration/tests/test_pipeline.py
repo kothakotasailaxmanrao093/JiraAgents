@@ -197,8 +197,8 @@ async def test_the_ticket_is_held_for_the_whole_chain() -> None:
     tools = tools_for()
     await run(tools, Agents())
     minutes = tools.args("claim_ticket")[4]
-    # build 7 + review 4 + plan 15 + 2 coding runs (40) + one re-plan (15)
-    assert minutes == 81
+    # build 7 + review 8 + plan 15 + 2 coding runs (40) + one re-plan (15)
+    assert minutes == 85
 
 
 # --- Coding cannot implement the design: back to Planning -----------------------------

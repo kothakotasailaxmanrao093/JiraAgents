@@ -5,7 +5,11 @@
     on the TDD page        @Aetherion explain why …   the Planning agent answers
                            @Aetherion why not …       … weighs it; revises the TDD when
                                                       the alternative is better
-                           @Aetherion update the TDD  the Planning agent revises the page
+                           @Aetherion update the TDD: X     X is checked first (the story, the
+                                                      code, the decisions in force); applied
+                                                      only when it is valid
+                           @Aetherion update the TDD anyway: X  applied as asked (a person's
+                                                      override, recorded with the change)
                            @Aetherion code            the branches are confirmed, then Coding
 
 Pure — no network, no environment, no clock. It runs inside the workflow; the
@@ -236,7 +240,8 @@ def tdd_page_header(
         "written by the Planning agent. Earlier versions are in the page history.",
         f"Discuss it in the comments below — <strong>{at} explain why …</strong>, "
         f"<strong>{at} why not …</strong>; change it with "
-        f"<strong>{at} update the TDD</strong>; implement it with "
+        f"<strong>{at} update the TDD: …</strong> (checked first; "
+        f"<strong>{at} update the TDD anyway: …</strong> applies it as asked); implement it with "
         f"<strong>{at} code</strong>.",
     ]
     links = [
@@ -255,3 +260,45 @@ def tdd_page_header(
         '<ac:structured-macro ac:name="info"><ac:rich-text-body>'
         f"{body}</ac:rich-text-body></ac:structured-macro>"
     )
+
+
+# --- what a design comment asks for (2026-10-26) --------------------------------------
+
+# "why not X?" proposes another design; "explain why" asks about the current one.
+_PROPOSAL_OPENINGS = (
+    "why not",
+    "why can't",
+    "why cant",
+    "why can we not",
+    "why didn't",
+    "what about",
+    "could we use",
+    "can we use",
+    "should we use",
+)
+_UPDATE_VERB = re.compile(
+    r"^(update the tdd|update tdd|revise the tdd|update the design)\b[\s,]*", re.IGNORECASE
+)
+_ANYWAY = re.compile(r"^anyway\b[\s,]*", re.IGNORECASE)
+_LEAD = re.compile(r"^[:\-–—]+\s*|^(with|to|so that)\s+", re.IGNORECASE)
+DISCUSSION_AGREED = "Apply the changes agreed in the discussion on the design page."
+
+
+def design_kind(body: str, keyword: str = "Aetherion") -> str:
+    """ "proposal" for another design ("why not X?"), else "question"."""
+    text = strip_mention(body, keyword).lower()
+    return "proposal" if text.startswith(_PROPOSAL_OPENINGS) else "question"
+
+
+def parse_update(body: str, keyword: str = "Aetherion") -> tuple[str, str]:
+    """(kind, the change asked for) for an "update the TDD" comment.
+
+    "update the TDD anyway: X" is a person insisting on X: ``update_override``.
+    A bare "update the TDD" asks to apply what the page's discussion agreed.
+    """
+    text = _UPDATE_VERB.sub("", strip_mention(body, keyword).strip(), count=1)
+    kind = "update"
+    if _ANYWAY.match(text):
+        kind, text = "update_override", _ANYWAY.sub("", text, count=1)
+    text = _LEAD.sub("", text.strip(), count=1).strip()
+    return kind, text or DISCUSSION_AGREED

@@ -414,6 +414,19 @@ async def _orchestrate(
             fingerprint,
             start_to_close_timeout=_POST_TIMEOUT,
         )
+    elif intent == "BUG" and result is not None:
+        # A bug's investigation is that ticket's review: the next "review" or
+        # "create TDD" on the unchanged ticket reuses it instead of re-running.
+        await _safe(
+            execute,
+            "finish_ticket",
+            issue_key,
+            "REVIEW",
+            run_id,
+            result.to_dict(),
+            fingerprint,
+            start_to_close_timeout=_POST_TIMEOUT,
+        )
     posted = await _finish_reply(execute, gate, reply_id, blocks, run_id, issue_key, comment_id)
     return posted, ran, result, after_build
 
@@ -959,13 +972,88 @@ async def _dispatch_and_compose(
             start_to_close_timeout=_POST_TIMEOUT,
         )
         notification = _outcome_email_line(emailed)
+    ran = [display_name_for(result.produced_by) or spec.display_name]
+    if spec.intent == "BUG":
+        # Review judged the report; the code is Planning's (2026-10-26).
+        result, planned = await _investigate_code(
+            result, gate, dispatch, execute, run_id, issue_key
+        )
+        if planned:
+            ran.append("Planning")
     blocks = compose(
         result,
         routed_to=routed_to_ran,
-        ran=[display_name_for(result.produced_by) or spec.display_name],
+        ran=ran,
         notification=notification,
     )
-    return blocks, [spec.display_name], result
+    return blocks, [spec.display_name, *ran[1:]], result
+
+
+# What Planning's code investigation adds to a bug report's review.
+_CODE_FINDINGS = (
+    "root_cause",
+    "root_cause_confidence",
+    "evidence",
+    "affected_files",
+    "proposed_fix",
+    "code_note",
+)
+
+
+async def _investigate_code(
+    result: AgentResult,
+    gate: dict[str, Any],
+    dispatch: Dispatch,
+    execute: Execute,
+    run_id: str,
+    issue_key: str,
+) -> tuple[AgentResult, bool]:
+    """Planning finds the bug's cause in the code it already holds (2026-10-26).
+
+    Requirement Review reads the report only — whether it can be reproduced
+    and fixed. Planning searches its code graph for the cause, the files and a
+    fix, and that is merged into the same reply. Planning failing never loses
+    Review's part: the reply says the code could not be investigated.
+    """
+    commands = gate.get("commands") or {}
+    investigation = dict(result.investigation or {})
+    report = await _safe(execute, "story_text", issue_key, [], start_to_close_timeout=_POST_TIMEOUT)
+    payload = {
+        "mode": "investigate",
+        "issue_key": issue_key,
+        "report_text": str(report.get("text") or result.summary or ""),
+        "repos": str(commands.get("repos") or ""),
+        "run_id": run_id,
+    }
+    options: dict[str, Any] = {
+        "workflow_id": f"investigate-{run_id}",
+        "execution_timeout": timedelta(minutes=int(commands.get("planning_timeout_minutes") or 15)),
+        "retry_policy": RetryPolicy(maximum_attempts=1),
+    }
+    if commands.get("planning_queue"):
+        options["task_queue"] = commands["planning_queue"]
+    problem = ""
+    found: dict[str, Any] = {}
+    try:
+        out = await dispatch(
+            str(commands.get("planning_agent") or "planning_agent"), payload, **options
+        )
+        out = out[0] if isinstance(out, list) and out else out
+        if isinstance(out, dict) and out.get("status") == "success":
+            found = dict(out.get("investigation") or {})
+        else:
+            problem = str((out or {}).get("message") or (out or {}).get("error") or "no answer")
+    except Exception as exc:  # noqa: BLE001 — Review's part is still the reply
+        problem = f"{type(exc).__name__}: {str(exc)[:300]}"
+    if found:
+        investigation.update({k: found[k] for k in _CODE_FINDINGS if k in found})
+        if investigation.get("root_cause"):
+            result.headline = "Bug investigation — likely cause found"
+    else:
+        logger.warning(f"run {run_id}: Planning could not investigate {issue_key}: {problem}")
+        investigation["code_note"] = f"The code could not be investigated: {problem[:200]}"
+    result.investigation = investigation
+    return result, bool(found)
 
 
 # Outcome -> the email kind, by the names ORCH_NOTIFY_ON and TASK_NOTIFY_ON use.

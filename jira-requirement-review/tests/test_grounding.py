@@ -243,6 +243,7 @@ async def test_on_a_laptop_the_review_asks_openai(monkeypatch) -> None:
     monkeypatch.setattr(gateway, "ai_gateway", _NoGateway())
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("AETHERION_LOCAL_RUN", "1")
+    monkeypatch.setenv("LOCAL_OPENAI_CHAT_URL", "https://openai.example/v1/chat/completions")
     monkeypatch.setattr(llm, "openai_chat", openai_chat)
     fn = getattr(tool.analyze_requirement, "__wrapped__", tool.analyze_requirement)
     out = await fn(human, "BGV-12", "Address check")

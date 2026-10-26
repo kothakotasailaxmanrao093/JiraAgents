@@ -118,6 +118,8 @@ async def test_on_a_laptop_the_classifier_asks_openai(monkeypatch, fake_gateway)
     from shared import llm
 
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    monkeypatch.setenv("LOCAL_OPENAI_CHAT_URL", "https://openai.example/v1/chat/completions")
     monkeypatch.setenv("AETHERION_LOCAL_RUN", "1")
     asked: list[dict[str, Any]] = []
 

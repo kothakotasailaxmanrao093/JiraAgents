@@ -19,7 +19,6 @@ this agent never posts to Jira unless explicitly asked to. Email delivery
 from __future__ import annotations
 
 import logging
-import re
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 from typing import Any
@@ -66,32 +65,24 @@ PREVIOUS_REVIEW_LABEL = "Previous review's open questions"
 # Card types investigated as bugs rather than reviewed as requirements.
 BUG_TYPES = frozenset({"bug", "defect"})
 
-# What the code search reads the report from: what the person wrote, never the
-# bot's own earlier replies or the previous review.
-_REPORT_KINDS = ("trigger_comment", "requirement", "target_comments", "attachment")
-# An @mention of the agent, and a line of one of its own replies.
-_MENTION = re.compile(r"@\w+")
-_AGENT_LINE = re.compile(r"AetherionAgent\s*·|automated reply", re.IGNORECASE)
-_REPORT_CHARS = 20_000
 
-
-def report_text(documents: list[dict[str, Any]]) -> str:
-    """The bug report's own words, for picking code search terms.
-
-    Not the agent's replies or the @mentions asking it (2026-10-23): on BTS-31
-    the search looked for "aetherionagent", "aetherion" and "agent".
-    """
-    parts = []
-    for d in documents:
-        if d.get("kind") not in _REPORT_KINDS:
-            continue
-        lines = [
-            _MENTION.sub(" ", line)
-            for line in str(d.get("text") or "").splitlines()
-            if not _AGENT_LINE.search(line)
-        ]
-        parts.append("\n".join(lines))
-    return "\n".join(parts)[:_REPORT_CHARS]
+def bug_report_markdown(investigation: dict[str, Any]) -> str:
+    """A bug review's sections as markdown, for the direct path's draft."""
+    lines = ["### Bug report", ""]
+    if investigation.get("actual"):
+        lines.append(f"**Actual:** {investigation['actual']}")
+    if investigation.get("expected"):
+        lines.append(f"**Expected:** {investigation['expected']}")
+    if investigation.get("suspected_cause_from_report"):
+        lines.append(
+            f"**Cause stated in the report:** {investigation['suspected_cause_from_report']}"
+        )
+    missing = investigation.get("missing_information") or []
+    if missing:
+        lines += ["", "**Information still needed:**", *[f"- {m}" for m in missing]]
+    else:
+        lines += ["", "**Information still needed:** none — the report is enough to investigate."]
+    return "\n".join(lines) + "\n\n"
 
 
 def previous_review_document(questions: list[str]) -> dict[str, Any]:
@@ -207,20 +198,11 @@ async def _review_one_issue(
     if previous_questions:
         documents.append(previous_review_document(previous_questions))
 
-    # A bug is investigated against the code (2026-10-22): asked for by the
-    # router (review_kind="bug"), or because the card itself is a Bug.
+    # A bug's REPORT is reviewed (2026-10-26): asked for by the router
+    # (review_kind="bug"), or because the card itself is a Bug. Review never
+    # reads code; the Planning agent investigates the code separately.
     target_type = str((ctx.get("target_bundle") or {}).get("issue_type") or "")
     is_bug = review_kind == "bug" or target_type.strip().lower() in BUG_TYPES
-    code: dict[str, Any] = {}
-    if is_bug and not document_keys:
-        code = await execute(
-            "search_code",
-            issue_key,
-            ctx.get("issue_summary") or "",
-            report_text(documents),
-            start_to_close_timeout=timedelta(seconds=90),
-        )
-        documents.extend(code.get("documents") or [])
     analysis = await execute(
         "analyze_requirement",
         documents,
@@ -255,25 +237,10 @@ async def _review_one_issue(
     by_category = rendered.get("by_category", {})
     warnings = list(ctx.get("warnings", []))
     investigation = dict(analysis.get("investigation") or {})
-    if is_bug:
-        note = str(code.get("note") or "").strip()
-        searched = str(code.get("searched") or "").strip()
-        if note:
-            investigation["code_note"] = note
-        elif searched and not investigation.get("affected_files"):
-            # Files were read, but none of them is where this bug lives.
-            investigation["code_note"] = (
-                f"No file read from the repositories this agent can access is about this bug "
-                f"(searched for: {searched}). The cause above comes from the report."
-            )
-        elif searched:
-            investigation["code_note"] = f"Code searched for: {searched}."
-        dropped = investigation.pop("files_dropped", 0)
-        if dropped:
-            warnings.append(
-                f"{dropped} file(s) the model named were not among the files read, "
-                "so they were left out."
-            )
+    if is_bug and investigation:
+        # The direct path reports through the draft, so a bug review's own
+        # sections go at its top (2026-10-26).
+        draft = bug_report_markdown(investigation) + draft
 
     result: dict[str, Any] = {
         "issue_key": issue_key,
@@ -289,7 +256,7 @@ async def _review_one_issue(
         "warnings": warnings,
         # Carried so the delegated path can account for what was read and what
         # was not. Unused by the direct path, which reports through the draft.
-        "documents": [*(ctx.get("documents") or []), *(code.get("documents") or [])],
+        "documents": list(ctx.get("documents") or []),
         "target_bundle": ctx.get("target_bundle") or {},
         "counts": ctx.get("counts") or {},
     }

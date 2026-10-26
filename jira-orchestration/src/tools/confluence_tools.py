@@ -310,6 +310,29 @@ async def publish_tdd(
     }
 
 
+@tool(name="remember_fingerprint")
+async def remember_fingerprint(issue_key: str, fingerprint: str) -> dict[str, Any]:
+    """Record that the story as it is now still has its current TDD (2026-10-26):
+    Planning found it reworded, not changed, so the next request is instant."""
+    issue_key = issue_key.strip().upper()
+    if not fingerprint or settings.read_only():
+        return {"saved": False}
+    try:
+        async with _client() as jira:
+            known = await _issue_property(jira, issue_key, settings.TDD_PROPERTY)
+            if not known.get("page_id"):
+                return {"saved": False}
+            known["fingerprint"] = fingerprint
+            put = await jira.put(
+                f"/rest/api/3/issue/{issue_key}/properties/{settings.TDD_PROPERTY}", json=known
+            )
+            put.raise_for_status()
+    except httpx.HTTPError as exc:
+        logger.warning(f"Could not record the fingerprint on {issue_key}: {exc}")
+        return {"saved": False, "error": str(exc)}
+    return {"saved": True}
+
+
 @tool(name="read_tdd")
 async def read_tdd(page_id: str) -> dict[str, Any]:
     """The TDD page as it stands: its text, its story, the discussion and the code plan."""
