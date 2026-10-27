@@ -72,6 +72,7 @@ _INGRESS_TIMEOUT = timedelta(minutes=2)
 _NOT_ROUTED = "Not routed — the request could not be read, so it was never classified."
 _CLASSIFY_TIMEOUT = timedelta(minutes=2)
 _POST_TIMEOUT = timedelta(minutes=2)
+_FILES_TIMEOUT = timedelta(minutes=10)  # reading a report's files and recordings
 # A queued request checks whether the job ahead on its ticket has finished.
 _POLL_SECONDS = 10
 # sleep(seconds) — asyncio.sleep in the workflow, where it is a durable timer.
@@ -1017,7 +1018,10 @@ async def _investigate_code(
     """
     commands = gate.get("commands") or {}
     investigation = dict(result.investigation or {})
-    report = await _safe(execute, "story_text", issue_key, [], start_to_close_timeout=_POST_TIMEOUT)
+    # The report with its files, screenshots and recordings read (2026-10-27).
+    report = await _safe(
+        execute, "story_text", issue_key, [], True, start_to_close_timeout=_FILES_TIMEOUT
+    )
     payload = {
         "mode": "investigate",
         "issue_key": issue_key,

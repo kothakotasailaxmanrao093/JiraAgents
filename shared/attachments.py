@@ -112,6 +112,20 @@ def suffix(filename: str) -> str:
     return name[dot:] if dot > 0 else ""
 
 
+def media_kind(filename: str) -> str:
+    """ "image", "video" or "audio" for a file a model has to look at or listen
+    to; "" for one whose text is parsed. A model's reading of a picture differs a
+    little run to run, a parsed PDF's text does not (2026-10-27)."""
+    ext = suffix(filename)
+    if ext in _IMAGE_LIKE:
+        return "image"
+    if ext in _VIDEO_LIKE:
+        return "video"
+    if ext in _AUDIO_LIKE:
+        return "audio"
+    return ""
+
+
 def _extract_json(data: bytes) -> str:
     """Readable text from a JSON or JSON-lines export.
 
@@ -325,11 +339,16 @@ async def extract(
     if not text:
         # An image that comes back empty was usually NOT read (the vision model
         # was unavailable), not an image without text — say both (2026-10-06).
-        if ext in _AUDIO_LIKE | _VIDEO_LIKE:
+        if ext in _AUDIO_LIKE:
             info.note = (
                 "Voice recording: speech-to-text is not available on the platform yet, "
                 "so the spoken audio was not read. Please attach the meeting transcript "
                 "(.vtt or .docx) as well."
+            )
+        elif ext in _VIDEO_LIKE:
+            info.note = (
+                "No screen of this video could be read — image reading was unavailable "
+                "for this run, or the video shows no readable content."
             )
         else:
             info.note = (

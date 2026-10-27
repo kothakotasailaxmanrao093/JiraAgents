@@ -1,6 +1,6 @@
 [project]
 name = "jira-orchestration"
-version = "0.1.45"
+version = "0.1.46"
 description = "Jira Orchestration — one ingress for Jira comment webhooks: filters, de-duplicates, classifies, dispatches to exactly one agent, and posts the single reply"
 authors = [{ name = "Kothakota Sai Laxman Rao", email = "kothakota.sailaxmanrao@calfus.com" }]
 readme = "README.md"
@@ -21,6 +21,11 @@ dependencies = [
     "httpx>=0.28,<1.0",
     "pydantic>=2.13,<3.0",
     "python-dotenv>=1.2,<2.0",
+    # The story's files, read for Planning (2026-10-27), as Requirement Review
+    # reads them: Word documents, and a static ffmpeg for videos and recordings
+    # (the platform pod has no system ffmpeg).
+    "python-docx>=1.2.0",
+    "imageio-ffmpeg>=0.6,<1.0",
 ]
 
 [dependency-groups]

@@ -1,6 +1,6 @@
 {
     "name": "JiraOrchestration",
-    "version": "0.1.45",
+    "version": "0.1.46",
     "description": "One ingress for Jira comment webhooks, and a form for a request with no ticket. A comment that mentions the agent is classified and dispatched (build, review, question) with one reply on the ticket; after a build it can go on to Requirement Review, Planning (a technical design) and Coding (a pull request). A request typed on this form — a description and files — is broken down into a PDF by Task Creation, reviewed, designed and implemented as a pull request without writing anything to Jira.",
     "config": {
         "triggers": [

@@ -7,6 +7,7 @@ told, in ``routing/pipeline.py``. Here: Jira and storage reads and writes.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -16,6 +17,7 @@ from aetherion_sdk import tool
 from common_lib.utils.logger import setup_logger
 
 from routing import memory, pipeline, settings
+from shared import attachments
 from shared.adf import comment_text, to_text
 from shared.keywords import is_agent_comment, mentions_trigger
 from tools.org_repos import with_repos
@@ -45,7 +47,8 @@ async def planning_input(
     proposed: list[str] | None = None,
     review: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """The text Planning designs from: the request, its tickets and the review.
+    """The text Planning designs from: the request, its tickets, the review, the
+    discussion and every file attached to the story (2026-10-27).
 
     Every ticket is read fresh from Jira — the build result carries only keys
     and summaries, and Planning needs the descriptions. A ticket that cannot be
@@ -58,6 +61,7 @@ async def planning_input(
         async with _client() as client:
             root = await _ticket(client, issue_key)
             discussion = await _discussion(client, issue_key)
+            files = await _attachments(client, issue_key, root["summary"], media=True)
             keys = [k for k in ticket_keys if k and k.upper() != issue_key]
             for key in keys[: pipeline.MAX_TICKETS]:
                 try:
@@ -69,8 +73,13 @@ async def planning_input(
     except (httpx.HTTPError, ValueError) as exc:
         logger.error(f"Planning input: could not read {issue_key}: {exc}", exc_info=True)
         return {"issue_text": "", "error": f"Could not read {issue_key}: {exc}"}
-    text = pipeline.planning_text(root, tickets, list(proposed or []), review, discussion)
-    return {"issue_text": text, "tickets": len(tickets), "unread": unread}
+    text = pipeline.planning_text(root, tickets, list(proposed or []), review, discussion, files)
+    return {
+        "issue_text": text,
+        "tickets": len(tickets),
+        "unread": unread,
+        "files": pipeline.files_read(files),
+    }
 
 
 async def _discussion(client: httpx.AsyncClient, issue_key: str) -> list[dict[str, str]]:
@@ -100,13 +109,85 @@ async def _discussion(client: httpx.AsyncClient, issue_key: str) -> list[dict[st
     return out
 
 
+async def _attachments(
+    client: httpx.AsyncClient, issue_key: str, summary: str, media: bool
+) -> list[dict[str, Any]]:
+    """Every file attached to the story, read (2026-10-27): documents, sheets,
+    text, and — with ``media`` — images, videos and recordings, which a model
+    looks at. Oldest first; at most ``pipeline.MAX_FILES``. Each is
+    ``{"id", "filename", "kind", "text", "note"}``: a file that could not be
+    read has no text and says why. Never raises."""
+    try:
+        resp = await client.get(f"/rest/api/3/issue/{issue_key}", params={"fields": "attachment"})
+        resp.raise_for_status()
+        listed = (resp.json().get("fields") or {}).get("attachment") or []
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.warning(f"Planning input: could not list the files on {issue_key}: {exc}")
+        return []
+    listed = sorted(listed, key=lambda a: (str(a.get("created") or ""), str(a.get("id") or "")))
+    files = [
+        {
+            "id": str(a.get("id") or ""),
+            "filename": str(a.get("filename") or "(unnamed file)"),
+            "kind": attachments.media_kind(str(a.get("filename") or "")) or "document",
+            "text": "",
+            "note": "",
+            "url": str(a.get("content") or ""),
+            "mime": str(a.get("mimeType") or ""),
+        }
+        for a in listed
+    ]
+    for extra in files[pipeline.MAX_FILES :]:
+        extra["note"] = f"not read: only the first {pipeline.MAX_FILES} files are read"
+    limits = attachments.default_limits()
+    context = f"{issue_key}: {summary}".strip(": ")
+    gate = asyncio.Semaphore(pipeline.FILES_AT_ONCE)
+
+    async def read(file: dict[str, Any]) -> None:
+        if file["kind"] != "document" and not media:
+            file["note"] = f"{file['kind']}: compared by file, not by content"
+            return
+        if not file["url"]:
+            file["note"] = "no download link"
+            return
+        async with gate:
+            try:
+                got = await client.get(
+                    file["url"], headers={"Accept": "*/*"}, follow_redirects=True
+                )
+                got.raise_for_status()
+            except httpx.HTTPError as exc:
+                file["note"] = f"could not be downloaded: {exc}"
+                return
+            found = await attachments.extract(
+                got.content, file["filename"], file["mime"], limits=limits, context=context
+            )
+        file["text"], file["note"] = found.text, found.note
+
+    tasks = [asyncio.create_task(read(f)) for f in files[: pipeline.MAX_FILES]]
+    if tasks:
+        _, late = await asyncio.wait(tasks, timeout=pipeline.FILES_SECONDS)
+        for task in late:
+            task.cancel()
+    for file in files[: pipeline.MAX_FILES]:
+        if not file["text"] and not file["note"]:
+            file["note"] = f"not read within {pipeline.FILES_SECONDS // 60} minutes"
+        file.pop("url"), file.pop("mime")
+    for file in files[pipeline.MAX_FILES :]:
+        file.pop("url"), file.pop("mime")
+    return files
+
+
 @tool(name="story_text")
-async def story_text(issue_key: str, ticket_keys: list[str]) -> dict[str, Any]:
+async def story_text(issue_key: str, ticket_keys: list[str], media: bool = False) -> dict[str, Any]:
     """The story as a requirement, for Planning's memory (2026-10-26).
 
-    Its summary and description, its sub-tasks, and the comments people wrote
-    about it — never the agent's own replies or the comments asking the agent
-    something, which say nothing about the requirement.
+    Its summary and description, its sub-tasks, the comments people wrote about
+    it — never the agent's own replies or the comments asking the agent
+    something, which say nothing about the requirement — and its attached files
+    (2026-10-27). Documents are compared by their text; images and videos by
+    the file, since a model's reading of them differs run to run. With
+    ``media`` (a bug investigation) the images and videos are read too.
     """
     issue_key = issue_key.strip().upper()
     keyword = settings.trigger_keyword()
@@ -131,6 +212,7 @@ async def story_text(issue_key: str, ticket_keys: list[str]) -> dict[str, Any]:
                     tickets.append(await _ticket(client, key))
                 except httpx.HTTPError as exc:
                     logger.warning(f"Story text: could not read {key}: {exc}")
+            files = await _attachments(client, issue_key, root["summary"], media)
     except (httpx.HTTPError, ValueError) as exc:
         return {"ok": False, "error": f"Could not read {issue_key}: {exc}"}
     comments = []
@@ -145,8 +227,13 @@ async def story_text(issue_key: str, ticket_keys: list[str]) -> dict[str, Any]:
                 comments.append(added)
             continue
         comments.append(text)
-    text = memory.story_text(root, tickets, comments)
-    return {"ok": True, "text": text, "hash": memory.normalised_hash(text)}
+    text = memory.story_text(root, tickets, comments, files)
+    return {
+        "ok": True,
+        "text": text,
+        "hash": memory.normalised_hash(text),
+        "files": pipeline.files_read(files),
+    }
 
 
 @tool(name="attach_tdd")

@@ -35,6 +35,15 @@ STEP_NAMES = {
 
 MAX_TICKETS = 40  # tickets described to Planning; the rest are named only
 MAX_DESCRIPTION = 3000  # characters of each ticket's description
+# The story itself is the requirement: a 5,000-character story lost its last
+# rules and acceptance criteria at 3,000 (2026-10-27).
+MAX_STORY_DESCRIPTION = 12_000
+# Files attached to the story (2026-10-27): documents, sheets, text, images,
+# screen recordings. Each file is already capped by shared.attachments.
+MAX_FILES = 10
+MAX_FILES_CHARS = 40_000  # all files together, in Planning's input
+FILES_AT_ONCE = 3  # downloads and readings at the same time
+FILES_SECONDS = 480  # a slow video is named as not read rather than failing the step
 MAX_POINTS = 12  # review points handed on
 MAX_DISCUSSION = 40  # comments handed on, newest kept
 MAX_DISCUSSION_CHARS = 12_000
@@ -206,8 +215,10 @@ def planning_text(
     proposed: list[str],
     review: dict[str, Any] | None,
     discussion: list[dict[str, str]] | None = None,
+    files: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Planning's ``issue_text``: the request, the tickets and what the review found.
+    """Planning's ``issue_text``: the request, the tickets, what the review found,
+    the discussion, and the files attached to the story with what they contain.
 
     ``root`` and each ticket are ``{"key", "type", "summary", "description"}`` as
     read from Jira; ``proposed`` is the breakdown when nothing was created (a
@@ -216,7 +227,7 @@ def planning_text(
     lines = [
         f"Requirement {root.get('key', '')}: {root.get('summary', '')}".strip(),
         "",
-        _clip(str(root.get("description") or ""), MAX_DESCRIPTION) or "(no description)",
+        _clip(str(root.get("description") or ""), MAX_STORY_DESCRIPTION) or "(no description)",
     ]
     if tickets:
         lines += ["", "Work items created in Jira for it:"]
@@ -247,7 +258,62 @@ def planning_text(
             "requirement; the agent's lines are its earlier questions and replies:",
             *said,
         ]
+    lines += file_lines(list(files or []))
     return "\n".join(lines).strip()
+
+
+def file_lines(files: list[dict[str, Any]]) -> list[str]:
+    """The story's files for Planning: each one's content, in the order attached,
+    within ``MAX_FILES_CHARS``; the files that could not be read, named with why."""
+    read = [f for f in files if str(f.get("text") or "").strip()]
+    unread = [f for f in files if not str(f.get("text") or "").strip()]
+    if not files:
+        return []
+    lines = [
+        "",
+        "Files attached to the story — what they contain is part of the requirement "
+        "(images and videos as a model described them):",
+    ]
+    left = MAX_FILES_CHARS
+    for f in read:
+        text = str(f["text"]).strip()
+        if left <= 0:
+            unread.append({**f, "note": "not included: the files' space was used up"})
+            continue
+        lines += [
+            "",
+            f"=== {f.get('filename')} ({f.get('kind') or 'document'}) ===",
+            _clip(text, left),
+        ]
+        left -= len(text)
+    if unread:
+        lines += ["", "Files not read (design without them, and say so where it matters):"]
+        lines += [f"- {f.get('filename')}: {f.get('note') or 'no content'}" for f in unread]
+    return lines
+
+
+def files_summary(files: list[dict[str, Any]]) -> list[str]:
+    """One line per file for the reply: read, or not read and why."""
+    out = []
+    for f in files:
+        kind = str(f.get("kind") or "document")
+        name = str(f.get("filename") or "")
+        label = name if kind == "document" else f"{name} ({kind})"
+        out.append(f"{label} — read" if f.get("read") else f"{label} — not read: {f.get('note')}")
+    return out
+
+
+def files_read(files: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """What the reply says about the files: name, kind, read or why not."""
+    return [
+        {
+            "filename": str(f.get("filename") or ""),
+            "kind": str(f.get("kind") or "document"),
+            "read": bool(str(f.get("text") or "").strip()),
+            "note": str(f.get("note") or ""),
+        }
+        for f in files
+    ]
 
 
 def replan_text(issue_text: str, coding: dict[str, Any]) -> str:

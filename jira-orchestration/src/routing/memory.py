@@ -31,14 +31,23 @@ ANSWER_ONLY, APPLY, REFUSE, ALREADY_PRESENT, PARTIAL = (
 )
 
 MAX_STORY_CHARS = 30_000
+MAX_FILE_CHARS = 6_000  # of one file's text, in the story the memory compares
 _SPACE = re.compile(r"\s+")
 _PUNCT = re.compile(r"[^\w\s]")
 
 
-def story_text(root: dict[str, Any], tickets: list[dict[str, Any]], comments: list[str]) -> str:
-    """The story as its requirement: summary, description, its sub-tasks, and the
+def story_text(
+    root: dict[str, Any],
+    tickets: list[dict[str, Any]],
+    comments: list[str],
+    files: list[dict[str, Any]] | None = None,
+) -> str:
+    """The story as its requirement: summary, description, its sub-tasks, the
     people's comments that add to it (``comments`` is already filtered: no agent
-    replies, no requests to the agent). No review text: that changes run to run."""
+    replies, no requests to the agent), and its attached files (2026-10-27). No
+    review text: that changes run to run. A document counts by its text; an
+    image or video by its file id, since a model describes it a little
+    differently each time — unless it was read for a bug report (``text``)."""
     lines = [
         f"{root.get('key', '')}: {root.get('summary', '')}".strip(),
         str(root.get("description") or "").strip() or "(no description)",
@@ -50,6 +59,15 @@ def story_text(root: dict[str, Any], tickets: list[dict[str, Any]], comments: li
     if comments:
         lines.append("Comments:")
         lines += [f"- {c.strip()}" for c in comments if c.strip()]
+    if files:
+        lines.append("Attached files:")
+        for f in files:
+            name = f"{f.get('filename')} (file {f.get('id')})"
+            text = str(f.get("text") or "").strip()
+            if text:
+                lines += [f"- {name}:", text[:MAX_FILE_CHARS]]
+            else:
+                lines.append(f"- {name}")
     return "\n".join(lines)[:MAX_STORY_CHARS]
 
 

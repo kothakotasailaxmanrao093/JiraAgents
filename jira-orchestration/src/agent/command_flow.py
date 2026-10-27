@@ -50,6 +50,8 @@ Blocks = list[tuple[str, object]]
 Say = Callable[[Blocks], Awaitable[None]]
 
 _TOOL = timedelta(minutes=2)
+# Steps that read the story's files (2026-10-27): videos are watched by a model.
+_FILES_TOOL = timedelta(minutes=10)
 PLANNING, CODING, REVIEW = "Planning", "Coding", "Requirement Review"
 
 
@@ -221,6 +223,7 @@ async def create_tdd(cmd: Command) -> CommandResult:
         list(story.get("subtask_keys") or []),
         [],
         review.to_dict(),
+        timeout=_FILES_TOOL,
     )
     if not text.get("issue_text"):
         return CommandResult(
@@ -239,7 +242,7 @@ async def create_tdd(cmd: Command) -> CommandResult:
             else ""
         )
         document, problem = await _revise(
-            cmd, story, current, None, earlier, agreed=agreed, review=review.to_dict()
+            cmd, story, current, None, earlier, agreed=agreed, review=review.to_dict(), base=text
         )
     else:
         document, problem = await _plan(
@@ -269,6 +272,7 @@ async def create_tdd(cmd: Command) -> CommandResult:
                 f"[{page['title']}]({page['url']})"
                 + (" (a new version of the existing page)." if not page.get("created") else "."),
             ),
+            ("Files read from the story", rules.files_summary(list(text.get("files") or []))),
             ("What changed in the requirement", changes),
             (
                 "Space",
@@ -406,7 +410,14 @@ async def _story_facts(cmd: Command, story: dict[str, Any]) -> dict[str, Any] | 
     TDD is then written as before, never skipped."""
     if not _memory(cmd):
         return None
-    text = await _tool(cmd, "story_text", cmd.issue_key, list(story.get("subtask_keys") or []))
+    text = await _tool(
+        cmd,
+        "story_text",
+        cmd.issue_key,
+        list(story.get("subtask_keys") or []),
+        False,
+        timeout=_FILES_TOOL,
+    )
     if not text.get("ok") or not text.get("text"):
         logger.warning(f"run {cmd.run_id}: no story text for the facts check: {text.get('error')}")
         return None
@@ -702,10 +713,19 @@ async def _revise(
     earlier: list[dict[str, str]] | None = None,
     agreed: str = "",
     review: dict[str, Any] | None = None,
+    base: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
-    """A revised design: the story, the whole current design, and what to change."""
-    base = await _tool(
-        cmd, "planning_input", cmd.issue_key, list(story.get("subtask_keys") or []), [], review
+    """A revised design: the story, the whole current design, and what to change.
+    ``base`` is the story as Planning's input when the caller has read it already
+    (its files are read once, 2026-10-27)."""
+    base = base or await _tool(
+        cmd,
+        "planning_input",
+        cmd.issue_key,
+        list(story.get("subtask_keys") or []),
+        [],
+        review,
+        timeout=_FILES_TOOL,
     )
     asked = strip_mention(cmd.text, cmd.keyword)
     changes = [*(page.get("discussion") or [])]
@@ -785,7 +805,13 @@ async def code(cmd: Command) -> CommandResult:
     )
 
     requirements = await _tool(
-        cmd, "planning_input", cmd.issue_key, list(story.get("subtask_keys") or []), [], None
+        cmd,
+        "planning_input",
+        cmd.issue_key,
+        list(story.get("subtask_keys") or []),
+        [],
+        None,
+        timeout=_FILES_TOOL,
     )
     ran: list[str] = []
     attempts = max(1, int(cmd.settings.get("coding_attempts") or 1))
@@ -1036,9 +1062,9 @@ async def _call(
     return (out if isinstance(out, dict) else {}), ""
 
 
-async def _tool(cmd: Command, name: str, *args: Any) -> dict[str, Any]:
+async def _tool(cmd: Command, name: str, *args: Any, timeout: timedelta = _TOOL) -> dict[str, Any]:
     try:
-        out = await cmd.execute(name, *args, start_to_close_timeout=_TOOL)
+        out = await cmd.execute(name, *args, start_to_close_timeout=timeout)
     except Exception as exc:  # noqa: BLE001 — the caller says what failed
         logger.error(f"run {cmd.run_id}: {name} raised: {exc}")
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}

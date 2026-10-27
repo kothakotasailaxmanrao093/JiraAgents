@@ -31,6 +31,8 @@ from .video import VideoExtraction, VideoFrame
 
 logger = get_logger(__name__)
 
+NOTHING_READ = "(no readable content)"
+
 FRAME_CONCURRENCY = 4
 CALL_TIMEOUT_SECONDS = 60
 NARRATION_MAX_TOKENS = 1500
@@ -135,7 +137,7 @@ async def describe_frames(
                     text = await _platform_describe(frame)
                 except Exception as inner:  # noqa: BLE001 — one frame never stops the rest
                     text = f"(this frame could not be read: {inner})"
-        return str(text or "").strip() or "(no readable content)"
+        return str(text or "").strip() or NOTHING_READ
 
     return list(await asyncio.gather(*(one(f) for f in frames)))
 
@@ -216,6 +218,10 @@ async def understand_video(
     explained = await narrate(
         filename, extraction, descriptions, model=model, context=context, chat=chat
     )
+    if not explained and all(d == NOTHING_READ for d in descriptions):
+        # Not one screen was read (image reading unavailable): say so, rather than
+        # pass on a list of empty screens as if the video had been watched.
+        return ""
 
     length = clock(extraction.duration_seconds or 0)
     parts = [f"[Video, {length} long, {len(extraction.frames)} screen(s) read]"]

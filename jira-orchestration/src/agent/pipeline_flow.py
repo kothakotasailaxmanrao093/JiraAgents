@@ -45,6 +45,7 @@ PlanningSource = Callable[[AgentResult, "AgentResult | None"], Awaitable[tuple[s
 KeepDesign = Callable[[str], Awaitable[str]]
 
 _TOOL_TIMEOUT = timedelta(minutes=2)
+_FILES_TIMEOUT = timedelta(minutes=10)  # Planning's input reads the story's files
 PLANNING_NAME = "Planning"
 CODING_NAME = "Coding"
 
@@ -321,7 +322,7 @@ def jira_planning_source(execute: Execute, issue_key: str) -> PlanningSource:
             rules.ticket_keys(build),
             list(build.proposed),
             review.to_dict() if review else None,
-            start_to_close_timeout=_TOOL_TIMEOUT,
+            start_to_close_timeout=_FILES_TIMEOUT,
         )
         return str(answer.get("issue_text") or ""), str(answer.get("error") or "no text")
 
