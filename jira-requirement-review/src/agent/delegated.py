@@ -31,7 +31,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from agent.review_flow import resolve_document_keys
+from agent.review_flow import questions_from, resolve_document_keys
 from config import AGENT_DISPLAY_NAME, AGENT_NAME, agent_version
 from review.completeness import sources_missing, sources_read, summarise
 from shared.contract import AgentResult, EmailKind, Outcome
@@ -234,13 +234,16 @@ def _to_contract(result: dict[str, Any], *, run_id: str) -> AgentResult:
         headline=headline,
         summary=summary,
         findings=findings,
-        questions=_questions_from(findings),
+        questions=questions_from(findings),
         # A number, so the router can hold a build back after a poor review
         # without reading it out of the summary's wording.
         readiness_score=_score(readiness),
         # A bug report's actual / expected / missing information; empty for a
         # requirement review. Planning adds the cause, files and fix.
         investigation=dict(result.get("investigation") or {}),
+        # The card's memory, when the router asked for it (2026-10-30): the
+        # ranked services and every question with its answers.
+        memory=dict(result.get("memory") or {}),
         # A review never creates anything. Stated as empty rather than omitted,
         # because the router renders "Created in Jira" from this list.
         created=[],
@@ -264,23 +267,3 @@ def _score(readiness: Any) -> int:
         return int((readiness or {}).get("score") or 0) if isinstance(readiness, dict) else 0
     except (TypeError, ValueError):
         return 0
-
-
-def _questions_from(findings: list[dict[str, Any]]) -> list[str]:
-    """The open questions, lifted out so the router can show them as questions.
-
-    Only the two genuinely interrogative categories: everything else is a
-    statement about the ticket, and listing it under "questions" would tell the
-    reader to answer something that is not a question.
-    """
-    wanted = {"open_question", "dependency_question"}
-    out: list[str] = []
-    for finding in findings:
-        # Findings carry ``finding_type`` ("Open Question"); this read ``category``,
-        # which no finding has, so no question was ever listed (2026-10-26).
-        kind = finding.get("finding_type") or finding.get("category") or ""
-        category = str(kind).strip().lower().replace(" ", "_")
-        text = str(finding.get("description") or finding.get("title") or "").strip()
-        if category in wanted and text and text not in out:
-            out.append(text)
-    return out

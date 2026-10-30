@@ -25,6 +25,7 @@ MAX_DESCRIPTION = 4000
 MAX_COMMENT = 600
 MAX_COMMENTS = 30
 MAX_FILES = 100
+MAX_EVENT_FILES = 100  # changed files kept on a merge event, for the card history
 # The whole text, so a waiting event fits one Jira property (32 KB) with room.
 MAX_TEXT = 20000
 
@@ -69,6 +70,9 @@ class Event:
     issue_text: str
     issue_key: str = ""  # a Jira key named in the PR's title or branch
     marks: list[str] = field(default_factory=list)  # keys recorded once it is sent
+    # A merge's branch and changed files, for the card's history (2026-10-29).
+    branch: str = ""
+    files: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return asdict(self)
@@ -145,6 +149,8 @@ def merged_event(
         issue_text=merged_text(repo, pr, files, comments),
         issue_key=jira_key(pr, projects),
         marks=marks,
+        branch=str((pr.get("head") or {}).get("ref") or ""),
+        files=[str(f.get("filename") or "") for f in files if f.get("filename")][:MAX_EVENT_FILES],
     )
 
 

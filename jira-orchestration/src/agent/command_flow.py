@@ -27,7 +27,8 @@ from typing import Any
 
 from temporalio.common import RetryPolicy
 
-from routing import memory
+from agent import handoff_flow
+from routing import handoff, memory
 from routing import pipeline as rules
 from routing.catalog import AgentSpec
 from routing.classify import strip_mention
@@ -178,8 +179,11 @@ async def create_tdd(cmd: Command) -> CommandResult:
     unchanged = await _unchanged_tdd(cmd, story)
     if unchanged is not None:
         return unchanged
+    # The story read once for the whole command (2026-10-29): the memory's
+    # check, Planning's text and the agreed input all come from this one read.
+    bundle = await _bundle(cmd, story)
     # Did the requirement change, or only its words? (Planning's memory, 2026-10-26)
-    facts = await _story_facts(cmd, story)
+    facts = await _story_facts(cmd, story, bundle)
     if facts is not None and facts.get("verdict") in memory.KEEP_TDD:
         kept = await _kept_tdd(cmd, story, facts)
         if kept is not None:
@@ -216,15 +220,20 @@ async def create_tdd(cmd: Command) -> CommandResult:
     await cmd.say(
         _working(f"Ready ({score}/5). Planning is writing the design from the code…", "2 of 3")
     )
-    text = await _tool(
-        cmd,
-        "planning_input",
-        cmd.issue_key,
-        list(story.get("subtask_keys") or []),
-        [],
-        review.to_dict(),
-        timeout=_FILES_TOOL,
-    )
+    if bundle is not None:
+        text, bundle = await _bundle_input(cmd, bundle, review.to_dict())
+        given = await _handoff(cmd, bundle, review)
+    else:
+        text = await _tool(
+            cmd,
+            "planning_input",
+            cmd.issue_key,
+            list(story.get("subtask_keys") or []),
+            [],
+            review.to_dict(),
+            timeout=_FILES_TOOL,
+        )
+        given = None
     if not text.get("issue_text"):
         return CommandResult(
             reply("Could not read the story for Planning", ("Problems", [text.get("error", "")])),
@@ -242,8 +251,18 @@ async def create_tdd(cmd: Command) -> CommandResult:
             else ""
         )
         document, problem = await _revise(
-            cmd, story, current, None, earlier, agreed=agreed, review=review.to_dict(), base=text
+            cmd,
+            story,
+            current,
+            None,
+            earlier,
+            agreed=agreed,
+            review=review.to_dict(),
+            base=text,
+            given=given,
         )
+    elif given is not None:
+        document, problem = await _plan(cmd, _earlier_text(earlier).strip(), 1, given)
     else:
         document, problem = await _plan(
             cmd, str(text["issue_text"]) + _earlier_text(earlier), attempt=1
@@ -252,7 +271,8 @@ async def create_tdd(cmd: Command) -> CommandResult:
         return CommandResult(
             reply("Planning wrote no design", ("Problems", [problem])), ran, review.to_dict()
         )
-    ran.append(PLANNING)
+    if PLANNING not in ran:
+        ran.append(PLANNING)
 
     await cmd.say(_working("Publishing the TDD in Confluence…", "3 of 3"))
     page = await _publish(cmd, story, document, earlier)
@@ -261,6 +281,9 @@ async def create_tdd(cmd: Command) -> CommandResult:
             reply("The TDD could not be published", ("Problems", [page.get("error", "")])), ran
         )
     await _remember(cmd, story, page, document, facts)
+    if given is not None:
+        version, data = handoff.design_event(given["card"], given["services"], page, document)
+        await handoff_flow.remember(_ask(cmd), cmd.issue_key, "design", data, version)
     where = f"{page.get('space_name') or page['space_key']} ({page['space_key']})"
     return CommandResult(
         reply(
@@ -273,6 +296,14 @@ async def create_tdd(cmd: Command) -> CommandResult:
                 + (" (a new version of the existing page)." if not page.get("created") else "."),
             ),
             ("Files read from the story", rules.files_summary(list(text.get("files") or []))),
+            (
+                "Services designed, by rank",
+                handoff.service_lines(given["services"]) if given else [],
+            ),
+            (
+                "Answers the design follows",
+                handoff.answer_lines(given["questions"]) if given else [],
+            ),
             ("What changed in the requirement", changes),
             (
                 "Space",
@@ -308,6 +339,8 @@ async def _readiness(cmd: Command, ran: list[str]) -> AgentResult | None:
         "comment_id": cmd.comment_id,
         "run_id": cmd.run_id,
         **({"previous_questions": cmd.previous_questions} if cmd.previous_questions else {}),
+        # The review reads and keeps the card's memory (2026-10-30).
+        **({"memory_repos": str(cmd.settings.get("repos") or "")} if _handoff_on(cmd) else {}),
         **spec.forced_payload,
     }
     out, problem = await _call(
@@ -404,20 +437,123 @@ async def _planning(
     )
 
 
-async def _story_facts(cmd: Command, story: dict[str, Any]) -> dict[str, Any] | None:
+def _handoff_on(cmd: Command) -> bool:
+    """ORCH_HANDOFF (2026-10-29): the story read once, the review's questions
+    with their answers, the ranked services and the history, for Planning."""
+    return _memory(cmd) and bool(cmd.settings.get("handoff"))
+
+
+def _ask(cmd: Command) -> handoff_flow.Ask:
+    """One Requirement Review run on the card's memory: its output, or None.
+    Each run has its own workflow id (two pull requests are two history writes)."""
+    count = iter(range(1, 1_000))
+    overrides = cmd.settings.get("task_queue_overrides") or {}
+
+    async def ask(payload: dict[str, Any], name: str) -> dict[str, Any] | None:
+        raw, problem = await _call(
+            cmd,
+            handoff_flow.REVIEW_AGENT,
+            {**payload, "run_id": cmd.run_id},
+            f"tdd-{name}-{next(count)}-{cmd.run_id}",
+            handoff_flow.TIMEOUT_MINUTES,
+            str(overrides.get(handoff_flow.REVIEW_AGENT) or ""),
+        )
+        out = handoff_flow.output(raw)
+        if out is None:
+            logger.warning(f"run {cmd.run_id}: Review {name} failed: {problem or raw}")
+        return out
+
+    return ask
+
+
+async def _bundle(cmd: Command, story: dict[str, Any]) -> dict[str, Any] | None:
+    """The story read once (ORCH_HANDOFF); None when off or unreadable — the
+    command then reads it as before."""
+    if not _handoff_on(cmd):
+        return None
+    bundle = await _tool(
+        cmd,
+        "story_bundle",
+        cmd.issue_key,
+        list(story.get("subtask_keys") or []),
+        timeout=_FILES_TOOL,
+    )
+    if not bundle.get("ok"):
+        logger.warning(f"run {cmd.run_id}: story read once failed: {bundle.get('error')}")
+        return None
+    return bundle
+
+
+async def _bundle_input(
+    cmd: Command, bundle: dict[str, Any], review: dict[str, Any] | None
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """(Planning's text, the bundle with its files read) from the one read; its
+    pictures and videos are looked at now, only because a design is really
+    written."""
+    root = bundle.get("root") or {}
+    seen = await _tool(
+        cmd,
+        "read_media",
+        cmd.issue_key,
+        str(root.get("summary") or ""),
+        list(bundle.get("files") or []),
+        timeout=_FILES_TOOL,
+    )
+    files = (
+        list(seen.get("files") or [])
+        if seen.get("ok")
+        else [
+            {k: v for k, v in f.items() if k not in ("url", "mime")}
+            for f in bundle.get("files") or []
+        ]
+    )
+    return handoff.planning_input(bundle, files, review), {**bundle, "files": files}
+
+
+async def _handoff(
+    cmd: Command, bundle: dict[str, Any], review: AgentResult
+) -> dict[str, Any] | None:
+    """The agreed input for Planning: the card, its ranked services and the
+    review's questions with every answer in the comments so far (Review's
+    memory, brought up to date now). None when the memory cannot give it — the
+    TDD is then written from the old input."""
+    card = handoff.card(bundle, list(bundle.get("files") or []))
+    kept = await handoff_flow.memory(
+        _ask(cmd),
+        cmd.issue_key,
+        card["title"],
+        handoff.card_text(card),
+        list(bundle.get("people_comments") or []),
+        str(cmd.settings.get("repos") or ""),
+    )
+    kept = kept or review.memory
+    if not kept:
+        return None
+    return handoff.payload(
+        card, list(kept.get("services") or []), list(kept.get("questions") or [])
+    )
+
+
+async def _story_facts(
+    cmd: Command, story: dict[str, Any], bundle: dict[str, Any] | None = None
+) -> dict[str, Any] | None:
     """Planning's verdict on the story against its current TDD: same, reworded,
     changed, unsure or new. None when memory is off or Planning cannot say — the
     TDD is then written as before, never skipped."""
     if not _memory(cmd):
         return None
-    text = await _tool(
-        cmd,
-        "story_text",
-        cmd.issue_key,
-        list(story.get("subtask_keys") or []),
-        False,
-        timeout=_FILES_TOOL,
-    )
+    if bundle is not None:
+        story_text = handoff.memory_text(bundle)
+        text = {"ok": True, "text": story_text, "hash": memory.normalised_hash(story_text)}
+    else:
+        text = await _tool(
+            cmd,
+            "story_text",
+            cmd.issue_key,
+            list(story.get("subtask_keys") or []),
+            False,
+            timeout=_FILES_TOOL,
+        )
     if not text.get("ok") or not text.get("text"):
         logger.warning(f"run {cmd.run_id}: no story text for the facts check: {text.get('error')}")
         return None
@@ -714,25 +850,28 @@ async def _revise(
     agreed: str = "",
     review: dict[str, Any] | None = None,
     base: dict[str, Any] | None = None,
+    given: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """A revised design: the story, the whole current design, and what to change.
     ``base`` is the story as Planning's input when the caller has read it already
-    (its files are read once, 2026-10-27)."""
-    base = base or await _tool(
-        cmd,
-        "planning_input",
-        cmd.issue_key,
-        list(story.get("subtask_keys") or []),
-        [],
-        review,
-        timeout=_FILES_TOOL,
-    )
+    (its files are read once, 2026-10-27); ``given`` the agreed input
+    (2026-10-29), which then stands for the story."""
+    if given is None:
+        base = base or await _tool(
+            cmd,
+            "planning_input",
+            cmd.issue_key,
+            list(story.get("subtask_keys") or []),
+            [],
+            review,
+            timeout=_FILES_TOOL,
+        )
     asked = strip_mention(cmd.text, cmd.keyword)
     changes = [*(page.get("discussion") or [])]
     if reasons:
         changes.append("Coding could not implement the design: " + "; ".join(reasons))
     text = (
-        str(base.get("issue_text") or "")
+        ("" if given is not None else str((base or {}).get("issue_text") or ""))
         + "\n\nThis is a REVISION of the technical design below, not a new one. Keep "
         "every requirement, decision, file change, test and item of existing behaviour "
         "to preserve that the discussion does not change; change only what it asks, "
@@ -744,6 +883,8 @@ async def _revise(
         + (f"\n\nAsked now: {asked}" if asked and not reasons and not agreed else "")
         + _earlier_text(earlier or [])
     )
+    if given is not None:
+        return await _plan(cmd, text.strip(), 2, given)
     return await _plan(cmd, text, attempt=2)
 
 
@@ -856,7 +997,7 @@ async def code(cmd: Command) -> CommandResult:
             ran.append(CODING)
         prs = rules.pull_requests(out)
         if prs and not (rules.tests_failed(out) and attempt < attempts):
-            return _pr_result(cmd, page, plan, out, prs, ran)
+            return await _pr_done(cmd, page, plan, out, prs, ran)
         if prs:
             # Raised, but its tests failed: back to Planning with the errors; the
             # retry's PR replaces this one (Coding closes it), so one PR stays open.
@@ -864,7 +1005,7 @@ async def code(cmd: Command) -> CommandResult:
             reasons = ["The pull request's tests failed: " + "; ".join(rules.test_failures(out))]
             revised = await update_tdd(cmd, reasons)
             if not revised.links.get("tdd"):
-                return _pr_result(cmd, page, plan, out, prs, ran)
+                return await _pr_done(cmd, page, plan, out, prs, ran)
             if PLANNING not in ran:
                 ran.append(PLANNING)
             page = await _the_page(cmd)
@@ -909,6 +1050,24 @@ async def code(cmd: Command) -> CommandResult:
 
 
 # --- shared steps ---------------------------------------------------------------------
+
+
+async def _pr_done(
+    cmd: Command,
+    page: dict[str, Any],
+    plan: BranchPlan,
+    out: dict[str, Any],
+    prs: list[dict[str, Any]],
+    ran: list[str],
+) -> CommandResult:
+    """The pull request's reply — and, with ORCH_HANDOFF, each PR in the card's
+    history (branch, service, link), so a later card about the same thing finds it."""
+    if _handoff_on(cmd):
+        title = str(page.get("title") or cmd.issue_key)
+        ask = _ask(cmd)
+        for event_id, data in handoff.pr_events(out, title):
+            await handoff_flow.remember(ask, cmd.issue_key, "pr_opened", data, event_id)
+    return _pr_result(cmd, page, plan, out, prs, ran)
 
 
 def _pr_result(
@@ -981,20 +1140,35 @@ async def _the_page(cmd: Command) -> dict[str, Any]:
     return page
 
 
-async def _plan(cmd: Command, issue_text: str, attempt: int) -> tuple[dict[str, Any] | None, str]:
-    """One Planning run that returns the document itself; (document, or None and why)."""
+async def _plan(
+    cmd: Command, issue_text: str, attempt: int, given: dict[str, Any] | None = None
+) -> tuple[dict[str, Any] | None, str]:
+    """One Planning run that returns the document itself; (document, or None and why).
+
+    With ``given`` (the agreed input, 2026-10-29) Planning builds its text from
+    the card, the ranked services and the questions with their answers, and
+    ``issue_text`` is what follows them (a revision's instructions, the earlier
+    designs); only the ranked services' repositories are synced."""
+    payload: dict[str, Any] = {
+        "issue_text": issue_text,
+        "repos": cmd.settings.get("repos") or "",
+        "return_document": True,
+        "issue_key": cmd.issue_key,
+        # Planning loads the story's and the project's decisions in force.
+        "project_key": cmd.issue_key.split("-")[0],
+        "run_id": cmd.run_id,
+    }
+    if given is not None:
+        payload |= {
+            **given,
+            "issue_text": "",
+            "notes": issue_text,
+            "repos": handoff.ranked_repos(str(payload["repos"]), given["services"]),
+        }
     out, problem = await _call(
         cmd,
         str(cmd.settings.get("planning_agent") or "planning_agent"),
-        {
-            "issue_text": issue_text,
-            "repos": cmd.settings.get("repos") or "",
-            "return_document": True,
-            "issue_key": cmd.issue_key,
-            # Planning loads the story's and the project's decisions in force.
-            "project_key": cmd.issue_key.split("-")[0],
-            "run_id": cmd.run_id,
-        },
+        payload,
         f"tdd-plan-{cmd.run_id}-{attempt}",
         int(cmd.settings.get("planning_timeout_minutes") or 15),
         str(cmd.settings.get("planning_queue") or ""),

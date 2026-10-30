@@ -10,8 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from agent.delegated import _questions_from, run_delegated
-from agent.review_flow import bug_report_markdown, run_review
+from agent.delegated import run_delegated
+from agent.review_flow import bug_report_markdown, questions_from, run_review
 from review.parser import parse_investigation
 from review.prompt import BUG_SYSTEM_PROMPT
 
@@ -209,7 +209,7 @@ def test_open_questions_are_found_by_finding_type() -> None:
         {"finding_type": "Dependency Question", "description": "Which team owns the ledger?"},
         {"finding_type": "Requirement Gap", "description": "No error message given."},
     ]
-    assert _questions_from(findings) == [
+    assert questions_from(findings) == [
         "Per account or per customer?",
         "Which team owns the ledger?",
     ]

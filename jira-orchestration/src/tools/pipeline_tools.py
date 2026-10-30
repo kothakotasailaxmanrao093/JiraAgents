@@ -85,15 +85,20 @@ async def planning_input(
 async def _discussion(client: httpx.AsyncClient, issue_key: str) -> list[dict[str, str]]:
     """Every comment on the story, oldest first: people's comments and requests,
     and the agent's own replies (2026-10-26) — the design reads the conversation."""
-    keyword = settings.trigger_keyword()
     try:
         resp = await client.get(f"/rest/api/3/issue/{issue_key}", params={"fields": "comment"})
         resp.raise_for_status()
     except httpx.HTTPError as exc:
         logger.warning(f"Planning input: could not read the comments of {issue_key}: {exc}")
         return []
+    return _discussion_of((resp.json().get("fields") or {}).get("comment"))
+
+
+def _discussion_of(comment_field: dict[str, Any] | None) -> list[dict[str, str]]:
+    """The conversation as Planning reads it, from Jira's ``comment`` field."""
+    keyword = settings.trigger_keyword()
     out = []
-    for c in ((resp.json().get("fields") or {}).get("comment") or {}).get("comments") or []:
+    for c in (comment_field or {}).get("comments") or []:
         text = comment_text(c.get("body"), keep=keyword)
         if not text.strip():
             continue
@@ -110,20 +115,32 @@ async def _discussion(client: httpx.AsyncClient, issue_key: str) -> list[dict[st
 
 
 async def _attachments(
-    client: httpx.AsyncClient, issue_key: str, summary: str, media: bool
+    client: httpx.AsyncClient,
+    issue_key: str,
+    summary: str,
+    media: bool,
+    listed: list[dict[str, Any]] | None = None,
+    keep_links: bool = False,
 ) -> list[dict[str, Any]]:
     """Every file attached to the story, read (2026-10-27): documents, sheets,
     text, and — with ``media`` — images, videos and recordings, which a model
     looks at. Oldest first; at most ``pipeline.MAX_FILES``. Each is
     ``{"id", "filename", "kind", "text", "note"}``: a file that could not be
-    read has no text and says why. Never raises."""
-    try:
-        resp = await client.get(f"/rest/api/3/issue/{issue_key}", params={"fields": "attachment"})
-        resp.raise_for_status()
-        listed = (resp.json().get("fields") or {}).get("attachment") or []
-    except (httpx.HTTPError, ValueError) as exc:
-        logger.warning(f"Planning input: could not list the files on {issue_key}: {exc}")
-        return []
+    read has no text and says why. Never raises.
+
+    ``listed``: Jira's attachment field, when the caller already has it.
+    ``keep_links``: keep each file's download link, so its images and videos
+    can be read later (``read_media``) without listing the files again."""
+    if listed is None:
+        try:
+            resp = await client.get(
+                f"/rest/api/3/issue/{issue_key}", params={"fields": "attachment"}
+            )
+            resp.raise_for_status()
+            listed = (resp.json().get("fields") or {}).get("attachment") or []
+        except (httpx.HTTPError, ValueError) as exc:
+            logger.warning(f"Planning input: could not list the files on {issue_key}: {exc}")
+            return []
     listed = sorted(listed, key=lambda a: (str(a.get("created") or ""), str(a.get("id") or "")))
     files = [
         {
@@ -139,6 +156,22 @@ async def _attachments(
     ]
     for extra in files[pipeline.MAX_FILES :]:
         extra["note"] = f"not read: only the first {pipeline.MAX_FILES} files are read"
+    await _read_files(client, issue_key, summary, files[: pipeline.MAX_FILES], media)
+    if not keep_links:
+        for file in files:
+            file.pop("url"), file.pop("mime")
+    return files
+
+
+async def _read_files(
+    client: httpx.AsyncClient,
+    issue_key: str,
+    summary: str,
+    files: list[dict[str, Any]],
+    media: bool,
+) -> None:
+    """Reads ``files`` in place: documents always, images and videos with
+    ``media``. A file already read is not read again."""
     limits = attachments.default_limits()
     context = f"{issue_key}: {summary}".strip(": ")
     gate = asyncio.Semaphore(pipeline.FILES_AT_ONCE)
@@ -147,7 +180,7 @@ async def _attachments(
         if file["kind"] != "document" and not media:
             file["note"] = f"{file['kind']}: compared by file, not by content"
             return
-        if not file["url"]:
+        if not file.get("url"):
             file["note"] = "no download link"
             return
         async with gate:
@@ -160,22 +193,111 @@ async def _attachments(
                 file["note"] = f"could not be downloaded: {exc}"
                 return
             found = await attachments.extract(
-                got.content, file["filename"], file["mime"], limits=limits, context=context
+                got.content, file["filename"], file.get("mime", ""), limits=limits, context=context
             )
         file["text"], file["note"] = found.text, found.note
 
-    tasks = [asyncio.create_task(read(f)) for f in files[: pipeline.MAX_FILES]]
+    todo = [f for f in files if not f.get("text")]
+    for file in todo:
+        file["note"] = ""
+    tasks = [asyncio.create_task(read(f)) for f in todo]
     if tasks:
         _, late = await asyncio.wait(tasks, timeout=pipeline.FILES_SECONDS)
         for task in late:
             task.cancel()
-    for file in files[: pipeline.MAX_FILES]:
+    for file in todo:
         if not file["text"] and not file["note"]:
             file["note"] = f"not read within {pipeline.FILES_SECONDS // 60} minutes"
-        file.pop("url"), file.pop("mime")
-    for file in files[pipeline.MAX_FILES :]:
-        file.pop("url"), file.pop("mime")
-    return files
+
+
+_BUNDLE_FIELDS = "summary,description,issuetype,comment,attachment"
+
+
+@tool(name="story_bundle")
+async def story_bundle(issue_key: str, ticket_keys: list[str]) -> dict[str, Any]:
+    """The story read ONCE for a whole command (2026-10-29): summary,
+    description, its sub-tasks, every comment, and its attached documents read.
+
+    One issue read replaces the separate reads of ``story_text`` and
+    ``planning_input``. Images and videos are listed, not looked at — the
+    memory compares them by file — and keep their download link, so
+    ``read_media`` reads them only when a design is really written."""
+    issue_key = issue_key.strip().upper()
+    keyword = settings.trigger_keyword()
+    try:
+        async with _client() as client:
+            resp = await client.get(
+                f"/rest/api/3/issue/{issue_key}", params={"fields": _BUNDLE_FIELDS}
+            )
+            resp.raise_for_status()
+            fields = resp.json().get("fields") or {}
+            root = {
+                "key": issue_key,
+                "type": (fields.get("issuetype") or {}).get("name") or "",
+                "summary": fields.get("summary") or "",
+                "description": to_text(fields["description"]) if fields.get("description") else "",
+            }
+            tickets, unread = [], []
+            for key in [k for k in ticket_keys if k and k.upper() != issue_key][
+                : pipeline.MAX_TICKETS
+            ]:
+                try:
+                    tickets.append(await _ticket(client, key))
+                except httpx.HTTPError as exc:
+                    unread.append(key)
+                    logger.warning(f"Story bundle: could not read {key}: {exc}")
+                    tickets.append({"key": key})
+            files = await _attachments(
+                client,
+                issue_key,
+                root["summary"],
+                media=False,
+                listed=list(fields.get("attachment") or []),
+                keep_links=True,
+            )
+    except (httpx.HTTPError, ValueError) as exc:
+        logger.error(f"Story bundle: could not read {issue_key}: {exc}", exc_info=True)
+        return {"ok": False, "error": f"Could not read {issue_key}: {exc}"}
+    memory_comments, people = [], []
+    for c in (fields.get("comment") or {}).get("comments") or []:
+        text = comment_text(c.get("body"), keep=keyword)
+        if not text.strip() or is_agent_comment(text):
+            continue
+        if mentions_trigger(text, keyword=keyword):
+            added = pipeline.requirement_words(text, keyword)
+            if added:
+                memory_comments.append(added)
+                people.append({"id": str(c.get("id") or ""), "text": added})
+            continue
+        memory_comments.append(text)
+        people.append({"id": str(c.get("id") or ""), "text": text})
+    return {
+        "ok": True,
+        "root": root,
+        "tickets": tickets,
+        "unread": unread,
+        "discussion": _discussion_of(fields.get("comment")),
+        # For the memory: people's comments only, requests reduced to what they add.
+        "comments": memory_comments,
+        # The same, with their ids: what the review's questions are answered by.
+        "people_comments": people,
+        "files": files,
+    }
+
+
+@tool(name="read_media")
+async def read_media(issue_key: str, summary: str, files: list[dict[str, Any]]) -> dict[str, Any]:
+    """The story's images, videos and recordings read by a model (2026-10-29),
+    from the links ``story_bundle`` kept; documents already read are left as
+    they are. Returns the files without their links."""
+    files = [dict(f) for f in files]
+    media = [f for f in files[: pipeline.MAX_FILES] if f.get("kind") != "document"]
+    if media:
+        async with _client() as client:
+            await _read_files(client, issue_key.strip().upper(), summary, media, media=True)
+    for file in files:
+        file.pop("url", None), file.pop("mime", None)
+    return {"ok": True, "files": files}
 
 
 @tool(name="story_text")

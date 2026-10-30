@@ -24,6 +24,7 @@ from datetime import timedelta
 from typing import Any
 
 from config import flag
+from shared.keywords import is_agent_comment
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +108,51 @@ def previous_review_document(questions: list[str]) -> dict[str, Any]:
     }
 
 
+# The parts of a card its memory is searched and its services ranked by.
+_CARD_KINDS = ("requirement", "attachment", "confluence")
+MAX_CARD_TEXT = 12_000
+
+
+def card_text(summary: str | None, documents: list[dict[str, Any]]) -> str:
+    """The card as one text: its title, description and files' text."""
+    parts = [str(summary or "").strip()]
+    for doc in documents:
+        if doc.get("kind") in _CARD_KINDS and str(doc.get("text") or "").strip():
+            parts.append(f"=== {doc.get('source_label') or doc.get('kind')} ===\n{doc['text']}")
+    return "\n".join(p for p in parts if p)[:MAX_CARD_TEXT]
+
+
+def people_comments(target: dict[str, Any]) -> list[dict[str, str]]:
+    """The card's comments people wrote, {"id", "text"}: the agents' replies are left out."""
+    return [
+        {"id": str(c["id"]), "text": str(c.get("body") or "")}
+        for c in target.get("comments") or []
+        if c.get("id")
+        and str(c.get("body") or "").strip()
+        and not is_agent_comment(str(c.get("body")))
+    ]
+
+
+def questions_from(findings: list[dict[str, Any]]) -> list[str]:
+    """The open questions, lifted out so the router can show them as questions.
+
+    Only the two genuinely interrogative categories: everything else is a
+    statement about the ticket, and listing it under "questions" would tell the
+    reader to answer something that is not a question.
+    """
+    wanted = {"open_question", "dependency_question"}
+    out: list[str] = []
+    for finding in findings:
+        # Findings carry ``finding_type`` ("Open Question"); this read ``category``,
+        # which no finding has, so no question was ever listed (2026-10-26).
+        kind = finding.get("finding_type") or finding.get("category") or ""
+        category = str(kind).strip().lower().replace(" ", "_")
+        text = str(finding.get("description") or finding.get("title") or "").strip()
+        if category in wanted and text and text not in out:
+            out.append(text)
+    return out
+
+
 def resolve_document_keys(payload: dict[str, Any]) -> list[str]:
     """The documents to review when there is no ticket (2026-10-08).
 
@@ -144,12 +190,16 @@ async def _review_one_issue(
     document_keys: list[str] | None = None,
     previous_questions: list[str] | None = None,
     review_kind: str = "requirement",
+    memory_repos: str | None = None,
 ) -> dict[str, Any]:
     """Run the full context-gather -> analyze -> render -> (optional post) pipeline
     for one issue and return a single structured result dict.
 
     With ``document_keys`` there is no ticket: those files are what is reviewed,
     under the label ``issue_key``, and nothing can be posted (2026-10-08).
+
+    With ``memory_repos`` (the router's configured services) the card's memory
+    is read before the review and kept after it (2026-10-30).
     """
     if document_keys:
         post_to_jira = False
@@ -197,6 +247,23 @@ async def _review_one_issue(
     documents = list(ctx.get("documents", []))
     if previous_questions:
         documents.append(previous_review_document(previous_questions))
+    target = ctx.get("target_bundle") or {}
+    title = str(ctx.get("issue_summary") or "")
+    memory = None
+    if memory_repos is not None and not document_keys:
+        recalled = await execute(
+            "recall_card_memory",
+            issue_key,
+            title,
+            card_text(title, documents),
+            people_comments(target),
+            memory_repos,
+            start_to_close_timeout=timedelta(minutes=3),
+        )
+        if recalled.get("ok"):
+            memory = recalled["memory"]
+            if recalled.get("document"):
+                documents.append(recalled["document"])
 
     # A bug's REPORT is reviewed (2026-10-26): asked for by the router
     # (review_kind="bug"), or because the card itself is a Bug. Review never
@@ -241,6 +308,21 @@ async def _review_one_issue(
         # The direct path reports through the draft, so a bug review's own
         # sections go at its top (2026-10-26).
         draft = bug_report_markdown(investigation) + draft
+    kept_memory: dict[str, Any] = {}
+    if memory is not None:
+        kept = await execute(
+            "keep_card_memory",
+            issue_key,
+            memory,
+            questions_from(findings),
+            title,
+            str((readiness or {}).get("executive_summary") or ""),
+            start_to_close_timeout=timedelta(minutes=2),
+        )
+        kept_memory = {
+            "services": kept.get("services") if kept.get("ok") else memory.get("services") or [],
+            "questions": kept.get("questions") or [],
+        }
 
     result: dict[str, Any] = {
         "issue_key": issue_key,
@@ -259,6 +341,7 @@ async def _review_one_issue(
         "documents": list(ctx.get("documents") or []),
         "target_bundle": ctx.get("target_bundle") or {},
         "counts": ctx.get("counts") or {},
+        "memory": kept_memory,
     }
 
     # === Publish-to-Jira path (opt-in via the "Publish to Jira" trigger) ===
@@ -370,6 +453,9 @@ async def run_review(
             str(q) for q in payload.get("previous_questions") or [] if str(q).strip()
         ],
         review_kind=str(payload.get("review_kind") or "requirement").strip().lower(),
+        memory_repos=(
+            str(payload["memory_repos"]) if payload.get("memory_repos") is not None else None
+        ),
     )
     generate_docx = flag(payload, "generate_docx")
     # TEMPORARILY DISABLED: email delivery is not exposed as a trigger (see

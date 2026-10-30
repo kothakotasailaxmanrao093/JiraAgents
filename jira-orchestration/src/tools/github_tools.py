@@ -176,6 +176,10 @@ async def _scan_result(
         # Which service each repository is, for Planning's graph.
         "repos_text": await org_repos.planning_repos(),
         "timeout_minutes": settings.planning_timeout_minutes(),
+        # A merge goes into the project's history, kept by the Requirement
+        # Review agent (2026-10-30), on its own task queue.
+        "handoff": settings.memory_enabled() and settings.handoff_enabled(),
+        "review_queue": settings.task_queue_overrides().get("JiraRequirementReview", ""),
     }
 
 

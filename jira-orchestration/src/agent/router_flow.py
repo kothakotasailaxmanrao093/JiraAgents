@@ -24,9 +24,11 @@ from typing import Any
 
 from temporalio.common import RetryPolicy
 
+from agent import handoff_flow
 from agent.command_flow import Command, run_command
 from agent.pipeline_flow import Chain, attach_to_ticket, jira_planning_source
 from routing import github_events as gh
+from routing import handoff
 from routing.catalog import AgentSpec, by_intent, display_name_for
 from routing.classify import (
     BUG_NOT_BUILT,
@@ -385,6 +387,10 @@ async def _orchestrate(
         previous = previous_review_points(state)
         if previous:
             extra["previous_questions"] = previous
+        if _handoff_on(gate):
+            # The review reads and keeps the card's memory (2026-10-30): earlier
+            # answers, earlier cards, the services ranked from these.
+            extra["memory_repos"] = str((gate.get("commands") or {}).get("repos") or "")
     blocks, ran, result = await _dispatch_and_compose(
         spec, decision, gate, dispatch, execute, run_id, issue_key, comment_id, extra
     )
@@ -987,7 +993,56 @@ async def _dispatch_and_compose(
         ran=ran,
         notification=notification,
     )
+    if spec.intent == "REVIEW" and result.memory:
+        # What the review keeps in the card's memory (2026-10-30).
+        blocks = handoff.with_sections(
+            blocks,
+            [
+                (
+                    "Services this card touches (0-10)",
+                    handoff.service_lines(list(result.memory.get("services") or [])),
+                ),
+                (
+                    "Answered so far",
+                    handoff.answer_lines(list(result.memory.get("questions") or [])),
+                ),
+            ],
+        )
     return blocks, [spec.display_name, *ran[1:]], result
+
+
+def _handoff_on(commands_or_gate: dict[str, Any]) -> bool:
+    """ORCH_HANDOFF with ORCH_MEMORY (2026-10-29), from the gate or its commands."""
+    commands = commands_or_gate.get("commands") or commands_or_gate
+    return bool(commands.get("memory")) and bool(commands.get("handoff"))
+
+
+def _review_ask(queue: str, dispatch: Dispatch, run_id: str, prefix: str) -> handoff_flow.Ask:
+    """One Requirement Review run on the card's memory: its output, or None.
+    Each run has its own workflow id."""
+    count = iter(range(1, 1_000))
+
+    async def ask(payload: dict[str, Any], name: str) -> dict[str, Any] | None:
+        options: dict[str, Any] = {
+            "workflow_id": f"{prefix}-{name}-{run_id}-{next(count)}",
+            "execution_timeout": timedelta(minutes=handoff_flow.TIMEOUT_MINUTES),
+            "retry_policy": RetryPolicy(maximum_attempts=1),
+        }
+        if queue:
+            options["task_queue"] = queue
+        try:
+            raw = await dispatch(
+                handoff_flow.REVIEW_AGENT, {**payload, "run_id": run_id}, **options
+            )
+        except Exception as exc:  # noqa: BLE001 — a help, never a requirement
+            logger.warning(f"run {run_id}: Review {name} failed: {type(exc).__name__}: {exc}")
+            return None
+        out = handoff_flow.output(raw)
+        if out is None:
+            logger.warning(f"run {run_id}: Review {name} did not succeed: {raw}")
+        return out
+
+    return ask
 
 
 # What Planning's code investigation adds to a bug report's review.
@@ -1365,6 +1420,22 @@ async def _send_github_events(
                 EVENT_RUN_ID,
                 start_to_close_timeout=_POST_TIMEOUT,
             )
+            if scan.get("handoff"):
+                # And in the project's history in Memsy, with the files it
+                # changed (2026-10-29), so a later card's review finds them.
+                event_id, data = handoff.merge_event(event)
+                await handoff_flow.remember(
+                    _review_ask(
+                        str(scan.get("review_queue") or ""),
+                        dispatch,
+                        str(event.get("key") or "merge")[-40:],
+                        "gh",
+                    ),
+                    event["issue_key"],
+                    "pr_state",
+                    data,
+                    event_id,
+                )
         done = await _safe(
             execute,
             "github_event_done",

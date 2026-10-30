@@ -389,6 +389,16 @@ def memory_enabled() -> bool:
     return os.environ.get("ORCH_MEMORY", "").strip().lower() not in ("off", "false", "0", "no")
 
 
+def handoff_enabled() -> bool:
+    """``ORCH_HANDOFF`` (2026-10-29): "on" (default, with ``ORCH_MEMORY`` on) reads
+    the story once per command and asks the Requirement Review agent to keep
+    the card's memory in Memsy (2026-10-30): the review's questions with their
+    answers, earlier cards about the same thing, the services the card touches
+    ranked, and each card's history (TDD, pull requests, merges). Planning gets
+    the agreed input. "off" is the behaviour before."""
+    return os.environ.get("ORCH_HANDOFF", "").strip().lower() not in ("off", "false", "0", "no")
+
+
 def commands() -> dict[str, object]:
     """What the TDD, design and code commands run with, as data for the workflow."""
     return {
@@ -403,6 +413,7 @@ def commands() -> dict[str, object]:
         "tdd_min_readiness": tdd_min_readiness(),
         "task_queue_overrides": task_queue_overrides(),
         "memory": memory_enabled(),
+        "handoff": memory_enabled() and handoff_enabled(),
     }
 
 

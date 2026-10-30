@@ -13,6 +13,7 @@ from typing import Any
 from aetherion_sdk import agent, toolExecutor
 
 from agent.delegated import run_delegated
+from agent.memory_modes import MODES as MEMORY_MODES
 from agent.review_flow import run_review
 
 logger = logging.getLogger(__name__)
@@ -37,9 +38,14 @@ async def JiraRequirementReview(payload: dict[str, Any]) -> list[dict]:
     the CLI, the API — behaves exactly as before.
 
     The mode is a flag rather than a second agent so the review itself cannot
-    drift between the two paths.
+    drift between the two paths. ``mode="memory"`` and ``mode="history"`` are
+    the router's calls on a card's memory outside a review (2026-10-30).
     """
-    if str(payload.get("mode") or "").strip().lower() == "delegated":
+    mode = str(payload.get("mode") or "").strip().lower()
+    if mode in MEMORY_MODES:
+        logger.info("mode : %s | issue_key : %s", mode, payload.get("issue_key"))
+        return [await MEMORY_MODES[mode](payload, toolExecutor.execute)]
+    if mode == "delegated":
         logger.info(
             "mode : delegated | issue_key : %s | run_id : %s",
             payload.get("issue_key"),
