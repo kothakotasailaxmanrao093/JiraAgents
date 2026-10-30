@@ -1,6 +1,6 @@
-"""A review the router asks to use the card's memory (2026-10-30): the memory is
-read before the analysis and shown to it as a source, kept after it, and handed
-back in the result. Without ``memory_repos`` nothing changes."""
+"""A review given the card's memory by the router (2026-10-30): earlier
+answers, earlier cards with their PRs, decisions in force and ranked services
+arrive as one more source the analysis reads. The review keeps nothing."""
 
 from __future__ import annotations
 
@@ -13,13 +13,11 @@ MEMORY_DOC = {
     "kind": "card_memory",
     "text": "Earlier cards about the same thing:\n- BTS-20 NEFT remark",
 }
-SERVICES = [{"service": "payments-service", "rank": 8, "reason": "BTS-20 PR #41", "prs": []}]
 
 
 class Execute:
-    def __init__(self, recall_ok: bool = True):
+    def __init__(self):
         self.calls: list[tuple[str, tuple]] = []
-        self.recall_ok = recall_ok
 
     async def __call__(self, name, *args, **_):
         self.calls.append((name, args))
@@ -28,29 +26,17 @@ class Execute:
                 "error": None,
                 "has_requirement": True,
                 "issue_summary": "Add a remark to IMPS payments",
-                "documents": [
-                    {"kind": "requirement", "source_label": "Target (description)", "text": "Add"},
-                    {"kind": "attachment", "source_label": "spec.pdf", "text": "POST /imps"},
-                ],
-                "target_bundle": {
-                    "comments": [
-                        {"id": "1", "body": "Yes, same as NEFT."},
-                        {"id": "2", "body": "AetherionAgent · Requirement review ..."},
-                    ]
-                },
+                "documents": [{"kind": "requirement", "source_label": "Target (description)"}],
+                "target_bundle": {},
                 "warnings": [],
             }
-        if name == "recall_card_memory":
-            if not self.recall_ok:
-                return {"ok": False, "error": "MemoryUnavailable: not set"}
-            return {"ok": True, "memory": {"seq": 1, "services": SERVICES}, "document": MEMORY_DOC}
         if name == "analyze_requirement":
             return {
                 "findings": [
                     {
                         "finding_type": "Open Question",
                         "description": "Should the SMS include the remark?",
-                        "evidence_source": "Target (description)",
+                        "evidence_source": "Earlier answers and related work",
                     }
                 ],
                 "readiness": {"level": "needs_minor_clarification", "score": 4},
@@ -58,56 +44,27 @@ class Execute:
             }
         if name == "render_review":
             return {"comment_markdown": "## draft", "finding_count": 1, "by_category": {}}
-        if name == "keep_card_memory":
-            return {
-                "ok": True,
-                "services": SERVICES,
-                "questions": [{"question": "Should the SMS include the remark?", "answers": []}],
-            }
-        raise AssertionError(name)
+        raise AssertionError(f"the review called {name}")
 
     def args(self, name):
         return next(args for called, args in self.calls if called == name)
 
 
-async def test_the_review_reads_its_memory_first_and_keeps_its_questions():
+async def test_the_memory_is_read_as_one_more_source():
     ex = Execute()
     out = await run_delegated(
-        {"issue_key": "BTS-60", "memory_repos": "payments-service: org/payments"},
-        ex,
-        run_review=run_review,
+        {"issue_key": "BTS-60", "memory_document": MEMORY_DOC}, ex, run_review=run_review
     )
-    names = [name for name, _ in ex.calls]
-    assert names.index("recall_card_memory") < names.index("analyze_requirement")
-    assert names.index("keep_card_memory") > names.index("analyze_requirement")
-    key, title, text, comments, repos = ex.args("recall_card_memory")
-    assert (key, title, repos) == (
-        "BTS-60",
-        "Add a remark to IMPS payments",
-        "payments-service: org/payments",
-    )
-    assert "=== spec.pdf ===" in text
-    assert comments == [{"id": "1", "text": "Yes, same as NEFT."}]
     assert MEMORY_DOC in ex.args("analyze_requirement")[0]
-    assert ex.args("keep_card_memory")[2] == ["Should the SMS include the remark?"]
-    assert out["memory"]["services"] == SERVICES
-    assert out["memory"]["questions"][0]["answers"] == []
+    assert [name for name, _ in ex.calls] == [
+        "gather_context",
+        "analyze_requirement",
+        "render_review",
+    ]
+    assert out["questions"] == ["Should the SMS include the remark?"]
 
 
-async def test_without_memory_repos_the_review_is_as_before():
+async def test_without_memory_the_review_is_as_before():
     ex = Execute()
-    out = await run_delegated({"issue_key": "BTS-60"}, ex, run_review=run_review)
-    names = [name for name, _ in ex.calls]
-    assert "recall_card_memory" not in names and "keep_card_memory" not in names
-    assert out["memory"] == {}
-
-
-async def test_memsy_not_answering_never_stops_the_review():
-    ex = Execute(recall_ok=False)
-    out = await run_delegated(
-        {"issue_key": "BTS-60", "memory_repos": ""}, ex, run_review=run_review
-    )
-    names = [name for name, _ in ex.calls]
-    assert "keep_card_memory" not in names
-    assert out["outcome"] == "REVIEWED" and out["memory"] == {}
-    assert MEMORY_DOC not in ex.args("analyze_requirement")[0]
+    await run_delegated({"issue_key": "BTS-60"}, ex, run_review=run_review)
+    assert all(d.get("kind") != "card_memory" for d in ex.args("analyze_requirement")[0])

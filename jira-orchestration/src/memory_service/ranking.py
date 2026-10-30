@@ -1,9 +1,11 @@
 """Which services a card touches, ranked 0-10 with a reason (2026-10-30).
 
-Done during the review, from what the review can see: the card (its text and
+Done by Orchestration before a card is reviewed, from the card (its text and
 its files' text), the services configured for the project, and earlier cards
 about the same thing from the history, with their pull requests and branches.
-The code itself is read later, by Planning, for the services ranked here.
+The ranking orders the design; it never limits it: Planning is given every
+repository, with the ranked services named first, and its own code search
+adds any service the ranking missed.
 
     9-10  the centre of the change      3-5  might change; check it
     6-8   must change, not the centre   0-2  not touched; not returned
@@ -19,7 +21,7 @@ import logging
 import re
 from typing import Any
 
-from card_memory import model
+from memory_service import model
 
 logger = logging.getLogger(__name__)
 

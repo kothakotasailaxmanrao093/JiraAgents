@@ -391,11 +391,12 @@ def memory_enabled() -> bool:
 
 def handoff_enabled() -> bool:
     """``ORCH_HANDOFF`` (2026-10-29): "on" (default, with ``ORCH_MEMORY`` on) reads
-    the story once per command and asks the Requirement Review agent to keep
-    the card's memory in Memsy (2026-10-30): the review's questions with their
+    the story once per command and keeps the card's memory in Memsy
+    (Orchestration alone, 2026-10-30): the review's questions with their
     answers, earlier cards about the same thing, the services the card touches
-    ranked, and each card's history (TDD, pull requests, merges). Planning gets
-    the agreed input. "off" is the behaviour before."""
+    ranked, and each card's history (TDD, pull requests, merges). The review is
+    given that memory; Planning gets the agreed input. "off" is the behaviour
+    before."""
     return os.environ.get("ORCH_HANDOFF", "").strip().lower() not in ("off", "false", "0", "no")
 
 

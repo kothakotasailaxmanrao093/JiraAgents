@@ -241,9 +241,6 @@ def _to_contract(result: dict[str, Any], *, run_id: str) -> AgentResult:
         # A bug report's actual / expected / missing information; empty for a
         # requirement review. Planning adds the cause, files and fix.
         investigation=dict(result.get("investigation") or {}),
-        # The card's memory, when the router asked for it (2026-10-30): the
-        # ranked services and every question with its answers.
-        memory=dict(result.get("memory") or {}),
         # A review never creates anything. Stated as empty rather than omitted,
         # because the router renders "Created in Jira" from this list.
         created=[],

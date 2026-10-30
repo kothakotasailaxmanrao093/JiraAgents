@@ -1,21 +1,25 @@
-"""The review's memory in Memsy (2026-10-30): the Memsy client, and the
-encrypted snapshots a card's questions are kept in.
+"""The one place the agents' memory is stored (2026-10-30): Memsy today.
 
-Memsy rewrites the text it stores and cannot update or delete, so a card's
-memory is kept as numbered SNAPSHOTS whose exact data rides in each event's
-metadata, which Memsy returns unchanged (``payload.source_metadata``):
+Orchestration is the only agent that talks to the memory service. Requirement
+Review and Planning are given what they need as input and hand back what is
+to be kept. Moving to another memory service changes this file and
+``history.py`` (search) only.
+
+Memsy rewrites the text it stores and cannot update or delete, so exact data
+is kept as numbered SNAPSHOTS in each event's metadata, which Memsy returns
+unchanged (``payload.source_metadata``):
 
 - every save writes snapshot N+1, the whole state; reading takes the newest
   complete snapshot, so a newer one replaces an older one without deleting it;
-- the data is compressed, then encrypted (AES-256-GCM) with the same
-  ``CODE_GRAPH_KEY`` Planning uses, before it leaves the agent: questions and
-  answers are company requirements;
-- a snapshot too big for Memsy's 4 KB metadata is split into parts, each in its
-  own session, because Memsy merges similar events of one session;
-- a save waits until Memsy has processed it, so the next review reads it.
+- the data is compressed, then encrypted (AES-256-GCM, ``CODE_GRAPH_KEY``)
+  before it leaves the agent, in the format Planning wrote its TDD memory in
+  (``zlib-aesgcm-1``), so that memory is read as it is;
+- a snapshot too big for Memsy's 4 KB metadata is split into parts, each in
+  its own session, because Memsy merges similar events of one session;
+- a save waits until Memsy has processed it, so the next request reads it.
 
-Every Memsy call is here and in history.py, so moving to another memory
-service changes these two files only.
+The key and the Memsy key are read from the platform's secret files first,
+then the environment (``shared.settings.secret``).
 """
 
 from __future__ import annotations
@@ -23,11 +27,14 @@ from __future__ import annotations
 import ast
 import base64
 import binascii
+import hashlib
+import hmac
 import json
 import logging
 import os
 import time
 import zlib
+from collections.abc import Iterator
 from functools import lru_cache
 from typing import Any
 
@@ -41,23 +48,25 @@ from shared.settings import secret
 logger = logging.getLogger(__name__)
 
 KEY_NAME = "CODE_GRAPH_KEY"
-FORMAT = "zlib-aesgcm-review-1"  # snapshots of another format are not read
+FORMAT = "zlib-aesgcm-1"
 PART_CHARS = 3_500  # Memsy keeps at most 4,096 characters of metadata per event
 LIST_PAGE = 100
 LIST_PAGES = 10  # the newest 1,000 memories of an actor are read
 WAIT_SECONDS = 30
-_INFO = b"aetherion/review-memory/v1/"
+_PREFIX = "enc:v1:"
+_INFO = b"aetherion/code-graph/v1/"
+_LABEL = "MemsySnapshot"
 
 
 class MemoryUnavailable(RuntimeError):
     """Memsy or the key is not configured, or Memsy is not reachable."""
 
 
-def project_of(card_key: str) -> str:
-    return card_key.split("-")[0].strip().upper() if card_key else ""
+def project_of(key: str) -> str:
+    return key.split("-")[0].strip().upper() if key else ""
 
 
-def client():
+def client() -> Any:
     key = secret("MEMSY_API_KEY")
     base = os.environ.get("MEMSY_BASE_URL", "").strip()
     if not key or not base:
@@ -82,7 +91,7 @@ def payload_of(item: Any) -> dict:
     return {}
 
 
-def listed_metadata(memsy: Any, actor: str):
+def listed_metadata(memsy: Any, actor: str) -> Iterator[dict]:
     """Every event metadata of ``actor``'s newest memories."""
     for page in range(LIST_PAGES):
         listed = memsy.memories.list(actor_id=actor, limit=LIST_PAGE, offset=page * LIST_PAGE)
@@ -95,7 +104,25 @@ def listed_metadata(memsy: Any, actor: str):
             return
 
 
-# --- encryption ---------------------------------------------------------------------------
+def ingest(events: list[Any]) -> list[str]:
+    """Writes events; their ids."""
+    return list(client().ingest(events).event_ids)
+
+
+def event(actor: str, session: str, kind: str, content: str, metadata: dict, team: str) -> Any:
+    from memsy import EventPayload
+
+    return EventPayload(
+        actor_id=actor,
+        session_id=session,
+        kind=kind,
+        content=content,
+        team_id=team,
+        metadata=json.dumps(metadata, sort_keys=True),
+    )
+
+
+# --- encryption (Planning's code_crypto format) ---------------------------------------------
 
 
 @lru_cache(maxsize=4)
@@ -109,34 +136,50 @@ def _master(raw: str) -> bytes:
     return key
 
 
-@lru_cache(maxsize=64)
-def _key(master: bytes, actor: str) -> bytes:
-    return HKDF(
-        algorithm=hashes.SHA512(), length=32, salt=None, info=_INFO + actor.encode("utf-8")
-    ).derive(master)
-
-
-def _cipher(actor: str) -> AESGCM:
+def _master_key() -> bytes:
     raw = secret(KEY_NAME)
     if not raw:
         raise MemoryUnavailable(f"{KEY_NAME} is not set — the memory is never kept unencrypted")
-    return AESGCM(_key(_master(raw), actor))
+    return _master(raw)
+
+
+@lru_cache(maxsize=256)
+def _derive(master: bytes, actor: str) -> bytes:
+    return HKDF(
+        algorithm=hashes.SHA512(), length=32, salt=None, info=_INFO + b"enc/" + actor.encode()
+    ).derive(master)
+
+
+@lru_cache(maxsize=4)
+def _key_id(master: bytes) -> str:
+    return hmac.new(master, _INFO + b"key-id", hashlib.sha512).hexdigest()[:8]
+
+
+def _aad(actor: str, seq: int) -> bytes:
+    return "\x1f".join(("v1", _LABEL, actor, str(seq), "data")).encode("utf-8")
 
 
 def seal(data: dict, actor: str, seq: int) -> str:
-    packed = zlib.compress(json.dumps(data, sort_keys=True).encode("utf-8"), 9)
+    packed = base64.b64encode(zlib.compress(json.dumps(data, sort_keys=True).encode(), 9))
+    master = _master_key()
     nonce = os.urandom(12)
-    sealed = _cipher(actor).encrypt(nonce, packed, f"{actor}\x1f{seq}".encode())
-    return base64.b64encode(nonce + sealed).decode("ascii")
+    sealed = AESGCM(_derive(master, actor)).encrypt(nonce, packed, _aad(actor, seq))
+    return f"{_PREFIX}{_key_id(master)}:{base64.b64encode(nonce + sealed).decode('ascii')}"
 
 
 def unseal(text: str, actor: str, seq: int) -> dict:
-    raw = base64.b64decode(text)
+    if not text.startswith(_PREFIX):
+        raise MemoryUnavailable(f"snapshot {seq} of {actor} is not encrypted")
+    master = _master_key()
+    key_id, _, body = text[len(_PREFIX) :].partition(":")
+    if key_id != _key_id(master):
+        raise MemoryUnavailable(f"snapshot {seq} of {actor} is under another {KEY_NAME}")
     try:
-        packed = _cipher(actor).decrypt(raw[:12], raw[12:], f"{actor}\x1f{seq}".encode())
-    except InvalidTag:
-        raise MemoryUnavailable(f"snapshot {seq} of {actor} is under another key") from None
-    return json.loads(zlib.decompress(packed))
+        blob = base64.b64decode(body, validate=True)
+        packed = AESGCM(_derive(master, actor)).decrypt(blob[:12], blob[12:], _aad(actor, seq))
+    except (InvalidTag, binascii.Error, ValueError):
+        raise MemoryUnavailable(f"snapshot {seq} of {actor} could not be decrypted") from None
+    return json.loads(zlib.decompress(base64.b64decode(packed)))
 
 
 # --- snapshots ------------------------------------------------------------------------------
@@ -161,28 +204,25 @@ def load(actor: str, kind: str, memsy: Any = None) -> tuple[int, dict]:
 
 def save(actor: str, session: str, kind: str, seq: int, snapshot: dict, summary: str) -> None:
     """Writes snapshot ``seq`` and waits until Memsy has made it readable."""
-    from memsy import EventPayload
-
     memsy = client()
     sealed = seal(snapshot, actor, seq)
     chunks = [sealed[i : i + PART_CHARS] for i in range(0, len(sealed), PART_CHARS)]
     events = [
-        EventPayload(
-            actor_id=actor,
-            session_id=f"{session}:{seq}:{i + 1}",
-            kind="app_event",
-            content=f"{summary} Memory snapshot {seq}, part {i + 1} of {len(chunks)}.",
-            metadata=json.dumps(
-                {
-                    "type": kind,
-                    "actor": actor,
-                    "format": FORMAT,
-                    "seq": seq,
-                    "part": i,
-                    "parts": len(chunks),
-                    "data": chunk,
-                }
-            ),
+        event(
+            actor,
+            f"{session}:{seq}:{i + 1}",
+            "app_event",
+            f"{summary} Memory snapshot {seq}, part {i + 1} of {len(chunks)}.",
+            {
+                "type": kind,
+                "actor": actor,
+                "format": FORMAT,
+                "seq": seq,
+                "part": i,
+                "parts": len(chunks),
+                "data": chunk,
+            },
+            project_of(actor.split(":", 1)[-1]),
         )
         for i, chunk in enumerate(chunks)
     ]

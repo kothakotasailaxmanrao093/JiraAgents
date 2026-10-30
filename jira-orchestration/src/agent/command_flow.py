@@ -53,6 +53,8 @@ Say = Callable[[Blocks], Awaitable[None]]
 _TOOL = timedelta(minutes=2)
 # Steps that read the story's files (2026-10-27): videos are watched by a model.
 _FILES_TOOL = timedelta(minutes=10)
+# A memory tool: a few Memsy calls, one model call, a snapshot save that waits.
+_MEMORY_TOOL = timedelta(minutes=4)
 PLANNING, CODING, REVIEW = "Planning", "Coding", "Requirement Review"
 
 
@@ -192,7 +194,27 @@ async def create_tdd(cmd: Command) -> CommandResult:
 
     ran: list[str] = []
     await cmd.say(_working("Checking the story is ready (Requirement Review)…", "1 of 3"))
-    review = await _readiness(cmd, ran)
+    # What Orchestration remembers about the card, for the review (2026-10-30).
+    recalled = (
+        await handoff_flow.recall(
+            _run(cmd), cmd.issue_key, bundle, str(cmd.settings.get("repos") or "")
+        )
+        if bundle is not None and not cmd.reusable_review
+        else None
+    )
+    review = await _readiness(cmd, ran, recalled)
+    kept = None
+    if recalled and review is not None and review.outcome is Outcome.REVIEWED:
+        # Its questions are remembered even when the story is not ready yet, so
+        # the answers people give next are linked to them.
+        kept = await handoff_flow.keep(
+            _run(cmd),
+            cmd.issue_key,
+            recalled,
+            list(review.questions),
+            handoff.card(bundle)["title"],
+            review.summary,
+        )
     minimum = int(cmd.settings.get("tdd_min_readiness") or 0)
     points = rules.review_points(review) if review else []
     score = review.readiness_score if review else 0
@@ -222,7 +244,7 @@ async def create_tdd(cmd: Command) -> CommandResult:
     )
     if bundle is not None:
         text, bundle = await _bundle_input(cmd, bundle, review.to_dict())
-        given = await _handoff(cmd, bundle, review)
+        given = await _handoff(cmd, bundle, kept)
     else:
         text = await _tool(
             cmd,
@@ -282,8 +304,8 @@ async def create_tdd(cmd: Command) -> CommandResult:
         )
     await _remember(cmd, story, page, document, facts)
     if given is not None:
-        version, data = handoff.design_event(given["card"], given["services"], page, document)
-        await handoff_flow.remember(_ask(cmd), cmd.issue_key, "design", data, version)
+        version, data = handoff.design_event(given["card"], given["services"], page)
+        await handoff_flow.remember(_run(cmd), cmd.issue_key, "design", data, version)
     where = f"{page.get('space_name') or page['space_key']} ({page['space_key']})"
     return CommandResult(
         reply(
@@ -327,8 +349,11 @@ async def create_tdd(cmd: Command) -> CommandResult:
     )
 
 
-async def _readiness(cmd: Command, ran: list[str]) -> AgentResult | None:
-    """The review of the story — reused when it has not changed since."""
+async def _readiness(
+    cmd: Command, ran: list[str], recalled: dict[str, Any] | None = None
+) -> AgentResult | None:
+    """The review of the story — reused when it has not changed since. With
+    ``recalled``, the card's memory is one more source it reads (2026-10-30)."""
     if cmd.reusable_review:
         return AgentResult.from_dict(cmd.reusable_review)
     spec = cmd.review_spec
@@ -339,8 +364,11 @@ async def _readiness(cmd: Command, ran: list[str]) -> AgentResult | None:
         "comment_id": cmd.comment_id,
         "run_id": cmd.run_id,
         **({"previous_questions": cmd.previous_questions} if cmd.previous_questions else {}),
-        # The review reads and keeps the card's memory (2026-10-30).
-        **({"memory_repos": str(cmd.settings.get("repos") or "")} if _handoff_on(cmd) else {}),
+        **(
+            {"memory_document": recalled["document"]}
+            if recalled and recalled.get("document")
+            else {}
+        ),
         **spec.forced_payload,
     }
     out, problem = await _call(
@@ -443,27 +471,14 @@ def _handoff_on(cmd: Command) -> bool:
     return _memory(cmd) and bool(cmd.settings.get("handoff"))
 
 
-def _ask(cmd: Command) -> handoff_flow.Ask:
-    """One Requirement Review run on the card's memory: its output, or None.
-    Each run has its own workflow id (two pull requests are two history writes)."""
-    count = iter(range(1, 1_000))
-    overrides = cmd.settings.get("task_queue_overrides") or {}
+def _run(cmd: Command) -> handoff_flow.Run:
+    """One memory tool for the handoff steps; a failure is a result, not a crash."""
 
-    async def ask(payload: dict[str, Any], name: str) -> dict[str, Any] | None:
-        raw, problem = await _call(
-            cmd,
-            handoff_flow.REVIEW_AGENT,
-            {**payload, "run_id": cmd.run_id},
-            f"tdd-{name}-{next(count)}-{cmd.run_id}",
-            handoff_flow.TIMEOUT_MINUTES,
-            str(overrides.get(handoff_flow.REVIEW_AGENT) or ""),
-        )
-        out = handoff_flow.output(raw)
-        if out is None:
-            logger.warning(f"run {cmd.run_id}: Review {name} failed: {problem or raw}")
-        return out
+    async def run(name: str, *args: Any) -> dict[str, Any]:
+        out = await _tool(cmd, name, *args, timeout=_MEMORY_TOOL)
+        return out if "ok" in out else {"ok": False, "error": f"{name} returned nothing"}
 
-    return ask
+    return run
 
 
 async def _bundle(cmd: Command, story: dict[str, Any]) -> dict[str, Any] | None:
@@ -511,27 +526,20 @@ async def _bundle_input(
 
 
 async def _handoff(
-    cmd: Command, bundle: dict[str, Any], review: AgentResult
+    cmd: Command, bundle: dict[str, Any], kept: dict[str, Any] | None
 ) -> dict[str, Any] | None:
     """The agreed input for Planning: the card, its ranked services and the
-    review's questions with every answer in the comments so far (Review's
-    memory, brought up to date now). None when the memory cannot give it — the
-    TDD is then written from the old input."""
+    review's questions with every answer in the comments so far. ``kept`` is the
+    memory as the readiness review just left it; without it the memory is
+    brought up to date now. None when the memory cannot give it — the TDD is
+    then written from the old input."""
     card = handoff.card(bundle, list(bundle.get("files") or []))
-    kept = await handoff_flow.memory(
-        _ask(cmd),
-        cmd.issue_key,
-        card["title"],
-        handoff.card_text(card),
-        list(bundle.get("people_comments") or []),
-        str(cmd.settings.get("repos") or ""),
+    kept = kept or await handoff_flow.refresh(
+        _run(cmd), cmd.issue_key, bundle, str(cmd.settings.get("repos") or "")
     )
-    kept = kept or review.memory
     if not kept:
         return None
-    return handoff.payload(
-        card, list(kept.get("services") or []), list(kept.get("questions") or [])
-    )
+    return handoff.payload(card, kept["services"], kept["questions"])
 
 
 async def _story_facts(
@@ -557,12 +565,18 @@ async def _story_facts(
     if not text.get("ok") or not text.get("text"):
         logger.warning(f"run {cmd.run_id}: no story text for the facts check: {text.get('error')}")
         return None
+    stored = await _tool(cmd, "tdd_memory", cmd.issue_key, timeout=_MEMORY_TOOL)
+    if not stored.get("ok"):
+        logger.warning(f"run {cmd.run_id}: no TDD memory for the facts check: {stored}")
+        return None
     out, problem = await _planning(
         cmd,
         {
             "mode": "facts",
             "issue_key": cmd.issue_key,
             "story_text": text["text"],
+            # The story's TDD memory, kept by Orchestration (2026-10-30).
+            "memory": {"snapshot": stored["snapshot"]},
             "run_id": cmd.run_id,
         },
         "tdd-facts",
@@ -644,9 +658,15 @@ async def _remember(
     supersedes: list[str] | None = None,
     source: str = "",
 ) -> None:
-    """Tell Planning a TDD version was published: its facts and the decisions in
-    it. Best effort — the TDD is published either way; a miss is logged."""
+    """A TDD version was published: Planning makes the story's new snapshot
+    (its facts and the decisions in it) from the stored one, and Orchestration
+    keeps it (2026-10-30). Best effort — the TDD is published either way; a miss
+    is logged."""
     if not _memory(cmd):
+        return
+    stored = await _tool(cmd, "tdd_memory", cmd.issue_key, timeout=_MEMORY_TOOL)
+    if not stored.get("ok"):
+        logger.warning(f"run {cmd.run_id}: the TDD memory could not be read: {stored}")
         return
     payload: dict[str, Any] = {
         "mode": "record",
@@ -657,6 +677,7 @@ async def _remember(
         "decisions": [*(document.get("decisions") or []), *(new_decisions or [])],
         "superseded": list(supersedes or []),
         "source": source or str(page.get("url") or ""),
+        "memory": {"snapshot": stored["snapshot"]},
         "run_id": cmd.run_id,
     }
     if facts:
@@ -667,8 +688,24 @@ async def _remember(
             "story_text": str(facts.get("story_text") or ""),
         }
     out, problem = await _planning(cmd, payload, "tdd-record")
-    if out is None or out.get("status") != "success":
+    snapshot = ((out or {}).get("stored") or {}).get("snapshot")
+    if out is None or out.get("status") != "success" or not isinstance(snapshot, dict):
         logger.warning(f"run {cmd.run_id}: Planning did not record the TDD: {problem or out}")
+        return
+    kept = await _tool(
+        cmd,
+        "keep_tdd_memory",
+        cmd.issue_key,
+        int(stored.get("seq") or 0) + 1,
+        snapshot,
+        payload["tdd_version"],
+        payload["page_id"],
+        payload["decisions"],
+        payload["superseded"],
+        timeout=_MEMORY_TOOL,
+    )
+    if not kept.get("ok"):
+        logger.warning(f"run {cmd.run_id}: the TDD memory was not kept: {kept.get('error')}")
 
 
 # --- explain why / why not / update the TDD ------------------------------------------
@@ -699,12 +736,16 @@ async def _discuss(cmd: Command, page: dict[str, Any], request: str, kind: str) 
         "tdd_text": page["text"],
         "discussion": page.get("discussion") or [],
         "issue_key": cmd.issue_key,
-        # The page's discussion is one Memsy session in Planning (2026-10-26).
-        "page_id": str(page.get("page_id") or cmd.page_id or ""),
         "run_id": cmd.run_id,
     }
+    page_id = str(page.get("page_id") or cmd.page_id or "")
     if kind:
         payload["kind"] = kind
+        # The story's facts, decisions in force and earlier conversation about
+        # this TDD, kept by Orchestration (2026-10-30).
+        known = await _tool(cmd, "design_context", cmd.issue_key, request, timeout=_MEMORY_TOOL)
+        if known.get("ok"):
+            payload["memory"] = {k: known[k] for k in ("facts", "decisions", "earlier")}
     out, problem = await _planning(cmd, payload, "design")
     if out is None or out.get("status") != "success":
         return CommandResult(
@@ -715,6 +756,19 @@ async def _discuss(cmd: Command, page: dict[str, Any], request: str, kind: str) 
         )
     verdict = memory.verdict_of(out)
     answer = str(out.get("answer") or "")
+    if kind:
+        # The question and the answer, one turn of the TDD's conversation.
+        await _tool(
+            cmd,
+            "remember_exchange",
+            cmd.issue_key,
+            page_id,
+            request,
+            answer,
+            kind,
+            verdict,
+            timeout=_MEMORY_TOOL,
+        )
     refused = memory.refused_lines(out)
     sections: list[tuple[str, object]] = [("Answer", answer)]
     topic = request[:70]
@@ -1064,9 +1118,8 @@ async def _pr_done(
     history (branch, service, link), so a later card about the same thing finds it."""
     if _handoff_on(cmd):
         title = str(page.get("title") or cmd.issue_key)
-        ask = _ask(cmd)
         for event_id, data in handoff.pr_events(out, title):
-            await handoff_flow.remember(ask, cmd.issue_key, "pr_opened", data, event_id)
+            await handoff_flow.remember(_run(cmd), cmd.issue_key, "pr_opened", data, event_id)
     return _pr_result(cmd, page, plan, out, prs, ran)
 
 
@@ -1148,23 +1201,27 @@ async def _plan(
     With ``given`` (the agreed input, 2026-10-29) Planning builds its text from
     the card, the ranked services and the questions with their answers, and
     ``issue_text`` is what follows them (a revision's instructions, the earlier
-    designs); only the ranked services' repositories are synced."""
+    designs). Every repository is synced: the ranked services are named first,
+    so they are designed, and Planning's own code search adds any service the
+    ranking missed. The decisions in force come from Orchestration's memory."""
     payload: dict[str, Any] = {
         "issue_text": issue_text,
         "repos": cmd.settings.get("repos") or "",
         "return_document": True,
         "issue_key": cmd.issue_key,
-        # Planning loads the story's and the project's decisions in force.
         "project_key": cmd.issue_key.split("-")[0],
         "run_id": cmd.run_id,
     }
     if given is not None:
-        payload |= {
-            **given,
-            "issue_text": "",
-            "notes": issue_text,
-            "repos": handoff.ranked_repos(str(payload["repos"]), given["services"]),
-        }
+        payload |= {**given, "issue_text": "", "notes": issue_text}
+    if _memory(cmd):
+        # The story's decisions in force, and its project's on the ranked
+        # services (all of the project's when none is ranked).
+        services = [s["service"] for s in (given or {}).get("services") or []]
+        found = await _tool(
+            cmd, "decisions_in_force", cmd.issue_key, services, timeout=_MEMORY_TOOL
+        )
+        payload["decisions"] = list(found.get("decisions") or [])
     out, problem = await _call(
         cmd,
         str(cmd.settings.get("planning_agent") or "planning_agent"),

@@ -104,19 +104,8 @@ def planning_input(
     }
 
 
-def ranked_repos(repos_text: str, services: list[dict[str, Any]]) -> str:
-    """Only the ranked services' lines of the configured repositories (the
-    agreed input); all of them when none is ranked or none matches."""
-    wanted = {str(s.get("service") or "") for s in services}
-    kept = [
-        line
-        for line in (repos_text or "").splitlines()
-        if line.split(":", 1)[0].split("=", 1)[0].strip() in wanted
-    ]
-    return "\n".join(kept) if kept else repos_text
-
-
 def questions_for_planning(questions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The agreed input's questions: the question and its answers."""
     return [
         {"question": str(q.get("question") or ""), "answers": list(q.get("answers") or [])}
         for q in questions
@@ -151,14 +140,35 @@ def service_lines(services: list[dict[str, Any]]) -> list[str]:
     return lines
 
 
+def _numbered(q: dict[str, Any]) -> str:
+    return f"{q['id']} {q.get('question')}" if q.get("id") else str(q.get("question"))
+
+
 def answer_lines(questions: list[dict[str, Any]]) -> list[str]:
     """The questions answered so far, each with its answer."""
     lines = []
     for q in questions:
         answers = [str(a).strip() for a in q.get("answers") or [] if str(a).strip()]
         if answers:
-            lines.append(f"{q.get('question')} → {' / '.join(answers)}"[:400])
+            lines.append(f"{_numbered(q)} → {' / '.join(answers)}"[:400])
     return lines[:MAX_ANSWER_LINES]
+
+
+def open_lines(questions: list[dict[str, Any]]) -> list[str]:
+    """The questions not answered yet, numbered so a person can answer "Q3: …"."""
+    return [_numbered(q)[:300] for q in questions if not q.get("answers")][:MAX_ANSWER_LINES]
+
+
+def memory_sections(kept: dict[str, Any] | None) -> list[tuple[str, object]]:
+    """What a review's reply shows of the card's memory."""
+    if not kept:
+        return []
+    questions = list(kept.get("questions") or [])
+    return [
+        ("Services this card touches (0-10)", service_lines(list(kept.get("services") or []))),
+        ("Answered so far", answer_lines(questions)),
+        ('Still open — answer in a comment starting "Q<number>:"', open_lines(questions)),
+    ]
 
 
 def with_sections(
@@ -178,23 +188,16 @@ def with_sections(
 
 
 def design_event(
-    card: dict[str, Any],
-    services: list[dict[str, Any]],
-    page: dict[str, Any],
-    document: dict[str, Any],
+    card: dict[str, Any], services: list[dict[str, Any]], page: dict[str, Any]
 ) -> tuple[str, dict[str, Any]]:
+    """A published TDD in the history: its version and services. Its decisions
+    live in the TDD memory only, one place (2026-10-30)."""
     version = str(page.get("tdd_version") or page.get("version") or "")
-    decisions = [
-        str(d.get("choice") or d.get("title") or "")
-        for d in document.get("decisions") or []
-        if isinstance(d, dict)
-    ]
     return version, {
         "title": card.get("title") or "",
         "version": version,
         "page": str(page.get("url") or ""),
         "services": [s["service"] for s in services if s.get("service")],
-        "decisions": [d for d in decisions if d][:10],
     }
 
 

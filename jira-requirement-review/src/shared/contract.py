@@ -145,11 +145,6 @@ class AgentResult:
     # Files the child made, kept in the agents' shared storage, for the next
     # agent to read: [{"name": "…pdf", "file_key": "…"}] (2026-10-08).
     documents: list[dict[str, str]] = field(default_factory=list)
-    # REVIEWED, when the router asked for the card's memory (2026-10-30): what
-    # the review keeps in Memsy, for the reply and the TDD's input.
-    # {"services": [{"service", "repo", "branch", "rank", "reason", "prs"}],
-    #  "questions": [{"question", "answers": ["..."]}]}. Empty otherwise.
-    memory: dict[str, Any] = field(default_factory=dict)
 
     # Mandatory in meaning: present on every run, even when empty.
     sources_read: list[str] = field(default_factory=list)

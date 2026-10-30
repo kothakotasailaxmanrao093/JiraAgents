@@ -75,6 +75,8 @@ _NOT_ROUTED = "Not routed — the request could not be read, so it was never cla
 _CLASSIFY_TIMEOUT = timedelta(minutes=2)
 _POST_TIMEOUT = timedelta(minutes=2)
 _FILES_TIMEOUT = timedelta(minutes=10)  # reading a report's files and recordings
+# A memory tool: a few Memsy calls, one model call, a snapshot save that waits.
+_MEMORY_TIMEOUT = timedelta(minutes=4)
 # A queued request checks whether the job ahead on its ticket has finished.
 _POLL_SECONDS = 10
 # sleep(seconds) — asyncio.sleep in the workflow, where it is a durable timer.
@@ -387,12 +389,17 @@ async def _orchestrate(
         previous = previous_review_points(state)
         if previous:
             extra["previous_questions"] = previous
-        if _handoff_on(gate):
-            # The review reads and keeps the card's memory (2026-10-30): earlier
-            # answers, earlier cards, the services ranked from these.
-            extra["memory_repos"] = str((gate.get("commands") or {}).get("repos") or "")
+    recalled = (
+        await _recall(gate, execute, issue_key)
+        if intent == "REVIEW" and _handoff_on(gate)
+        else None
+    )
+    if recalled and recalled.get("document"):
+        # What Orchestration remembers about the card (2026-10-30), read by the
+        # review as one more source.
+        extra["memory_document"] = recalled["document"]
     blocks, ran, result = await _dispatch_and_compose(
-        spec, decision, gate, dispatch, execute, run_id, issue_key, comment_id, extra
+        spec, decision, gate, dispatch, execute, run_id, issue_key, comment_id, extra, recalled
     )
     after_build: list[dict[str, Any]] = []
     if after.follows(result):
@@ -854,6 +861,7 @@ async def _dispatch_and_compose(
     issue_key: str,
     comment_id: str,
     extra_payload: dict[str, Any] | None = None,
+    recalled: dict[str, Any] | None = None,
 ) -> tuple[list[tuple[str, object]], list[str], AgentResult | None]:
     """Call one child and turn its answer into the reply.
 
@@ -993,21 +1001,17 @@ async def _dispatch_and_compose(
         ran=ran,
         notification=notification,
     )
-    if spec.intent == "REVIEW" and result.memory:
-        # What the review keeps in the card's memory (2026-10-30).
-        blocks = handoff.with_sections(
-            blocks,
-            [
-                (
-                    "Services this card touches (0-10)",
-                    handoff.service_lines(list(result.memory.get("services") or [])),
-                ),
-                (
-                    "Answered so far",
-                    handoff.answer_lines(list(result.memory.get("questions") or [])),
-                ),
-            ],
+    if recalled and result.outcome is Outcome.REVIEWED:
+        # The review's questions and the card kept in the memory (2026-10-30).
+        kept = await handoff_flow.keep(
+            _runner(execute),
+            issue_key,
+            recalled,
+            list(result.questions),
+            str((recalled.get("card") or {}).get("title") or ""),
+            result.summary,
         )
+        blocks = handoff.with_sections(blocks, handoff.memory_sections(kept))
     return blocks, [spec.display_name, *ran[1:]], result
 
 
@@ -1017,32 +1021,27 @@ def _handoff_on(commands_or_gate: dict[str, Any]) -> bool:
     return bool(commands.get("memory")) and bool(commands.get("handoff"))
 
 
-def _review_ask(queue: str, dispatch: Dispatch, run_id: str, prefix: str) -> handoff_flow.Ask:
-    """One Requirement Review run on the card's memory: its output, or None.
-    Each run has its own workflow id."""
-    count = iter(range(1, 1_000))
+def _runner(execute: Execute) -> handoff_flow.Run:
+    """One memory tool, its failure a result rather than a crash."""
 
-    async def ask(payload: dict[str, Any], name: str) -> dict[str, Any] | None:
-        options: dict[str, Any] = {
-            "workflow_id": f"{prefix}-{name}-{run_id}-{next(count)}",
-            "execution_timeout": timedelta(minutes=handoff_flow.TIMEOUT_MINUTES),
-            "retry_policy": RetryPolicy(maximum_attempts=1),
-        }
-        if queue:
-            options["task_queue"] = queue
-        try:
-            raw = await dispatch(
-                handoff_flow.REVIEW_AGENT, {**payload, "run_id": run_id}, **options
-            )
-        except Exception as exc:  # noqa: BLE001 — a help, never a requirement
-            logger.warning(f"run {run_id}: Review {name} failed: {type(exc).__name__}: {exc}")
-            return None
-        out = handoff_flow.output(raw)
-        if out is None:
-            logger.warning(f"run {run_id}: Review {name} did not succeed: {raw}")
-        return out
+    async def run(name: str, *args: Any) -> dict[str, Any]:
+        out = await _safe(execute, name, *args, start_to_close_timeout=_MEMORY_TIMEOUT)
+        return {"ok": False, **out} if "raised" in out else out
 
-    return ask
+    return run
+
+
+async def _recall(gate: dict[str, Any], execute: Execute, issue_key: str) -> dict[str, Any] | None:
+    """The card read once and its memory recalled, before a review; None when
+    either cannot be read (the review then runs as before)."""
+    bundle = await _safe(
+        execute, "story_bundle", issue_key, [], start_to_close_timeout=_FILES_TIMEOUT
+    )
+    if not bundle.get("ok"):
+        return None
+    repos = str((gate.get("commands") or {}).get("repos") or "")
+    recalled = await handoff_flow.recall(_runner(execute), issue_key, bundle, repos)
+    return {**recalled, "card": handoff.card(bundle)} if recalled else None
 
 
 # What Planning's code investigation adds to a bug report's review.
@@ -1425,16 +1424,7 @@ async def _send_github_events(
                 # changed (2026-10-29), so a later card's review finds them.
                 event_id, data = handoff.merge_event(event)
                 await handoff_flow.remember(
-                    _review_ask(
-                        str(scan.get("review_queue") or ""),
-                        dispatch,
-                        str(event.get("key") or "merge")[-40:],
-                        "gh",
-                    ),
-                    event["issue_key"],
-                    "pr_state",
-                    data,
-                    event_id,
+                    _runner(execute), event["issue_key"], "pr_state", data, event_id
                 )
         done = await _safe(
             execute,

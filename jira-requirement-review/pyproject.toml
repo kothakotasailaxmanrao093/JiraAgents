@@ -1,6 +1,6 @@
 [project]
 name = "jira-requirement-review"
-version = "2.2.34"
+version = "2.2.35"
 description = "Reviews a Jira requirement against its parent, sub-tasks, linked issues and attachments, and reports what is assumed, ambiguous or missing"
 authors = [{ name = "Kothakota Sai Laxman Rao", email = "kothakota.sailaxmanrao@calfus.com" }]
 readme = "README.md"
@@ -23,9 +23,6 @@ dependencies = [
     # Video/audio attachments: a static ffmpeg binary inside the wheel, so the
     # platform pod needs no system ffmpeg (shared/video.py, 2026-10-21).
     "imageio-ffmpeg>=0.6,<1.0",
-    # The card's memory (2026-10-30): Memsy, and its snapshots encrypted.
-    "memsy==0.3.5",
-    "cryptography>=43",
 ]
 
 [dependency-groups]

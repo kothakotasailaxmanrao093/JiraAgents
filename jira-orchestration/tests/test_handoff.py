@@ -1,17 +1,18 @@
-"""The story read once, the review's questions with their answers, the ranked
-services, and each card's history (ORCH_HANDOFF, 2026-10-29; kept by the
-Requirement Review agent since 2026-10-30).
+"""The card's memory, kept by Orchestration alone (ORCH_HANDOFF, 2026-10-30).
 
-    @Aetherion review       the review reads and keeps the card's memory; the
-                            reply adds the ranked services and the answers
-    @Aetherion create TDD   the story is read once; Review brings the memory up
-                            to date; Planning gets the card, the ranked services
-                            and the questions with their answers
+    @Aetherion review       Orchestration recalls the card (answers since,
+                            earlier cards, decisions, ranked services) and gives
+                            it to the review; after it, keeps its questions; the
+                            reply adds the services, the answers and what is open
+    @Aetherion create TDD   the story is read once; the readiness review is given
+                            the memory; Planning gets the card, the ranked
+                            services and the questions with their answers, and
+                            every repository
     @Aetherion code         each pull request goes into the project's history
     a merge                 so do its branch and changed files
 
-Review, Planning and Jira are faked to their contracts; with ORCH_HANDOFF off
-nothing of this runs (the other test files run that way).
+The memory tools, Review, Planning and Jira are faked to their contracts; with
+ORCH_HANDOFF off nothing of this runs (the other test files run that way).
 """
 
 from __future__ import annotations
@@ -51,10 +52,13 @@ RANKED = [
     },
 ]
 QUESTIONS = [
-    {"question": "Is the limit per account?", "answers": ["Yes, per account."]},
-    {"question": "What is the reset time?", "answers": []},
+    {"id": "Q1", "question": "Is the limit per account?", "answers": ["Yes, per account."]},
+    {"id": "Q2", "question": "What is the reset time?", "answers": []},
 ]
-MEMORY = {"services": RANKED, "questions": QUESTIONS}
+KEPT = {"ok": True, "services": RANKED, "questions": QUESTIONS}
+DOC = {"source_id": "card_memory", "source_label": "Earlier answers and related work"}
+RECALLED = {"ok": True, "memory": {"seq": 2, "services": RANKED}, "document": DOC}
+DOWN = {"ok": False, "error": "MemoryUnavailable: not set"}
 BUNDLE = {
     "ok": True,
     "root": {
@@ -102,32 +106,21 @@ SEEN = [
 
 
 class Agents:
-    """Review and Planning faked to their contracts, by mode; every call recorded."""
+    """Review, Planning and Coding faked to their contracts; every call recorded."""
 
-    def __init__(self, memory_fails: bool = False, review_memory: dict | None = None):
-        self.memory_fails = memory_fails
-        self.review_memory = review_memory or {}
+    def __init__(self) -> None:
         self.calls: list[tuple[str, dict, dict]] = []
 
     async def dispatch(self, agent: str, payload: dict, **options: Any) -> Any:
         self.calls.append((agent, payload, options))
         if agent == "JiraRequirementReview":
-            mode = payload.get("mode")
-            if mode == "memory":
-                if self.memory_fails:
-                    return [{"status": "error", "message": "Memsy is not reachable"}]
-                return [{"status": "success", "mode": "memory", **MEMORY}]
-            if mode == "history":
-                return [{"status": "success", "mode": "history", "actor": "work:BGV"}]
-            asked = ["Is the limit per account?", "What is the reset time?"]
-            return [{**reviewed(4, asked), "memory": self.review_memory}]
+            return [reviewed(4, ["Is the limit per account?", "What is the reset time?"])]
         if agent == "coding-agent":
             return coded()
-        mode = payload.get("mode") or "plan"
-        if mode == "facts":
+        if payload.get("mode") == "facts":
             return {"status": "success", "verdict": "new", "facts": [], "facts_hash": "fh"}
-        if mode == "record":
-            return {"status": "success"}
+        if payload.get("mode") == "record":
+            return {"status": "success", "stored": {"snapshot": {}}}
         return {
             "status": "success",
             "results": [],
@@ -137,14 +130,11 @@ class Agents:
             },
         }
 
-    def sent(self, agent: str, mode: str | None = None) -> list[dict]:
-        return [p for a, p, _ in self.calls if a == agent and p.get("mode") == mode]
-
-    def review(self, mode: str | None = None, n: int = 0) -> dict:
-        return self.sent("JiraRequirementReview", mode)[n]
+    def sent(self, agent: str) -> list[dict]:
+        return [p for a, p, _ in self.calls if a == agent]
 
     def plan(self) -> dict:
-        return self.sent("planning_agent")[0]
+        return [p for p in self.sent("planning_agent") if not p.get("mode")][0]
 
 
 def handoff_tools(**over: Any) -> Tools:
@@ -156,6 +146,13 @@ def handoff_tools(**over: Any) -> Tools:
         earlier_designs={"designs": []},
         read_tdd={"ok": False},
         remember_fingerprint={"ok": True},
+        recall_card=over.pop("recall_card", RECALLED),
+        keep_card=over.pop("keep_card", KEPT),
+        refresh_card=over.pop("refresh_card", KEPT),
+        write_history={"ok": True},
+        tdd_memory={"ok": True, "seq": 0, "snapshot": {}},
+        keep_tdd_memory={"ok": True},
+        decisions_in_force={"ok": True, "decisions": []},
         **over,
     )
 
@@ -170,7 +167,21 @@ async def test_the_story_is_read_once_for_the_whole_tdd() -> None:
     assert t.count("story_text") == 0 and t.count("planning_input") == 0
 
 
-async def test_planning_gets_the_agreed_input() -> None:
+async def test_the_readiness_review_is_given_the_memory_and_its_questions_are_kept() -> None:
+    t, agents = handoff_tools(), Agents()
+    await run_command(command("TDD", "@Aetherion create TDD", t, agents, settings=ON))
+    key, title, text, comments, repos = t.args("recall_card")
+    assert (key, title, repos) == ("BGV-105", "Daily transfer limit", SETTINGS["repos"])
+    assert "=== spec.pdf ===" in text
+    assert comments == [{"id": "10520", "text": "Yes, per account."}]
+    assert agents.sent("JiraRequirementReview")[0]["memory_document"] == DOC
+    _, memory, asked, *_ = t.args("keep_card")
+    assert memory == RECALLED["memory"]
+    assert asked == ["Is the limit per account?", "What is the reset time?"]
+    assert t.count("refresh_card") == 0  # the review just brought it up to date
+
+
+async def test_planning_gets_the_agreed_input_and_every_repository() -> None:
     t, agents = handoff_tools(), Agents()
     await run_command(command("TDD", "@Aetherion create TDD", t, agents, settings=ON))
     sent = agents.plan()
@@ -184,23 +195,24 @@ async def test_planning_gets_the_agreed_input() -> None:
         {"name": "error.png", "content": "Error: limit reached"},
     ]
     assert sent["services"] == RANKED
-    assert sent["questions"] == QUESTIONS
-    assert sent["repos"] == "bank: AetherionAgentDemo/bank-transfer-service"
+    assert sent["questions"] == [
+        {"question": "Is the limit per account?", "answers": ["Yes, per account."]},
+        {"question": "What is the reset time?", "answers": []},
+    ]
+    # The ranking orders the design; Planning's code search may add a service.
+    assert sent["repos"] == SETTINGS["repos"]
+    assert t.args("decisions_in_force") == ("BGV-105", ["bank"])
 
 
-async def test_the_readiness_review_reads_and_keeps_the_cards_memory() -> None:
+async def test_a_reused_review_brings_the_memory_up_to_date_for_the_tdd() -> None:
     t, agents = handoff_tools(), Agents()
-    await run_command(command("TDD", "@Aetherion create TDD", t, agents, settings=ON))
-    assert agents.review("delegated")["memory_repos"] == SETTINGS["repos"]
-
-
-async def test_review_brings_the_memory_up_to_date_with_the_comments() -> None:
-    t, agents = handoff_tools(), Agents()
-    await run_command(command("TDD", "@Aetherion create TDD", t, agents, settings=ON))
-    asked = agents.review("memory")
-    assert asked["issue_key"] == "BGV-105" and asked["title"] == "Daily transfer limit"
-    assert asked["comments"] == [{"id": "10520", "text": "Yes, per account."}]
-    assert "=== spec.pdf ===" in asked["card_text"] and asked["repos"] == SETTINGS["repos"]
+    await run_command(
+        command("TDD", "@Aetherion create TDD", t, agents, settings=ON, reusable_review=reviewed(4))
+    )
+    assert t.count("recall_card") == 0 and t.count("keep_card") == 0
+    key, title, _, comments, _ = t.args("refresh_card")
+    assert (key, title) == ("BGV-105", "Daily transfer limit")
+    assert agents.plan()["services"] == RANKED
 
 
 async def test_the_reply_shows_the_ranked_services_and_the_answers() -> None:
@@ -215,27 +227,22 @@ async def test_the_reply_shows_the_ranked_services_and_the_answers() -> None:
     ]
 
 
-async def test_the_tdd_goes_into_the_projects_history() -> None:
+async def test_the_tdd_goes_into_the_projects_history_without_its_decisions() -> None:
     t, agents = handoff_tools(), Agents()
     await run_command(command("TDD", "@Aetherion create TDD", t, agents, settings=ON))
-    kept = agents.review("history")
-    assert kept["event"] == "design" and kept["event_id"] == "v1.0"
-    assert kept["data"]["services"] == ["bank"]
-    assert kept["data"]["decisions"] == ["limit per account"]
-
-
-async def test_when_the_memory_cannot_be_refreshed_the_reviews_own_is_used() -> None:
-    t, agents = handoff_tools(), Agents(memory_fails=True, review_memory=MEMORY)
-    await run_command(command("TDD", "@Aetherion create TDD", t, agents, settings=ON))
-    assert agents.plan()["services"] == RANKED
+    key, event, data, event_id = t.args("write_history")
+    assert (key, event, event_id) == ("BGV-105", "design", "v1.0")
+    assert data["services"] == ["bank"] and "decisions" not in data
 
 
 async def test_without_the_memory_the_tdd_is_written_from_the_old_input() -> None:
-    t, agents = handoff_tools(), Agents(memory_fails=True)
+    t = handoff_tools(recall_card=DOWN, refresh_card=DOWN)
+    agents = Agents()
     out = await run_command(command("TDD", "@Aetherion create TDD", t, agents, settings=ON))
     sent = agents.plan()
     assert "card" not in sent and "Requirement BGV-105: Daily transfer limit" in sent["issue_text"]
-    assert agents.sent("JiraRequirementReview", "history") == []
+    assert "memory_document" not in agents.sent("JiraRequirementReview")[0]
+    assert t.count("keep_card") == 0 and t.count("write_history") == 0
     assert "Services designed, by rank" not in dict(out.blocks)
 
 
@@ -248,7 +255,7 @@ async def test_an_unreadable_story_falls_back_to_the_old_reads() -> None:
     agents = Agents()
     await run_command(command("TDD", "@Aetherion create TDD", t, agents, settings=ON))
     assert t.count("story_text") == 1 and t.count("planning_input") == 1
-    assert "card" not in agents.plan()
+    assert "card" not in agents.plan() and t.count("recall_card") == 0
 
 
 async def test_the_memory_check_compares_pictures_by_file_not_by_their_reading() -> None:
@@ -277,12 +284,12 @@ async def test_each_pull_request_goes_into_the_projects_history() -> None:
         branch_defaults={"repo": "o/r", "source": "main", "branch": "feature/x", "target": "main"},
         save_code_plan={"saved": True},
         planning_input={"issue_text": "Requirement"},
+        write_history={"ok": True},
     )
-    agents = Agents()
-    await run_command(command("CODE", "@Aetherion code confirm", t, agents, settings=ON))
-    kept = agents.review("history")
-    assert kept["event"] == "pr_opened" and kept["event_id"] == "2"
-    assert kept["data"] | {} == {
+    await run_command(command("CODE", "@Aetherion code confirm", t, Agents(), settings=ON))
+    key, event, data, event_id = t.args("write_history")
+    assert (key, event, event_id) == ("BGV-105", "pr_opened", "2")
+    assert data == {
         "title": "BGV-105 - TDD v1.0",
         "repo": "AetherionAgentDemo/bank-transfer-service",
         "pr": 2,
@@ -305,39 +312,47 @@ def _review_gate(commands: dict[str, Any] | None = None) -> dict[str, Any]:
     )
 
 
-async def test_a_review_reads_its_memory_and_shows_the_services_and_answers() -> None:
-    t = Tools(ingress_check=_review_gate())
+def _review_tools(**over: Any) -> Tools:
+    return Tools(
+        ingress_check=_review_gate(over.pop("commands", None)),
+        story_bundle={**BUNDLE, "root": {**BUNDLE["root"], "key": "FL-120"}},
+        recall_card=over.pop("recall_card", RECALLED),
+        keep_card=over.pop("keep_card", KEPT),
+        **over,
+    )
+
+
+async def test_a_review_is_given_the_memory_and_its_questions_are_kept() -> None:
+    t = _review_tools()
     sent: list[tuple[str, dict]] = []
 
     async def dispatch(agent, payload, **options):
         sent.append((agent, payload))
-        return [reviewed_contract(questions=["What is the reset time?"], memory=MEMORY)]
+        return [reviewed_contract(questions=["What is the reset time?"], summary="Ready 4/5.")]
 
     await run_router(PAYLOAD, t.execute, dispatch)
-    ((agent, payload),) = sent
-    assert agent == "JiraRequirementReview"
-    assert payload["memory_repos"] == "bank: AetherionAgentDemo/bank-transfer-service"
+    ((agent, payload),) = sent  # no other agent is asked for the memory
+    assert agent == "JiraRequirementReview" and payload["memory_document"] == DOC
+    key, _, _, comments, repos = t.args("recall_card")
+    assert key == "FL-120" and repos == "bank: AetherionAgentDemo/bank-transfer-service"
+    assert comments == [{"id": "10520", "text": "Yes, per account."}]
+    assert t.args("keep_card") == (
+        "FL-120",
+        RECALLED["memory"],
+        ["What is the reset time?"],
+        "Daily transfer limit",
+        "Ready 4/5.",
+    )
     reply = t.reply_text()
     assert "Services this card touches (0-10)" in reply
     assert "bank — 9/10: spec.pdf names POST /transfers (earlier: BGV-90 PR #41, merged)" in reply
-    assert "Is the limit per account? → Yes, per account." in reply
-    assert t.count("story_bundle") == 0
+    assert "Q1 Is the limit per account? → Yes, per account." in reply
+    assert 'Still open — answer in a comment starting "Q<number>:"' in reply
+    assert "Q2 What is the reset time?" in reply
 
 
-async def test_a_review_without_memory_has_no_memory_sections() -> None:
-    t = Tools(ingress_check=_review_gate())
-
-    async def dispatch(agent, payload, **options):
-        return [reviewed_contract()]
-
-    await run_router(PAYLOAD, t.execute, dispatch)
-    reply = t.reply_text()
-    assert "Requirement review — no gaps found" in reply
-    assert "Services this card touches" not in reply
-
-
-async def test_without_handoff_a_review_is_not_asked_for_memory() -> None:
-    t = Tools(ingress_check=_review_gate({**SETTINGS, "memory": True}))
+async def test_a_review_stands_when_the_memory_is_down() -> None:
+    t = _review_tools(recall_card=DOWN)
     sent: list[dict] = []
 
     async def dispatch(agent, payload, **options):
@@ -345,7 +360,23 @@ async def test_without_handoff_a_review_is_not_asked_for_memory() -> None:
         return [reviewed_contract()]
 
     await run_router(PAYLOAD, t.execute, dispatch)
-    assert len(sent) == 1 and "memory_repos" not in sent[0]
+    assert "memory_document" not in sent[0] and t.count("keep_card") == 0
+    reply = t.reply_text()
+    assert "Requirement review — no gaps found" in reply
+    assert "Services this card touches" not in reply
+
+
+async def test_without_handoff_a_review_reads_no_memory() -> None:
+    t = _review_tools(commands={**SETTINGS, "memory": True})
+    sent: list[dict] = []
+
+    async def dispatch(agent, payload, **options):
+        sent.append(payload)
+        return [reviewed_contract()]
+
+    await run_router(PAYLOAD, t.execute, dispatch)
+    assert "memory_document" not in sent[0]
+    assert t.count("story_bundle") == 0 and t.count("recall_card") == 0
 
 
 # --- merge --------------------------------------------------------------------------------
@@ -375,10 +406,12 @@ async def test_a_merge_goes_into_the_projects_history_with_its_files() -> None:
         "timeout_minutes": 15,
         "repos_text": "bank: o/r",
         "handoff": True,
-        "review_queue": "review-queue",
     }
     t = Tools(
-        github_event=scan, github_event_done={"recorded": True}, announce_merge={"jira": True}
+        github_event=scan,
+        github_event_done={"recorded": True},
+        announce_merge={"jira": True},
+        write_history={"ok": True},
     )
     agents = Agents()
     await run_github_event(
@@ -386,9 +419,9 @@ async def test_a_merge_goes_into_the_projects_history_with_its_files() -> None:
         agents.dispatch,
         {"github_event": "pull_request", "github_repo": "o/r", "pr_number": 2},
     )
-    kept = agents.review("history")
-    assert kept["event"] == "pr_state" and kept["event_id"] == "2-merged"
-    assert kept["data"] == {
+    key, event_name, data, event_id = t.args("write_history")
+    assert (key, event_name, event_id) == ("BGV-105", "pr_state", "2-merged")
+    assert data == {
         "repo": "o/r",
         "pr": 2,
         "url": "https://github.com/o/r/pull/2",
@@ -396,8 +429,7 @@ async def test_a_merge_goes_into_the_projects_history_with_its_files() -> None:
         "branch": "feature/BGV-105-limit",
         "files": ["bank/src/TransferService.java"],
     }
-    ((options,),) = [(o,) for a, p, o in agents.calls if a == "JiraRequirementReview"]
-    assert options["task_queue"] == "review-queue"
+    assert all(a != "JiraRequirementReview" for a, _, _ in agents.calls)
 
 
 def test_a_merge_event_carries_its_branch_and_files() -> None:
@@ -507,12 +539,13 @@ async def test_read_media_reads_only_the_pictures_and_drops_the_links(monkeypatc
 # --- pure rules ---------------------------------------------------------------------------
 
 
-def test_only_the_ranked_services_repositories_are_synced() -> None:
-    repos = "bank: o/bank\ncards: o/cards@dev\nledger = o/ledger"
-    assert handoff.ranked_repos(repos, [{"service": "cards"}]) == "cards: o/cards@dev"
-    assert handoff.ranked_repos(repos, [{"service": "ledger"}]) == "ledger = o/ledger"
-    assert handoff.ranked_repos(repos, []) == repos
-    assert handoff.ranked_repos(repos, [{"service": "gone"}]) == repos
+def test_the_reply_numbers_the_open_questions_so_they_can_be_answered() -> None:
+    sections = dict(handoff.memory_sections({"services": [], "questions": QUESTIONS}))
+    assert sections["Answered so far"] == ["Q1 Is the limit per account? → Yes, per account."]
+    assert sections['Still open — answer in a comment starting "Q<number>:"'] == [
+        "Q2 What is the reset time?"
+    ]
+    assert handoff.memory_sections(None) == []
 
 
 def test_sections_go_before_the_footer_and_empty_ones_are_left_out() -> None:

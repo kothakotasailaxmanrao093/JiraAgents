@@ -70,7 +70,21 @@ def facts(verdict: str, **over: Any) -> dict[str, Any]:
 
 
 DESIGNED = {"status": "success", "results": [], "document": {**DOCUMENT, "decisions": [DECISION]}}
-RECORDED = {"status": "success", "mode": "record", "stored": {"facts": 1, "decisions": 1}}
+STORED = {"facts": FACTS, "facts_hash": "fh", "versions": [{"version": "v1.0"}]}
+NEW_SNAPSHOT = {**STORED, "decisions": [DECISION]}
+RECORDED = {
+    "status": "success",
+    "mode": "record",
+    "stored": {"facts": 1, "decisions": 1, "snapshot": NEW_SNAPSHOT},
+}
+# Orchestration keeps the TDD memory and gives it to Planning (2026-10-30).
+MEMORY_TOOLS = {
+    "tdd_memory": {"ok": True, "seq": 3, "snapshot": STORED},
+    "keep_tdd_memory": {"ok": True},
+    "design_context": {"ok": True, "facts": FACTS, "decisions": [DECISION], "earlier": ["said"]},
+    "remember_exchange": {"ok": True},
+    "decisions_in_force": {"ok": True, "decisions": [DECISION]},
+}
 
 
 def memory_tools(**over: Any) -> Tools:
@@ -78,7 +92,7 @@ def memory_tools(**over: Any) -> Tools:
         story_context=over.pop("story_context", {**STORY, "tdd": KNOWN}),
         story_text=over.pop("story_text", STORY_TEXT),
         publish_tdd=over.pop("publish_tdd", {**PUBLISHED, "tdd_version": "v1.1"}),
-        **over,
+        **{**MEMORY_TOOLS, **over},
     )
 
 
@@ -413,9 +427,47 @@ async def test_planning_failing_still_replies_with_reviews_part() -> None:
     assert "The code could not be investigated: RuntimeError: worker gone" in reply
 
 
-async def test_a_design_question_tells_planning_which_page_it_is_on() -> None:
-    # The page's discussion is one Memsy session in Planning (2026-10-26).
-    t = tools()
+async def test_a_design_question_is_remembered_on_its_page() -> None:
+    # The page's discussion is one conversation in the memory (2026-10-26),
+    # kept by Orchestration (2026-10-30).
+    t = memory_tools()
     agents = Agents(planning_agent=[{"status": "success", "answer": "x", "verdict": "answer_only"}])
-    await run_command(command("DESIGN", "@Aetherion why paise?", t, agents, page_id="9001"))
-    assert agents.payload("planning_agent")["page_id"] == "9001"
+    await run_command(
+        command("DESIGN", "@Aetherion why paise?", t, agents, settings=ON, page_id="9001")
+    )
+    sent = agents.payload("planning_agent")
+    assert sent["memory"] == {"facts": FACTS, "decisions": [DECISION], "earlier": ["said"]}
+    assert t.args("remember_exchange") == (
+        "BGV-105",
+        "9001",
+        "why paise?",
+        "x",
+        "question",
+        "answer_only",
+    )
+
+
+async def test_planning_is_given_the_tdd_memory_and_its_new_snapshot_is_kept() -> None:
+    t = memory_tools(story_context=STORY, publish_tdd={**PUBLISHED, "tdd_version": "v1.0"})
+    agents = Agents(planning_agent=[facts("new", current=None), DESIGNED, RECORDED])
+    await run_command(
+        command("TDD", "@Aetherion create TDD", t, agents, settings=ON, fingerprint="fp")
+    )
+    check, plan, record = planning_payloads(agents)
+    assert check["memory"] == {"snapshot": STORED} and record["memory"] == {"snapshot": STORED}
+    assert plan["decisions"] == [DECISION]
+    key, seq, snapshot, version, *_ = t.args("keep_tdd_memory")
+    assert (key, seq, snapshot, version) == ("BGV-105", 4, NEW_SNAPSHOT, "v1.0")
+
+
+async def test_without_the_memory_the_tdd_is_written_and_nothing_is_kept() -> None:
+    down = {"ok": False, "error": "MemoryUnavailable: not set"}
+    t = memory_tools(
+        story_context=STORY, tdd_memory=down, publish_tdd={**PUBLISHED, "tdd_version": "v1.0"}
+    )
+    agents = Agents(planning_agent=[DESIGNED])
+    await run_command(
+        command("TDD", "@Aetherion create TDD", t, agents, settings=ON, fingerprint="fp")
+    )
+    assert [p.get("mode") for p in planning_payloads(agents)] == [None]
+    assert t.count("publish_tdd") == 1 and t.count("keep_tdd_memory") == 0

@@ -1,13 +1,17 @@
-"""What every card in a project did, kept in Memsy (2026-10-30): the services
-it touches, its TDD, its branch and pull request, the files that changed.
+"""What every card in a project did, kept in Memsy by Orchestration
+(2026-10-30): the services it touches, its TDD, its branch and pull request,
+the files that changed.
 
     actor  work:<PROJECT>   one session per event: card:<KEY>:<event>:<id>
 
-A new card's review finds earlier cards about the same thing by meaning
-(Memsy's search), and gets their exact branches, PRs and files back from the
+Before a card is reviewed, earlier cards about the same thing are found by
+meaning (Memsy's search), with their exact branches, PRs and files from the
 event's metadata, which Memsy returns unchanged; its readable text is only
 what the search matches on (Memsy rewrites it). One session per event,
 because Memsy merges similar events of one session into one memory.
+
+Design decisions are not kept here: they live in Planning's TDD memory
+(designs.py), one place only. A TDD event names its version and services.
 
 Event metadata: {"type": "work_history", "event": card | design | pr_opened |
 pr_state, "key", "v": 1, "at", ...}. No code and no secrets: names, paths,
@@ -18,13 +22,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from card_memory import store
-
-logger = logging.getLogger(__name__)
+from memory_service import store
 
 TYPE = "work_history"
 EVENTS = ("card", "design", "pr_opened", "pr_state")
@@ -40,14 +41,17 @@ def actor_of(card_key: str) -> str:
     return f"work:{store.project_of(card_key)}"
 
 
-def _fit(metadata: dict[str, Any]) -> str:
-    """The metadata as JSON within Memsy's limit: long file lists are cut."""
-    text = json.dumps(metadata, sort_keys=True)
-    files = list(metadata.get("files") or [])
-    while len(text) > MAX_METADATA and files:
-        files = files[: len(files) // 2]
-        text = json.dumps({**metadata, "files": files, "files_cut": True}, sort_keys=True)
-    return text[:MAX_METADATA]
+def _fit(metadata: dict[str, Any]) -> dict[str, Any]:
+    """The metadata within Memsy's limit: a long file list is halved until it
+    fits (``files_cut``), then the free text is shortened."""
+    out = dict(metadata)
+    while len(json.dumps(out, sort_keys=True)) > MAX_METADATA and out.get("files"):
+        out = {**out, "files": list(out["files"])[: len(out["files"]) // 2], "files_cut": True}
+    for field in ("summary", "title"):
+        over = len(json.dumps(out, sort_keys=True)) - MAX_METADATA
+        if over > 0 and isinstance(out.get(field), str):
+            out[field] = out[field][: max(0, len(out[field]) - over)]
+    return out
 
 
 def sentence(card_key: str, event: str, data: dict[str, Any]) -> str:
@@ -61,9 +65,6 @@ def sentence(card_key: str, event: str, data: dict[str, Any]) -> str:
             text += f" {data['summary']}"
     elif event == "design":
         text = f"{key} {title}: TDD {data.get('version', '')} designed {services}."
-        decisions = "; ".join(str(d) for d in data.get("decisions") or [])
-        if decisions:
-            text += f" Decisions: {decisions}."
     elif event == "pr_opened":
         text = (
             f"{key} {title}: pull request #{data.get('pr')} on branch {data.get('branch')} "
@@ -87,8 +88,6 @@ def write(card_key: str, event: str, data: dict[str, Any], event_id: str = "") -
     reviewed again with other services is a new event (the newest one wins)."""
     if event not in EVENTS:
         raise ValueError(f"unknown history event {event!r}")
-    from memsy import EventPayload
-
     key = card_key.strip().upper()
     stamp = datetime.now(UTC).isoformat(timespec="seconds")
     metadata = {"type": TYPE, "event": event, "key": key, "v": 1, "at": stamp, **data}
@@ -98,13 +97,13 @@ def write(card_key: str, event: str, data: dict[str, Any], event_id: str = "") -
     )
     store.client().ingest(
         [
-            EventPayload(
-                actor_id=actor_of(key),
-                session_id=f"card:{key}:{event}:{name}",
-                kind="app_event",
-                content=sentence(key, event, data),
-                team_id=store.project_of(key),
-                metadata=_fit(metadata),
+            store.event(
+                actor_of(key),
+                f"card:{key}:{event}:{name}",
+                "app_event",
+                sentence(key, event, data),
+                _fit(metadata),
+                store.project_of(key),
             )
         ]
     )
@@ -164,22 +163,17 @@ def related_cards(results: list[tuple[float, dict]], card_key: str) -> list[dict
     return ranked
 
 
-def find(card_key: str, queries: list[str]) -> list[dict[str, Any]]:
-    """Earlier cards in the project about the same thing as ``queries`` (the
-    card's text, then its title), searched by meaning in Memsy; each with all
-    its events (services, branches, pull requests, files)."""
+def find(card_key: str, query: str) -> list[dict[str, Any]]:
+    """Earlier cards in the project about the same thing as ``query`` (the
+    card's title and text), found with ONE search by meaning; each with all its
+    events (services, branches, pull requests, files)."""
     memsy = store.client()
     actor = actor_of(card_key)
     hits: list[tuple[float, dict]] = []
-    for query in [q.strip()[:MAX_QUERY] for q in queries if q and q.strip()]:
-        try:
-            found = memsy.search(query, actor_id=actor, limit=SEARCH_LIMIT)
-        except Exception as error:  # noqa: BLE001 - one failed search, not all
-            logger.warning("History search %r failed: %s", query[:60], error)
-            continue
-        for result in found.results or []:
-            for meta in _metas(result):
-                hits.append((float(result.score or 0.0), meta))
+    found = memsy.search(query.strip()[:MAX_QUERY], actor_id=actor, limit=SEARCH_LIMIT)
+    for result in found.results or []:
+        for meta in _metas(result):
+            hits.append((float(result.score or 0.0), meta))
     best = {c["card"]: c["score"] for c in related_cards(hits, card_key)}
     if best:
         # A search finds a card by one of its events; its pull requests must come too.
