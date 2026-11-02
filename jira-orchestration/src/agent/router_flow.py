@@ -59,7 +59,7 @@ from routing.orchestration import (
     plan_next,
     previous_review_points,
 )
-from routing.pipeline import PipelineConfig, add_sections
+from routing.pipeline import PipelineConfig, add_sections, review_points
 from routing.pipeline import summary as steps_summary
 from shared.contract import AgentResult, Outcome
 
@@ -315,12 +315,13 @@ async def _orchestrate(
             f"{spec.display_name} — {decision.reason} The ticket has not changed since the "
             "last review, so that review is shown again; no new review was run."
         )
-        return (
-            await reply(compose(previous, routed_to=reused, ran=[spec.display_name])),
-            [spec.display_name],
-            previous,
-            [],
-        )
+        blocks = compose(previous, routed_to=reused, ran=[spec.display_name])
+        if _handoff_on(gate):
+            # The memory is kept and shown for a review shown again too (2026-10-30).
+            blocks = await _with_memory(
+                execute, issue_key, await _recall(gate, execute, issue_key), previous, blocks
+            )
+        return (await reply(blocks), [spec.display_name], previous, [])
     if plan.next is Next.BUILD_PAUSED:
         await _record(
             execute, issue_key, "BUILD", f"paused — readiness {plan.review_score}/5", run_id
@@ -1001,17 +1002,8 @@ async def _dispatch_and_compose(
         ran=ran,
         notification=notification,
     )
-    if recalled and result.outcome is Outcome.REVIEWED:
-        # The review's questions and the card kept in the memory (2026-10-30).
-        kept = await handoff_flow.keep(
-            _runner(execute),
-            issue_key,
-            recalled,
-            list(result.questions),
-            str((recalled.get("card") or {}).get("title") or ""),
-            result.summary,
-        )
-        blocks = handoff.with_sections(blocks, handoff.memory_sections(kept))
+    if recalled:
+        blocks = await _with_memory(execute, issue_key, recalled, result, blocks)
     return blocks, [spec.display_name, *ran[1:]], result
 
 
@@ -1019,6 +1011,29 @@ def _handoff_on(commands_or_gate: dict[str, Any]) -> bool:
     """ORCH_HANDOFF with ORCH_MEMORY (2026-10-29), from the gate or its commands."""
     commands = commands_or_gate.get("commands") or commands_or_gate
     return bool(commands.get("memory")) and bool(commands.get("handoff"))
+
+
+async def _with_memory(
+    execute: Execute,
+    issue_key: str,
+    recalled: dict[str, Any] | None,
+    result: AgentResult,
+    blocks: list[tuple[str, object]],
+) -> list[tuple[str, object]]:
+    """The review's points and the card kept in the memory, and the reply's
+    memory sections (2026-10-30). Every point the review left open — its
+    questions, else its findings — is kept, so each can be answered by number."""
+    if not recalled or result.outcome is not Outcome.REVIEWED:
+        return blocks
+    kept = await handoff_flow.keep(
+        _runner(execute),
+        issue_key,
+        recalled,
+        review_points(result),
+        str((recalled.get("card") or {}).get("title") or ""),
+        result.summary,
+    )
+    return handoff.with_sections(blocks, handoff.memory_sections(kept))
 
 
 def _runner(execute: Execute) -> handoff_flow.Run:

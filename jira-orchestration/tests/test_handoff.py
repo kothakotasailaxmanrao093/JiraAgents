@@ -564,3 +564,71 @@ async def test_planning_is_named_once_among_who_handled_it() -> None:
     t, agents = handoff_tools(), Agents()
     out = await run_command(command("TDD", "@Aetherion create TDD", t, agents, settings=ON))
     assert out.ran.count("Planning") == 1
+
+
+async def test_a_review_with_findings_but_no_questions_keeps_each_finding() -> None:
+    # BTS-39, live 2026-10-30: four gaps, none typed "Open Question", and
+    # nothing was kept to answer.
+    t = _review_tools()
+    findings = [
+        {"finding_type": "Ambiguity", "description": "Which column header holds the note?"},
+        {"finding_type": "Missing Detail", "description": "Is an empty note a blank cell?"},
+    ]
+
+    async def dispatch(agent, payload, **options):
+        return [reviewed_contract(findings=findings, questions=[])]
+
+    await run_router(PAYLOAD, t.execute, dispatch)
+    assert t.args("keep_card")[2] == [
+        "Which column header holds the note?",
+        "Is an empty note a blank cell?",
+    ]
+
+
+async def test_a_review_shown_again_still_keeps_and_shows_the_memory() -> None:
+    # BTS-39, live 2026-10-30: the unchanged ticket's review was shown again
+    # and the memory was skipped.
+    from tests.test_orchestration import gate as state_gate
+    from tests.test_orchestration import state
+
+    t = Tools(
+        ingress_check=state_gate(
+            "@Aetherion review",
+            state(review_score=4),
+            commands={**ON, "repos": "bank: AetherionAgentDemo/bank-transfer-service"},
+        ),
+        story_bundle=BUNDLE,
+        recall_card=RECALLED,
+        keep_card=KEPT,
+    )
+
+    async def dispatch(agent, payload, **options):
+        raise AssertionError("a review shown again runs no agent")
+
+    await run_router(PAYLOAD, t.execute, dispatch)
+    assert t.count("recall_card") == 1 and t.count("keep_card") == 1
+    reply = t.reply_text()
+    assert "shown again" in reply and "Services this card touches (0-10)" in reply
+    assert "Q2 What is the reset time?" in reply
+
+
+async def test_a_story_not_ready_lists_its_questions_numbered() -> None:
+    # BTS-38, live 2026-10-30: the questions were kept as Q1-Q4 but shown without numbers.
+    t, agents = handoff_tools(), Agents()
+
+    async def low(agent, payload, **options):
+        if agent == "JiraRequirementReview":
+            return [reviewed(2, ["Is the limit per account?", "What is the reset time?"])]
+        return await agents.dispatch(agent, payload, **options)
+
+    agents_low = Agents()
+    agents_low.dispatch = low  # type: ignore[method-assign]
+    out = await run_command(
+        command(
+            "TDD", "@Aetherion create TDD", t, agents_low, settings={**ON, "tdd_min_readiness": 4}
+        )
+    )
+    sections = dict(out.blocks)
+    assert sections['Open questions — answer in a comment starting "Q<number>:"'] == [
+        "Q2 What is the reset time?"
+    ]

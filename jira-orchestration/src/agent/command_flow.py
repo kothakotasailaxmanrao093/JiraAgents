@@ -211,7 +211,7 @@ async def create_tdd(cmd: Command) -> CommandResult:
             _run(cmd),
             cmd.issue_key,
             recalled,
-            list(review.questions),
+            rules.review_points(review),
             handoff.card(bundle)["title"],
             review.summary,
         )
@@ -229,11 +229,20 @@ async def create_tdd(cmd: Command) -> CommandResult:
             if review is not None and review.outcome is Outcome.REVIEWED
             else "The readiness review could not run, so the story was not designed."
         )
+        # Numbered as the memory keeps them, so each can be answered "Q2: …".
+        numbered = handoff.open_lines((kept or {}).get("questions") or [])
         return CommandResult(
             reply(
                 f"Not ready for a TDD yet — {score}/5" if score else "Not ready for a TDD yet",
                 ("What happened", why + " Answer these in the comments, then ask again:"),
-                ("Open questions", points or [review.summary if review else "See the review."]),
+                (
+                    ('Open questions — answer in a comment starting "Q<number>:"', numbered)
+                    if numbered
+                    else (
+                        "Open questions",
+                        points or [review.summary if review else "See the review."],
+                    )
+                ),
             ),
             ran,
             review.to_dict() if review else None,

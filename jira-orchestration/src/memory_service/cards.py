@@ -75,16 +75,56 @@ def same_question(a: str, b: str) -> bool:
     return len(wa & wb) / min(len(wa), len(wb)) >= SAME_QUESTION
 
 
-def with_questions(snapshot: dict, asked: list[str]) -> dict:
+def with_questions(snapshot: dict, asked: list[str], repeats: set[int] | None = None) -> dict:
     """The snapshot with the review's questions added; a question already kept
-    (in other words) is not added twice."""
+    (in other words) is not added twice. ``repeats``: the positions in ``asked``
+    a model found to ask what a kept question asks."""
     kept = [dict(q) for q in snapshot.get("questions") or []]
-    for text in asked:
+    for n, text in enumerate(asked):
         text = " ".join(str(text or "").split())
-        if not text or any(same_question(text, q["question"]) for q in kept):
+        if not text or n in (repeats or set()):
+            continue
+        if any(same_question(text, q["question"]) for q in kept):
             continue
         kept.append({"id": f"Q{len(kept) + 1}", "question": text, "answers": []})
     return {**snapshot, "questions": kept}
+
+
+SAME_SYSTEM_PROMPT = """You find review questions that ask again what was already asked.
+
+You get the questions already kept (each with an id) and new questions (each
+with a number). A new question repeats a kept one when an answer to the kept
+question would also answer it, even in other words. A new question about
+something else is not a repeat.
+
+Return ONLY a JSON object: {"repeats": [{"new": <number>, "kept": "<id>"}]}"""
+
+
+async def repeated(snapshot: dict, asked: list[str]) -> set[int]:
+    """Which of ``asked`` repeat a kept question in other words, by a model;
+    an empty set when nothing is kept or the model cannot be reached (the
+    word check in ``with_questions`` still applies)."""
+    kept = snapshot.get("questions") or []
+    if not kept or not asked:
+        return set()
+    ids = {q["id"] for q in kept}
+    listed = "\n".join(f"[{q['id']}] {q['question']}" for q in kept)
+    new = "\n".join(f"[{n}] {text}" for n, text in enumerate(asked))
+    try:
+        found = await model.ask_json(SAME_SYSTEM_PROMPT, f"KEPT:\n{listed}\n\nNEW:\n{new}")
+    except Exception as error:  # noqa: BLE001 - the word check still applies
+        logger.warning("Repeated questions not checked: %s", error)
+        return set()
+    out = set()
+    for item in found.get("repeats") or []:
+        if isinstance(item, dict) and str(item.get("kept")) in ids:
+            try:
+                n = int(item.get("new"))
+            except (TypeError, ValueError):
+                continue
+            if 0 <= n < len(asked):
+                out.add(n)
+    return out
 
 
 def changed_comments(snapshot: dict, comments: list[dict]) -> list[dict]:
@@ -278,7 +318,11 @@ def document(memory: dict[str, Any]) -> dict[str, Any] | None:
             said = " / ".join(a["text"] for a in q["answers"])
             lines.append(f"- {q['id']} {q['question']} Answer: {said}")
     if still_open:
-        lines += ["", "Questions asked before and not answered yet:"]
+        lines += [
+            "",
+            "Questions asked before and not answered yet (still open: do not raise them "
+            "again, in these or other words; ask only what is new):",
+        ]
         lines += [f"- {q['id']} {q['question']}" for q in still_open]
     if earlier:
         lines += ["", "Earlier cards about the same thing:"]
@@ -309,18 +353,21 @@ def document(memory: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def keep(
+async def keep(
     card_key: str, memory: dict[str, Any], asked: list[str], title: str, summary: str
 ) -> dict[str, Any]:
-    """After the review: its questions and the ranked services saved, the card
-    in the project's history. Returns {"services", "questions"}."""
+    """After the review: its new questions (none asking again what is kept)
+    and the ranked services saved, the card in the project's history.
+    Returns {"services", "questions"}."""
     seq, before = memory.get("seq") or 0, memory.get("snapshot") or {}
     services = list(memory.get("services") or [])
-    updated = {**with_questions(before, asked), "services": services}
+    repeats = await repeated(before, asked)
+    updated = {**with_questions(before, asked, repeats), "services": services}
     if memory.get("changed") or updated != before:
-        save(card_key, seq + 1, updated)
+        await asyncio.to_thread(save, card_key, seq + 1, updated)
     if services:
-        history.write(
+        await asyncio.to_thread(
+            history.write,
             card_key,
             "card",
             {

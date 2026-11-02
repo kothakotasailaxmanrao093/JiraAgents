@@ -56,9 +56,7 @@ async def keep_card(
     issue_key: str, memory: dict, asked: list[str], title: str, summary: str
 ) -> dict[str, Any]:
     try:
-        kept = await asyncio.to_thread(
-            cards.keep, issue_key, dict(memory or {}), list(asked or []), title, summary
-        )
+        kept = await cards.keep(issue_key, dict(memory or {}), list(asked or []), title, summary)
     except Exception as error:  # noqa: BLE001 - the review's reply stands without it
         return _failed("Keeping the card", issue_key, error)
     return {"ok": True, **kept}

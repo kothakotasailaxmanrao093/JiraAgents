@@ -59,12 +59,14 @@ def memsy(monkeypatch):
 @pytest.fixture
 def llm(monkeypatch):
     """The model: told per test which answers comments give and how services rank."""
-    said = {"answers": [], "services": None, "calls": []}
+    said = {"answers": [], "services": None, "repeats": [], "calls": []}
 
     async def ask_json(system, prompt):
         said["calls"].append(system)
         if system == cards.MATCH_SYSTEM_PROMPT:
             return {"answers": said["answers"]}
+        if system == cards.SAME_SYSTEM_PROMPT:
+            return {"repeats": said["repeats"]}
         if said["services"] is None:
             raise RuntimeError("gateway down")
         return {"services": said["services"]}
@@ -75,7 +77,7 @@ def llm(monkeypatch):
 
 async def _review(key, comments, asked, title="Add a remark to IMPS payments", text=CARD):
     memory = await cards.recall(key, title, text, comments, REPOS)
-    return memory, cards.keep(key, memory, asked, title, "Needs minor clarification.")
+    return memory, await cards.keep(key, memory, asked, title, "Needs minor clarification.")
 
 
 def _earlier_work():
@@ -175,6 +177,30 @@ async def test_answers_are_the_comments_own_words_and_nothing_is_asked_twice(mem
         shown
     )
     assert "Q3 Should the SMS confirmation include the remark?" in shown
+
+
+async def test_a_question_asked_again_in_other_words_is_not_kept_twice(memsy, llm):
+    # BTS-39, live 2026-10-30: Q5 asked what Q2 asked, in other words.
+    await _review("BTS-60", [], ["Should the note appear in all export formats or only one?"])
+    llm["repeats"] = [{"new": 0, "kept": "Q1"}]
+    _, kept = await _review(
+        "BTS-60",
+        [],
+        [
+            "Must the note be included in every export format supported by history?",
+            "Where does the note column go?",
+        ],
+    )
+    assert [q["question"] for q in kept["questions"]] == [
+        "Should the note appear in all export formats or only one?",
+        "Where does the note column go?",
+    ]
+
+
+async def test_the_review_is_told_not_to_raise_open_questions_again(memsy, llm):
+    await _review("BTS-60", [], ASKED)
+    memory, _ = await _review("BTS-60", [], [])
+    assert "do not raise them again, in these or other words" in cards.document(memory)["text"]
 
 
 async def test_a_numbered_answer_needs_no_model(memsy, llm, monkeypatch):
