@@ -17,8 +17,9 @@ import hashlib
 import re
 from typing import Any
 
-# Verdicts of Planning's "facts" mode.
-SAME, REWORDED, CHANGED, UNSURE, NEW = "same", "reworded", "changed", "unsure", "new"
+# Verdicts of Planning's "facts" mode that keep the TDD ("changed" and "new"
+# write a new version).
+SAME, REWORDED, UNSURE = "same", "reworded", "unsure"
 KEEP_TDD = (SAME, REWORDED, UNSURE)
 
 # Verdicts of Planning's "discuss" mode.

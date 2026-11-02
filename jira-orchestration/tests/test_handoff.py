@@ -38,7 +38,7 @@ RANKED = [
         "service": "bank",
         "repo": "AetherionAgentDemo/bank-transfer-service",
         "branch": "main",
-        "rank": 9,
+        "rank": 1,
         "reason": "spec.pdf names POST /transfers",
         "prs": [
             {
@@ -219,8 +219,8 @@ async def test_the_reply_shows_the_ranked_services_and_the_answers() -> None:
     t, agents = handoff_tools(), Agents()
     out = await run_command(command("TDD", "@Aetherion create TDD", t, agents, settings=ON))
     sections = dict(out.blocks)
-    assert sections["Services designed, by rank"] == [
-        "bank — 9/10: spec.pdf names POST /transfers (earlier: BGV-90 PR #41, merged)"
+    assert sections["Services designed, in order (1 = the main one)"] == [
+        "1. bank: spec.pdf names POST /transfers (earlier: BGV-90 PR #41, merged)"
     ]
     assert sections["Answers the design follows"] == [
         "Is the limit per account? → Yes, per account."
@@ -243,7 +243,7 @@ async def test_without_the_memory_the_tdd_is_written_from_the_old_input() -> Non
     assert "card" not in sent and "Requirement BGV-105: Daily transfer limit" in sent["issue_text"]
     assert "memory_document" not in agents.sent("JiraRequirementReview")[0]
     assert t.count("keep_card") == 0 and t.count("write_history") == 0
-    assert "Services designed, by rank" not in dict(out.blocks)
+    assert "Services designed, in order (1 = the main one)" not in dict(out.blocks)
 
 
 async def test_an_unreadable_story_falls_back_to_the_old_reads() -> None:
@@ -344,8 +344,8 @@ async def test_a_review_is_given_the_memory_and_its_questions_are_kept() -> None
         "Ready 4/5.",
     )
     reply = t.reply_text()
-    assert "Services this card touches (0-10)" in reply
-    assert "bank — 9/10: spec.pdf names POST /transfers (earlier: BGV-90 PR #41, merged)" in reply
+    assert "Services this card touches (1 = the main one)" in reply
+    assert "1. bank: spec.pdf names POST /transfers (earlier: BGV-90 PR #41, merged)" in reply
     assert "Q1 Is the limit per account? → Yes, per account." in reply
     assert 'Still open — answer in a comment starting "Q<number>:"' in reply
     assert "Q2 What is the reset time?" in reply
@@ -608,7 +608,7 @@ async def test_a_review_shown_again_still_keeps_and_shows_the_memory() -> None:
     await run_router(PAYLOAD, t.execute, dispatch)
     assert t.count("recall_card") == 1 and t.count("keep_card") == 1
     reply = t.reply_text()
-    assert "shown again" in reply and "Services this card touches (0-10)" in reply
+    assert "shown again" in reply and "Services this card touches (1 = the main one)" in reply
     assert "Q2 What is the reset time?" in reply
 
 

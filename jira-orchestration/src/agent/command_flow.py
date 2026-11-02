@@ -328,7 +328,7 @@ async def create_tdd(cmd: Command) -> CommandResult:
             ),
             ("Files read from the story", rules.files_summary(list(text.get("files") or []))),
             (
-                "Services designed, by rank",
+                "Services designed, in order (1 = the main one)",
                 handoff.service_lines(given["services"]) if given else [],
             ),
             (

@@ -123,11 +123,11 @@ def payload(
 
 
 def service_lines(services: list[dict[str, Any]]) -> list[str]:
-    """One line per service:
-    "imps-service — 9/10: spec.pdf names POST /imps/transfer (earlier: BTS-20 PR #41, merged)"."""
+    """One line per service, rank 1 (the main one) first:
+    "1. imps-service: spec.pdf names POST /imps/transfer (earlier: BTS-20 PR #41, merged)"."""
     lines = []
     for s in services[:MAX_SERVICE_LINES]:
-        line = f"{s.get('service')} — {s.get('rank')}/10"
+        line = f"{s.get('rank')}. {s.get('service')}"
         if s.get("reason"):
             line += f": {s['reason']}"
         earlier = [
@@ -165,7 +165,10 @@ def memory_sections(kept: dict[str, Any] | None) -> list[tuple[str, object]]:
         return []
     questions = list(kept.get("questions") or [])
     return [
-        ("Services this card touches (0-10)", service_lines(list(kept.get("services") or []))),
+        (
+            "Services this card touches (1 = the main one)",
+            service_lines(list(kept.get("services") or [])),
+        ),
         ("Answered so far", answer_lines(questions)),
         ('Still open — answer in a comment starting "Q<number>:"', open_lines(questions)),
     ]

@@ -51,7 +51,8 @@ PLANNING_SEALED = (
 @pytest.fixture
 def memsy(monkeypatch):
     fake = FakeMemsy()
-    monkeypatch.setattr(store, "client", lambda: fake)
+    monkeypatch.setattr(store, "service", lambda: fake)
+    monkeypatch.setattr(store, "_lister", lambda: fake.lister)
     monkeypatch.setenv(store.KEY_NAME, base64.b64encode(os.urandom(32)).decode())
     return fake
 
@@ -80,13 +81,13 @@ async def _review(key, comments, asked, title="Add a remark to IMPS payments", t
     return memory, await cards.keep(key, memory, asked, title, "Needs minor clarification.")
 
 
-def _earlier_work():
-    history.write(
+async def _earlier_work():
+    await history.write(
         "BTS-20",
         "card",
         {"title": "NEFT remark", "services": ["payments-service"], "summary": "remark on NEFT"},
     )
-    history.write(
+    await history.write(
         "BTS-20",
         "pr_opened",
         {
@@ -99,7 +100,7 @@ def _earlier_work():
         },
         "41",
     )
-    history.write(
+    await history.write(
         "BTS-20",
         "pr_state",
         {
@@ -130,26 +131,40 @@ def test_a_snapshot_moved_to_another_card_or_number_does_not_decrypt(monkeypatch
         store.unseal(PLANNING_SEALED, "tdd:BTS-25", 4)
 
 
-def test_a_large_snapshot_is_split_into_sessions_and_joined_back(memsy):
+async def test_a_large_snapshot_is_split_into_sessions_and_joined_back(memsy):
     many = [{"id": f"Q{i}", "question": os.urandom(40).hex(), "answers": []} for i in range(60)]
-    cards.save("BTS-60", 1, {"questions": many})
+    await cards.save("BTS-60", 1, {"questions": many})
     parts = memsy.stored("review:BTS-60")
     assert len(parts) > 1 and all(len(p.metadata) <= 4096 for p in parts)
     assert len({p.session_id for p in parts}) == len(parts)  # Memsy merges one session
-    assert cards.load("BTS-60") == (1, {"questions": many})
+    assert await cards.load("BTS-60") == (1, {"questions": many})
 
 
-def test_without_the_key_nothing_is_stored(memsy, monkeypatch):
+async def test_without_the_key_nothing_is_stored(memsy, monkeypatch):
     monkeypatch.setattr(store, "secret", lambda name, default="": "")
     with pytest.raises(store.MemoryUnavailable):
-        cards.save("BTS-60", 1, {"questions": []})
+        await cards.save("BTS-60", 1, {"questions": []})
     assert memsy.events == []
 
 
-def test_without_memsy_settings_the_client_says_so(monkeypatch):
+def test_without_memsy_settings_the_service_says_so(monkeypatch):
+    import common_lib.memsy
+
+    unconfigured = type("Unconfigured", (), {"is_configured": False})()
     monkeypatch.setattr(store, "secret", lambda name, default="": "")
+    monkeypatch.setattr(common_lib.memsy, "get_memsy_service", lambda: unconfigured)
     with pytest.raises(store.MemoryUnavailable):
-        store.client()
+        store.service()
+
+
+async def test_a_write_the_service_did_not_take_raises(memsy, monkeypatch):
+    # Aetherion's service never raises; it returns no ids when a write failed.
+    async def refused(events):
+        return []
+
+    monkeypatch.setattr(memsy, "ingest", refused)
+    with pytest.raises(store.MemoryUnavailable):
+        await history.write("BTS-60", "card", {"title": "t", "services": []})
 
 
 # --- questions and answers ------------------------------------------------------------------
@@ -254,12 +269,24 @@ async def test_when_the_model_is_down_comments_are_matched_next_time(memsy, llm,
 
 
 async def test_an_earlier_card_is_found_with_its_branch_pr_and_merge(memsy, llm):
-    _earlier_work()
+    await _earlier_work()
     llm["services"] = [
-        {"service": "imps-service", "rank": 9, "reason": "spec.pdf names POST /imps/transfer"},
-        {"service": "payments-service", "rank": 8, "reason": "BTS-20 PR #41 added the remark"},
-        {"service": "statement-service", "rank": 7, "reason": "the remark is on the statement"},
-        {"service": "loan-service", "rank": 0, "reason": "not touched"},
+        {
+            "service": "imps-service",
+            "importance": 9,
+            "reason": "spec.pdf names POST /imps/transfer",
+        },
+        {
+            "service": "payments-service",
+            "importance": 8,
+            "reason": "BTS-20 PR #41 added the remark",
+        },
+        {
+            "service": "statement-service",
+            "importance": 7,
+            "reason": "the remark is on the statement",
+        },
+        {"service": "loan-service", "importance": 0, "reason": "not touched"},
     ]
     memory, kept = await _review("BTS-60", [], ASKED, title=LIKE_NEFT, text=SHORT)
     (earlier,) = memory["related"]
@@ -280,15 +307,15 @@ async def test_an_earlier_card_is_found_with_its_branch_pr_and_merge(memsy, llm)
 
 
 async def test_one_search_per_review_and_none_when_the_card_is_unchanged(memsy, llm, monkeypatch):
-    _earlier_work()
+    await _earlier_work()
     searches = []
-    real = memsy.search
+    real = memsy.search_rich
 
-    def counted(query, **kwargs):
+    async def counted(query, actor_id, **kwargs):
         searches.append(query)
-        return real(query, **kwargs)
+        return await real(query, actor_id, **kwargs)
 
-    monkeypatch.setattr(memsy, "search", counted)
+    monkeypatch.setattr(memsy, "search_rich", counted)
     await _review("BTS-60", [], ASKED, title=LIKE_NEFT, text=SHORT)
     assert len(searches) == 1
     memory, _ = await _review("BTS-60", [], [], title=LIKE_NEFT, text=SHORT)
@@ -298,25 +325,51 @@ async def test_one_search_per_review_and_none_when_the_card_is_unchanged(memsy, 
 
 
 async def test_a_reason_naming_something_not_found_is_replaced_by_the_evidence(memsy, llm):
-    _earlier_work()
-    llm["services"] = [{"service": "payments-service", "rank": 8, "reason": "BTS-99 PR #77 did it"}]
+    await _earlier_work()
+    llm["services"] = [
+        {"service": "payments-service", "importance": 8, "reason": "BTS-99 PR #77 did it"}
+    ]
     memory, _ = await _review("BTS-60", [], [], title=LIKE_NEFT, text=SHORT)
     (service,) = [s for s in memory["services"] if s["service"] == "payments-service"]
     assert "BTS-99" not in service["reason"] and "BTS-20" in service["reason"]
 
 
-def test_without_the_model_a_named_service_is_8_and_an_earlier_ones_6():
+def test_without_the_model_a_named_service_comes_before_an_earlier_card_s():
     found = ranking.candidates(
         "The statement-service shows it",
         ["imps-service", "payments-service", "statement-service"],
         [{"card": "BTS-20", "title": "NEFT", "services": ["payments-service"], "prs": []}],
     )
-    out = {s["service"]: s["rank"] for s in ranking.ranked(found, None, "")}
-    assert out == {"statement-service": 8, "payments-service": 6}
+    out = [(s["rank"], s["service"]) for s in ranking.ranked(found, None, "")]
+    assert out == [(1, "statement-service"), (2, "payments-service")]
+
+
+def test_rank_1_is_the_main_service():
+    # 2026-11-02: the rank is a position, as in a class: 1 is the main one.
+    found = [{"service": n, "evidence": [], "prs": []} for n in ("a", "b", "c", "d")]
+    answer = {
+        "services": [
+            {"service": "a", "importance": 6, "reason": "r"},
+            {"service": "b", "importance": 9, "reason": "r"},
+            {"service": "c", "importance": 2, "reason": "r"},
+            {"service": "d", "importance": 8, "reason": "r"},
+        ]
+    }
+    out = [(s["rank"], s["service"]) for s in ranking.ranked(found, answer, "")]
+    assert out == [(1, "b"), (2, "d"), (3, "a")]  # c (2) is not touched
+
+
+def test_services_kept_on_the_old_0_to_10_scale_are_put_in_order():
+    old = [{"service": "x", "rank": 7}, {"service": "y", "rank": 10}]
+    assert [(s["rank"], s["service"]) for s in ranking.in_order(old)] == [(1, "y"), (2, "x")]
+    new = [{"service": "y", "rank": 1}, {"service": "x", "rank": 2}]
+    assert ranking.in_order(new) == new
 
 
 async def test_for_a_tdd_the_answers_since_the_review_are_added(memsy, llm):
-    llm["services"] = [{"service": "imps-service", "rank": 9, "reason": "the card names IMPS"}]
+    llm["services"] = [
+        {"service": "imps-service", "importance": 9, "reason": "the card names IMPS"}
+    ]
     await _review("BTS-60", [], ASKED)
     llm["answers"] = [{"comment_id": "9", "question_id": "Q3", "quote": "No SMS change"}]
     out = await cards.refresh(
@@ -327,10 +380,12 @@ async def test_for_a_tdd_the_answers_since_the_review_are_added(memsy, llm):
 
 
 async def test_a_card_never_reviewed_is_ranked_for_its_tdd(memsy, llm):
-    llm["services"] = [{"service": "statement-service", "rank": 7, "reason": "on the statement"}]
+    llm["services"] = [
+        {"service": "statement-service", "importance": 7, "reason": "on the statement"}
+    ]
     out = await cards.refresh("BTS-61", "Statement remark", "Show it", [], REPOS)
     assert out["services"][0]["service"] == "statement-service"
-    assert cards.load("BTS-61")[1]["services"][0]["service"] == "statement-service"
+    assert (await cards.load("BTS-61"))[1]["services"][0]["service"] == "statement-service"
 
 
 # --- decisions in one place, and the TDD's conversation ----------------------------------------
@@ -347,23 +402,27 @@ PAISE = {
 
 
 async def test_agreed_decisions_reach_a_later_card_s_review(memsy, llm):
-    designs.save("BTS-25", 1, {"decisions": [PAISE], "versions": [{"version": "v1.0"}]})
-    _earlier_work()
+    await designs.save("BTS-25", 1, {"decisions": [PAISE], "versions": [{"version": "v1.0"}]})
+    await _earlier_work()
     memory, _ = await _review("BTS-60", [], [], title=LIKE_NEFT, text=SHORT)
     assert memory["decisions"] == [PAISE]
     assert "Paise: long paise (BTS-25)" in cards.document(memory)["text"]
-    assert designs.decisions_in_force("BTS-60", ["loan-service"]) == []
+    assert await designs.decisions_in_force("BTS-60", ["loan-service"]) == []
 
 
-def test_a_tdd_in_the_history_carries_no_decisions(memsy):
-    history.write("BTS-60", "design", {"title": "IMPS", "version": "v1.0", "services": ["imps"]})
+async def test_a_tdd_in_the_history_carries_no_decisions(memsy):
+    await history.write(
+        "BTS-60", "design", {"title": "IMPS", "version": "v1.0", "services": ["imps"]}
+    )
     (event,) = memsy.stored("work:BTS")
     assert "decision" not in event.content.lower()
 
 
-def test_the_tdd_conversation_is_kept_and_recalled(memsy):
-    designs.remember_exchange("BTS-25", "9001", "why paise?", "Exact money.", "question", "")
-    designs.remember_version("BTS-25", "v1.1", "9001", [PAISE], [])
+async def test_the_tdd_conversation_is_kept_and_recalled(memsy):
+    await designs.remember_exchange("BTS-25", "9001", "why paise?", "Exact money.", "question", "")
+    await designs.remember_version("BTS-25", "v1.1", "9001", [PAISE], [])
     sessions = {e.session_id for e in memsy.stored("tdd:BTS-25")}
     assert sessions == {"page:9001", "versions:BTS-25"}
-    assert any("paise" in line.lower() for line in designs.recall("BTS-25", "why paise money"))
+    assert any(
+        "paise" in line.lower() for line in await designs.recall("BTS-25", "why paise money")
+    )

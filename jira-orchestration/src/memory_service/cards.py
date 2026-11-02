@@ -21,7 +21,6 @@ not changed since the last one (the earlier cards found then are reused).
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 import re
@@ -46,17 +45,17 @@ def _scope(card_key: str) -> tuple[str, str, str]:
     return f"review:{key}", f"memory:review:{key}", "review_memory"
 
 
-def load(card_key: str) -> tuple[int, dict]:
+async def load(card_key: str) -> tuple[int, dict]:
     actor, _, kind = _scope(card_key)
-    return store.load(actor, kind)
+    return await store.load(actor, kind)
 
 
-def save(card_key: str, seq: int, snapshot: dict) -> None:
+async def save(card_key: str, seq: int, snapshot: dict) -> None:
     actor, session, kind = _scope(card_key)
     asked = len(snapshot.get("questions") or [])
     answered = sum(1 for q in snapshot.get("questions") or [] if q.get("answers"))
     summary = f"{card_key.upper()} review: {asked} questions, {answered} answered."
-    store.save(actor, session, kind, seq, snapshot, summary)
+    await store.save(actor, session, kind, seq, snapshot, summary)
 
 
 def _words(text: str) -> set[str]:
@@ -261,7 +260,7 @@ async def _earlier(card_key: str, title: str, card_text: str, snapshot: dict) ->
     if snapshot.get("text_hash") == _hash(card_text) and "related" in snapshot:
         return list(snapshot.get("related") or [])
     try:
-        return await asyncio.to_thread(history.find, card_key, f"{title}\n{card_text}")
+        return await history.find(card_key, f"{title}\n{card_text}")
     except Exception as error:  # noqa: BLE001 - ranked from the card alone
         logger.warning("No history for %s: %s", card_key, error)
         return []
@@ -273,15 +272,13 @@ async def recall(
     """The card's memory before its review: {"seq", "snapshot", "changed",
     "services", "related", "decisions"}. Nothing is saved yet; ``keep`` saves
     once, after the review."""
-    seq, stored = await asyncio.to_thread(load, card_key)
+    seq, stored = await load(card_key)
     snapshot = await with_comments(card_key, stored, comments)
     related = await _earlier(card_key, title, card_text, snapshot)
     services = await ranking.rank(card_text, repos_text, related)
     snapshot = {**snapshot, "text_hash": _hash(card_text), "related": related}
     try:
-        decisions = await asyncio.to_thread(
-            designs.decisions_in_force, card_key, [s["service"] for s in services]
-        )
+        decisions = await designs.decisions_in_force(card_key, [s["service"] for s in services])
     except Exception as error:  # noqa: BLE001 - the review goes on without them
         logger.warning("No decisions for %s: %s", card_key, error)
         decisions = []
@@ -342,8 +339,8 @@ def document(memory: dict[str, Any]) -> dict[str, Any] | None:
         for d in decisions:
             lines.append(f"- {d.get('title') or d.get('id')}: {d.get('choice')} ({d['story_key']})")
     if services:
-        lines += ["", "Services this card touches, ranked 0-10:"]
-        lines += [f"- {s['service']} {s['rank']}/10: {s['reason']}" for s in services]
+        lines += ["", "Services this card touches, in order (1 = the main one):"]
+        lines += [f"- {s['rank']}. {s['service']}: {s['reason']}" for s in services]
     return {
         "source_id": SOURCE_ID,
         "source_label": SOURCE_LABEL,
@@ -364,10 +361,9 @@ async def keep(
     repeats = await repeated(before, asked)
     updated = {**with_questions(before, asked, repeats), "services": services}
     if memory.get("changed") or updated != before:
-        await asyncio.to_thread(save, card_key, seq + 1, updated)
+        await save(card_key, seq + 1, updated)
     if services:
-        await asyncio.to_thread(
-            history.write,
+        await history.write(
             card_key,
             "card",
             {
@@ -385,9 +381,9 @@ async def refresh(
     """For a TDD: the questions with every answer given so far, and the ranked
     services (ranked now when the card was never reviewed with its memory).
     Returns {"services", "questions"}."""
-    seq, stored = await asyncio.to_thread(load, card_key)
+    seq, stored = await load(card_key)
     updated = await with_comments(card_key, stored, comments)
-    services = list(updated.get("services") or [])
+    services = ranking.in_order(list(updated.get("services") or []))
     if not services:
         related = await _earlier(card_key, title, card_text, updated)
         services = await ranking.rank(card_text, repos_text, related)
@@ -398,5 +394,5 @@ async def refresh(
             "related": related,
         }
     if updated != stored:
-        await asyncio.to_thread(save, card_key, seq + 1, updated)
+        await save(card_key, seq + 1, updated)
     return {"services": services, "questions": view(updated)}

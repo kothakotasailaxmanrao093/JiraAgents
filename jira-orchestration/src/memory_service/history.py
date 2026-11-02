@@ -79,7 +79,7 @@ def sentence(card_key: str, event: str, data: dict[str, Any]) -> str:
     return text[:MAX_CONTENT]
 
 
-def write(card_key: str, event: str, data: dict[str, Any], event_id: str = "") -> None:
+async def write(card_key: str, event: str, data: dict[str, Any], event_id: str = "") -> None:
     """One fact about a card, as its own Memsy event.
 
     ``event_id`` names the event (a PR number and its state, a TDD version);
@@ -95,7 +95,7 @@ def write(card_key: str, event: str, data: dict[str, Any], event_id: str = "") -
         event_id
         or hashlib.sha256(json.dumps(data, sort_keys=True).encode("utf-8")).hexdigest()[:12]
     )
-    store.client().ingest(
+    await store.write(
         [
             store.event(
                 actor_of(key),
@@ -107,19 +107,6 @@ def write(card_key: str, event: str, data: dict[str, Any], event_id: str = "") -
             )
         ]
     )
-
-
-def _metas(result: Any) -> list[dict[str, Any]]:
-    """The history metadata a search result came from."""
-    sources = getattr(result, "source_metadata", None)
-    if sources is None:
-        sources = (getattr(result, "metadata", None) or {}).get("source_metadata") or []
-    out = []
-    for source in sources or []:
-        meta = source.get("metadata") if isinstance(source, dict) else None
-        if isinstance(meta, dict) and meta.get("type") == TYPE and meta.get("key"):
-            out.append(meta)
-    return out
 
 
 def related_cards(results: list[tuple[float, dict]], card_key: str) -> list[dict[str, Any]]:
@@ -163,21 +150,20 @@ def related_cards(results: list[tuple[float, dict]], card_key: str) -> list[dict
     return ranked
 
 
-def find(card_key: str, query: str) -> list[dict[str, Any]]:
+async def find(card_key: str, query: str) -> list[dict[str, Any]]:
     """Earlier cards in the project about the same thing as ``query`` (the
     card's title and text), found with ONE search by meaning; each with all its
     events (services, branches, pull requests, files)."""
-    memsy = store.client()
     actor = actor_of(card_key)
     hits: list[tuple[float, dict]] = []
-    found = memsy.search(query.strip()[:MAX_QUERY], actor_id=actor, limit=SEARCH_LIMIT)
-    for result in found.results or []:
-        for meta in _metas(result):
-            hits.append((float(result.score or 0.0), meta))
+    for result in await store.search(query.strip()[:MAX_QUERY], actor, SEARCH_LIMIT, MIN_SCORE):
+        for meta in result["metadata"]:
+            if meta.get("type") == TYPE and meta.get("key"):
+                hits.append((result["score"], meta))
     best = {c["card"]: c["score"] for c in related_cards(hits, card_key)}
     if best:
         # A search finds a card by one of its events; its pull requests must come too.
-        for meta in store.listed_metadata(memsy, actor):
+        for meta in await store.listed_metadata(actor):
             key = str(meta.get("key") or "").upper()
             if meta.get("type") == TYPE and key in best:
                 hits.append((best[key], meta))

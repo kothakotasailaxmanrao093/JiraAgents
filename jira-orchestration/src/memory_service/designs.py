@@ -33,12 +33,12 @@ def agreed(snapshot: dict) -> list[dict]:
     return [d for d in snapshot.get("decisions") or [] if d.get("status") == AGREED]
 
 
-def load(story_key: str) -> tuple[int, dict]:
+async def load(story_key: str) -> tuple[int, dict]:
     actor, _, kind = _scope(story_key)
-    return store.load(actor, kind)
+    return await store.load(actor, kind)
 
 
-def save(story_key: str, seq: int, snapshot: dict) -> None:
+async def save(story_key: str, seq: int, snapshot: dict) -> None:
     """The story's new snapshot, and its agreed decisions in its project's."""
     actor, session, kind = _scope(story_key)
     latest = (snapshot.get("versions") or [{}])[-1].get("version") or "no version"
@@ -46,32 +46,32 @@ def save(story_key: str, seq: int, snapshot: dict) -> None:
         f"{story_key.upper()} TDD {latest}: {len(snapshot.get('facts') or [])} requirement "
         f"facts and {len(agreed(snapshot))} decisions in force."
     )
-    store.save(actor, session, kind, seq, snapshot, summary)
-    _publish_to_project(story_key, snapshot)
+    await store.save(actor, session, kind, seq, snapshot, summary)
+    await _publish_to_project(story_key, snapshot)
 
 
-def _publish_to_project(story_key: str, snapshot: dict) -> None:
+async def _publish_to_project(story_key: str, snapshot: dict) -> None:
     project = store.project_of(story_key)
     actor, session, kind = _scope(project=project)
-    seq, current = store.load(actor, kind)
+    seq, current = await store.load(actor, kind)
     keep = [d for d in current.get("decisions") or [] if d["story_key"] != story_key.upper()]
     merged = {"decisions": sorted(keep + agreed(snapshot), key=lambda d: d["uid"])}
     if merged == {"decisions": current.get("decisions") or []}:
         return
     summary = f"Project {project}: {len(merged['decisions'])} agreed design decisions."
-    store.save(actor, session, kind, seq + 1, merged, summary)
+    await store.save(actor, session, kind, seq + 1, merged, summary)
 
 
-def decisions_in_force(story_key: str, services: list[str] | None = None) -> list[dict]:
+async def decisions_in_force(story_key: str, services: list[str] | None = None) -> list[dict]:
     """The story's agreed decisions, then the project's agreed decisions on the
     same services (a later story's design must keep them too)."""
     story_key = story_key.upper()
-    own = agreed(load(story_key)[1])
+    own = agreed((await load(story_key))[1])
     actor, _, kind = _scope(project=store.project_of(story_key))
     wanted = set(services or [])
     project = [
         d
-        for d in store.load(actor, kind)[1].get("decisions") or []
+        for d in (await store.load(actor, kind))[1].get("decisions") or []
         if d["story_key"] != story_key
         and d.get("status") == AGREED
         and (not wanted or any(t.get("service") in wanted for t in d.get("applies_to") or []))
@@ -94,17 +94,15 @@ def _conversation_event(story_key: str, session: str, kind: str, content: str, m
     )
 
 
-def recall(story_key: str, question: str) -> list[str]:
+async def recall(story_key: str, question: str) -> list[str]:
     """What was said before about this TDD, most relevant first."""
     if not story_key or not question.strip():
         return []
-    found = store.client().search(
-        question[:1000], actor_id=f"tdd:{story_key.strip().upper()}", limit=RECALL_LIMIT
-    )
-    return [str(r.content).strip() for r in found.results or [] if str(r.content).strip()]
+    found = await store.search(question[:1000], f"tdd:{story_key.strip().upper()}", RECALL_LIMIT)
+    return [r["content"].strip() for r in found if r["content"].strip()]
 
 
-def remember_exchange(
+async def remember_exchange(
     story_key: str, page_id: str, question: str, answer: str, kind: str, verdict: str
 ) -> None:
     """A question about the TDD and Planning's answer, as one turn of its conversation."""
@@ -115,10 +113,10 @@ def remember_exchange(
     events = [_conversation_event(story_key, session, "user_message", question, meta)]
     if answer.strip():
         events.append(_conversation_event(story_key, session, "assistant_message", answer, meta))
-    store.client().ingest(events)
+    await store.write(events)
 
 
-def remember_version(
+async def remember_version(
     story_key: str, version: str, page_id: str, decisions: list[dict], superseded: list[str]
 ) -> None:
     """A note that a TDD version was published, with the decisions it carries."""
@@ -134,7 +132,7 @@ def remember_version(
         text += f" Decisions in force: {carried}."
     if superseded:
         text += f" Replaced decisions: {', '.join(superseded)}."
-    store.client().ingest(
+    await store.write(
         [
             _conversation_event(
                 story_key,

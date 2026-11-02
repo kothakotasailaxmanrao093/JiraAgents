@@ -24,7 +24,6 @@ Memsy not answering never fails a request: each tool reports {"ok": False,
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any
 
@@ -78,7 +77,7 @@ async def write_history(
     issue_key: str, event: str, data: dict, event_id: str = ""
 ) -> dict[str, Any]:
     try:
-        await asyncio.to_thread(history.write, issue_key, event, dict(data or {}), event_id)
+        await history.write(issue_key, event, dict(data or {}), event_id)
     except Exception as error:  # noqa: BLE001 - reported to the caller
         return _failed(f"The {event} history", issue_key, error)
     return {"ok": True, "actor": history.actor_of(issue_key)}
@@ -87,7 +86,7 @@ async def write_history(
 @tool(name="tdd_memory")
 async def tdd_memory(issue_key: str) -> dict[str, Any]:
     try:
-        seq, snapshot = await asyncio.to_thread(designs.load, issue_key)
+        seq, snapshot = await designs.load(issue_key)
     except Exception as error:  # noqa: BLE001 - the TDD is written as before
         return _failed("Reading the TDD memory", issue_key, error)
     return {"ok": True, "seq": seq, "snapshot": snapshot}
@@ -104,9 +103,8 @@ async def keep_tdd_memory(
     superseded: list[str],
 ) -> dict[str, Any]:
     try:
-        await asyncio.to_thread(designs.save, issue_key, int(seq), dict(snapshot or {}))
-        await asyncio.to_thread(
-            designs.remember_version,
+        await designs.save(issue_key, int(seq), dict(snapshot or {}))
+        await designs.remember_version(
             issue_key,
             version,
             page_id,
@@ -121,9 +119,9 @@ async def keep_tdd_memory(
 @tool(name="design_context")
 async def design_context(issue_key: str, question: str) -> dict[str, Any]:
     try:
-        _, snapshot = await asyncio.to_thread(designs.load, issue_key)
-        decisions = await asyncio.to_thread(designs.decisions_in_force, issue_key)
-        earlier = await asyncio.to_thread(designs.recall, issue_key, question)
+        _, snapshot = await designs.load(issue_key)
+        decisions = await designs.decisions_in_force(issue_key)
+        earlier = await designs.recall(issue_key, question)
     except Exception as error:  # noqa: BLE001 - Planning answers from the page alone
         return _failed("The design's memory", issue_key, error)
     return {
@@ -139,9 +137,7 @@ async def remember_exchange(
     issue_key: str, page_id: str, question: str, answer: str, kind: str, verdict: str
 ) -> dict[str, Any]:
     try:
-        await asyncio.to_thread(
-            designs.remember_exchange, issue_key, page_id, question, answer, kind, verdict
-        )
+        await designs.remember_exchange(issue_key, page_id, question, answer, kind, verdict)
     except Exception as error:  # noqa: BLE001 - the answer is posted either way
         return _failed("Remembering the exchange", issue_key, error)
     return {"ok": True}
@@ -150,7 +146,7 @@ async def remember_exchange(
 @tool(name="decisions_in_force")
 async def decisions_in_force(issue_key: str, services: list[str]) -> dict[str, Any]:
     try:
-        found = await asyncio.to_thread(designs.decisions_in_force, issue_key, list(services or []))
+        found = await designs.decisions_in_force(issue_key, list(services or []))
     except Exception as error:  # noqa: BLE001 - designed without them
         return _failed("The decisions in force", issue_key, error)
     return {"ok": True, "decisions": found}

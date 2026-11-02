@@ -1,9 +1,15 @@
-"""The one place the agents' memory is stored (2026-10-30): Memsy today.
+"""The one place the agents' memory is stored (2026-10-30), through Aetherion's
+own Memsy service, ``common_lib.memsy`` (2026-11-02).
 
 Orchestration is the only agent that talks to the memory service. Requirement
 Review and Planning are given what they need as input and hand back what is
-to be kept. Moving to another memory service changes this file and
-``history.py`` (search) only.
+to be kept. Every call to the service is in this file: ``write``, ``search``,
+``status`` and ``listed_metadata``.
+
+The platform's ``MemsyService`` writes, searches and reports status. Its
+``memories.list`` returns the right total but no items (2026-11-02), so
+listing uses the same Aetherion client it wraps (``_get_raw_client``), which
+lists correctly. The service never raises: an empty write is a failed write.
 
 Memsy rewrites the text it stores and cannot update or delete, so exact data
 is kept as numbered SNAPSHOTS in each event's metadata, which Memsy returns
@@ -18,13 +24,15 @@ unchanged (``payload.source_metadata``):
   its own session, because Memsy merges similar events of one session;
 - a save waits until Memsy has processed it, so the next request reads it.
 
-The key and the Memsy key are read from the platform's secret files first,
-then the environment (``shared.settings.secret``).
+The service reads ``MEMSY_API_KEY`` and ``MEMSY_BASE_URL`` from the
+environment; they and the key are taken from the platform's secret files first
+(``shared.settings.secret``).
 """
 
 from __future__ import annotations
 
 import ast
+import asyncio
 import base64
 import binascii
 import hashlib
@@ -34,7 +42,6 @@ import logging
 import os
 import time
 import zlib
-from collections.abc import Iterator
 from functools import lru_cache
 from typing import Any
 
@@ -66,14 +73,26 @@ def project_of(key: str) -> str:
     return key.split("-")[0].strip().upper() if key else ""
 
 
-def client() -> Any:
-    key = secret("MEMSY_API_KEY")
-    base = os.environ.get("MEMSY_BASE_URL", "").strip()
-    if not key or not base:
-        raise MemoryUnavailable("MEMSY_API_KEY and MEMSY_BASE_URL are not set")
-    from memsy import MemsyClient
+def service() -> Any:
+    """Aetherion's Memsy service; raises when it is not configured."""
+    for name in ("MEMSY_API_KEY", "MEMSY_BASE_URL"):
+        if not os.environ.get(name, "").strip() and secret(name):
+            # The service reads the environment; a mounted secret file is passed on.
+            os.environ[name] = secret(name)
+    from common_lib.memsy import get_memsy_service
 
-    return MemsyClient(base_url=base, api_key=key, timeout=15.0, max_retries=2)
+    memsy = get_memsy_service()
+    if not memsy.is_configured:
+        raise MemoryUnavailable("MEMSY_API_KEY and MEMSY_BASE_URL are not set")
+    return memsy
+
+
+def _lister() -> Any:
+    """The Aetherion client the service wraps, for listing (see the module's note)."""
+    service()
+    from common_lib.memsy.client import _get_raw_client
+
+    return _get_raw_client()
 
 
 def payload_of(item: Any) -> dict:
@@ -91,25 +110,57 @@ def payload_of(item: Any) -> dict:
     return {}
 
 
-def listed_metadata(memsy: Any, actor: str) -> Iterator[dict]:
+def metadata_of(sources: Any) -> list[dict]:
+    """The event metadata in a result's ``source_metadata``, which the service
+    returns unchanged."""
+    out = []
+    for source in sources or []:
+        meta = source.get("metadata") if isinstance(source, dict) else None
+        if isinstance(meta, dict):
+            out.append(meta)
+    return out
+
+
+async def listed_metadata(actor: str) -> list[dict]:
     """Every event metadata of ``actor``'s newest memories."""
+    lister, out = _lister(), []
     for page in range(LIST_PAGES):
-        listed = memsy.memories.list(actor_id=actor, limit=LIST_PAGE, offset=page * LIST_PAGE)
+        listed = await lister.memories.list(
+            actor_id=actor, limit=LIST_PAGE, offset=page * LIST_PAGE
+        )
         for item in listed.items or []:
-            for source in payload_of(item).get("source_metadata") or []:
-                meta = source.get("metadata") if isinstance(source, dict) else None
-                if isinstance(meta, dict):
-                    yield meta
+            out += metadata_of(payload_of(item).get("source_metadata"))
         if len(listed.items or []) < LIST_PAGE:
-            return
+            break
+    return out
 
 
-def ingest(events: list[Any]) -> list[str]:
-    """Writes events; their ids."""
-    return list(client().ingest(events).event_ids)
+async def write(events: list[Any]) -> list[str]:
+    """Writes events; their ids. Raises when the service did not take them."""
+    ids = await service().ingest(events)
+    if not ids:
+        raise MemoryUnavailable("Memsy did not accept the events (see its warning above)")
+    return list(ids)
+
+
+async def search(query: str, actor: str, limit: int, threshold: float = 0.0) -> list[dict]:
+    """Memories of ``actor`` about ``query`` by meaning: [{"score", "content",
+    "metadata": [event metadata]}], best first; [] when none or on failure."""
+    found = await service().search_rich(
+        query=query, actor_id=actor, limit=limit, threshold=threshold
+    )
+    return [
+        {
+            "score": float(r.get("score") or 0.0),
+            "content": str(r.get("content") or ""),
+            "metadata": metadata_of(r.get("source_metadata")),
+        }
+        for r in found
+    ]
 
 
 def event(actor: str, session: str, kind: str, content: str, metadata: dict, team: str) -> Any:
+    """One event as the service's ``ingest`` takes it (Memsy's EventPayload)."""
     from memsy import EventPayload
 
     return EventPayload(
@@ -185,12 +236,11 @@ def unseal(text: str, actor: str, seq: int) -> dict:
 # --- snapshots ------------------------------------------------------------------------------
 
 
-def load(actor: str, kind: str, memsy: Any = None) -> tuple[int, dict]:
+async def load(actor: str, kind: str) -> tuple[int, dict]:
     """(seq, snapshot) of the newest complete snapshot; (0, {}) when none."""
-    memsy = memsy or client()
     parts: dict[int, dict[int, str]] = {}
     sizes: dict[int, int] = {}
-    for meta in listed_metadata(memsy, actor):
+    for meta in await listed_metadata(actor):
         if (meta.get("type"), meta.get("actor"), meta.get("format")) != (kind, actor, FORMAT):
             continue
         seq = int(meta["seq"])
@@ -202,9 +252,8 @@ def load(actor: str, kind: str, memsy: Any = None) -> tuple[int, dict]:
     return 0, {}
 
 
-def save(actor: str, session: str, kind: str, seq: int, snapshot: dict, summary: str) -> None:
-    """Writes snapshot ``seq`` and waits until Memsy has made it readable."""
-    memsy = client()
+async def save(actor: str, session: str, kind: str, seq: int, snapshot: dict, summary: str) -> None:
+    """Writes snapshot ``seq`` and waits until it can be read back."""
     sealed = seal(snapshot, actor, seq)
     chunks = [sealed[i : i + PART_CHARS] for i in range(0, len(sealed), PART_CHARS)]
     events = [
@@ -226,13 +275,13 @@ def save(actor: str, session: str, kind: str, seq: int, snapshot: dict, summary:
         )
         for i, chunk in enumerate(chunks)
     ]
-    ids = memsy.ingest(events).event_ids
+    ids = await write(events)
     deadline = time.monotonic() + WAIT_SECONDS
     while time.monotonic() < deadline:
-        status = memsy.status(ids)
-        if status.failed_ids:
+        status = await service().status(ids)
+        if status.get("failed_ids"):
             raise MemoryUnavailable(f"Memsy could not process the memory snapshot: {status}")
-        if not status.pending_ids and load(actor, kind, memsy)[0] >= seq:
+        if not status.get("pending_ids") and (await load(actor, kind))[0] >= seq:
             return
-        time.sleep(1.5)
+        await asyncio.sleep(1.5)
     logger.warning("Memsy snapshot %s %s not readable after %ss", actor, seq, WAIT_SECONDS)

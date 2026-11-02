@@ -1,4 +1,4 @@
-"""Which services a card touches, ranked 0-10 with a reason (2026-10-30).
+"""Which services a card touches, in order, each with a reason (2026-10-30).
 
 Done by Orchestration before a card is reviewed, from the card (its text and
 its files' text), the services configured for the project, and earlier cards
@@ -7,8 +7,13 @@ The ranking orders the design; it never limits it: Planning is given every
 repository, with the ranked services named first, and its own code search
 adds any service the ranking missed.
 
+The rank is a position, as in a class (2026-11-02): rank 1 is the main
+service, where the change mainly goes; 2 the next most important; and so on.
+To put them in order, a model judges each service's importance from 0 to 10
+(only for the ordering, never shown):
+
     9-10  the centre of the change      3-5  might change; check it
-    6-8   must change, not the centre   0-2  not touched; not returned
+    6-8   must change, not the centre   0-2  not touched; left out
 
 A reason may name only what was found: a file on the card, an earlier card or
 PR. A reason naming anything else is replaced by the evidence itself, so a
@@ -29,7 +34,7 @@ MAX_CANDIDATES = 30
 MAX_RANKED = 10
 MIN_RANK = 3
 MAX_TEXT = 12_000
-NAMED_RANK, EARLIER_RANK = 8, 6  # when the model cannot be reached
+NAMED, EARLIER = 8, 6  # importance when the model cannot be reached
 _NAMED_THING = re.compile(r"\b[A-Z][A-Z0-9]+-\d+\b|#\d+|\b[\w-]+\.[a-z0-9]{1,5}\b")
 _SPEC_LINE = re.compile(r"^([^:=#]+?)\s*[:=]\s*([^@\s]+)(?:@(\S+))?$")
 
@@ -90,7 +95,8 @@ def candidates(
     return out[:MAX_CANDIDATES]
 
 
-RANK_SYSTEM_PROMPT = """You rank the services a Jira card will change, from 0 to 10.
+RANK_SYSTEM_PROMPT = """You judge how important each service is to the change a Jira card asks for,
+from 0 to 10.
 
 9-10: the centre of the change. 6-8: must change, but not the centre.
 3-5: might change; worth checking. 0-2: not touched.
@@ -104,7 +110,7 @@ service's evidence (a file name on the card, an earlier card key or PR
 number). Never name anything that is not there.
 
 Return ONLY a JSON object:
-{"services": [{"service": "<name as given>", "rank": <0-10>, "reason": "..."}]}"""
+{"services": [{"service": "<name as given>", "importance": <0-10>, "reason": "..."}]}"""
 
 
 def _prompt(card_text: str, found: list[dict[str, Any]]) -> str:
@@ -123,15 +129,17 @@ def honest_reason(reason: str, card_text: str, evidence: list[str]) -> bool:
 
 def _fallback(c: dict[str, Any]) -> int:
     if "the card names this service" in c["evidence"]:
-        return NAMED_RANK
-    return EARLIER_RANK if c["evidence"] else 0
+        return NAMED
+    return EARLIER if c["evidence"] else 0
 
 
 def ranked(
     found: list[dict[str, Any]], answer: dict[str, Any] | None, card_text: str
 ) -> list[dict[str, Any]]:
-    """The model's ranks, checked. Without its answer, a service the card
-    names is 8, one an earlier card touched 6, any other is left out."""
+    """The services in order, rank 1 the main one. The model's importance
+    (0-10) puts them in order and drops those under 3; without its answer, a
+    service the card names counts 8, one an earlier card touched 6, any other
+    is left out."""
     given = {}
     for item in (answer or {}).get("services") or []:
         if isinstance(item, dict) and item.get("service"):
@@ -140,22 +148,36 @@ def ranked(
     for c in found:
         item = given.get(c["service"])
         try:
-            rank = int(round(float(item["rank"]))) if item else _fallback(c)
+            importance = int(round(float(item["importance"]))) if item else _fallback(c)
         except (TypeError, ValueError, KeyError):
-            rank = _fallback(c)
-        rank = max(0, min(10, rank))
+            importance = _fallback(c)
+        importance = max(0, min(10, importance))
         reason = " ".join(str((item or {}).get("reason") or "").split())
         if not reason or not honest_reason(reason, card_text, c["evidence"]):
             reason = "; ".join(c["evidence"]) or "what the card asks for"
-        out.append({"service": c["service"], "rank": rank, "reason": reason, "prs": c["prs"]})
-    out.sort(key=lambda s: (-s["rank"], s["service"]))
-    return [s for s in out if s["rank"] >= MIN_RANK][:MAX_RANKED]
+        out.append((importance, c["service"], reason, c["prs"]))
+    kept = sorted((s for s in out if s[0] >= MIN_RANK), key=lambda s: (-s[0], s[1]))
+    return [
+        {"service": service, "rank": n, "reason": reason, "prs": prs}
+        for n, (_, service, reason, prs) in enumerate(kept[:MAX_RANKED], start=1)
+    ]
+
+
+def in_order(services: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Stored services as positions, rank 1 first. A card ranked before
+    2026-11-02 holds the old 0-10 scale (higher = more important); it is put in
+    that order and numbered 1, 2, 3."""
+    ranks = [s.get("rank") for s in services]
+    if ranks == list(range(1, len(services) + 1)):
+        return list(services)
+    ordered = sorted(services, key=lambda s: (-int(s.get("rank") or 0), str(s.get("service"))))
+    return [{**s, "rank": n} for n, s in enumerate(ordered, start=1)]
 
 
 async def rank(
     card_text: str, repos_text: str, related: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
-    """The services the card touches, best first:
+    """The services the card touches, rank 1 (the main one) first:
     [{"service", "repo", "branch", "rank", "reason", "prs"}]."""
     repos = parse_repos(repos_text)
     found = candidates(card_text, list(repos), related)

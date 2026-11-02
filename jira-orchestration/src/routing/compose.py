@@ -39,6 +39,7 @@ Pure — no I/O, no environment. It runs inside the workflow.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from shared.contract import AgentResult, MissingSource, Outcome
@@ -75,20 +76,8 @@ LAYOUT: dict[Outcome, tuple[str, ...]] = {
     # questions used to reach the reply only inside the child's status block;
     # once that block was dropped they vanished (BGV-32, 2026-09-24).
     Outcome.ALREADY_EXISTS: ("what_happened", "duplicates", "questions", "read", "missing"),
-    # "behaviour", "cause", "files", "fix", "info": a bug investigation
-    # (2026-10-22); each is left out for an ordinary review.
-    Outcome.REVIEWED: (
-        "readiness",
-        "behaviour",
-        "cause",
-        "files",
-        "fix",
-        "info",
-        "findings",
-        "questions",
-        "read",
-        "missing",
-    ),
+    # A bug investigation has its own short reply (bug_blocks, 2026-11-02).
+    Outcome.REVIEWED: ("readiness", "findings", "questions", "read", "missing"),
     Outcome.NEEDS_INFO: ("what_happened", "questions", "read", "missing"),
     Outcome.NOT_A_REQUIREMENT: ("what_happened", "read", "missing"),
     Outcome.FAILED: ("what_happened", "read", "missing", "problems"),
@@ -183,10 +172,6 @@ def _section(name: str, result: AgentResult) -> Section | None:
     if name == "readiness":
         return Section("Readiness", result.summary) if result.summary else None
 
-    if name in ("behaviour", "cause", "files", "fix", "info"):
-        ready = (result.readiness_score or 0) >= 4
-        return _investigation_section(name, result.investigation or {}, ready)
-
     if name == "findings":
         items = []
         for finding in result.findings:
@@ -220,73 +205,77 @@ def _section(name: str, result: AgentResult) -> Section | None:
     return None
 
 
-def _investigation_section(name: str, found: dict, ready: bool = False) -> Section | None:
-    """One part of a bug investigation, or None when it has nothing to say."""
-    if not found:
-        return None
+_NEXT = 'Say "@Aetherion create TDD" for the design, or "@Aetherion code" to implement it.'
+_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+_LIST_IN_BRACKETS = re.compile(r"\(([^)]*)\)")
 
-    if name == "behaviour":
-        items = _lines(
-            [
-                f"Actual: {found.get('actual')}" if found.get("actual") else "",
-                f"Expected: {found.get('expected')}" if found.get("expected") else "",
-            ]
-        )
-        return Section("What is wrong", items) if items else None
 
-    if name == "cause":
-        cause = str(found.get("root_cause") or "").strip()
-        if not cause:
-            return None
+def _first_sentences(text: str, count: int) -> str:
+    return " ".join(_SENTENCE.split(" ".join(str(text or "").split()))[:count]).strip()
+
+
+def _code_lines(found: dict) -> list[str]:
+    """The affected files, or one line saying where the code was not found."""
+    items = []
+    for entry in found.get("affected_files") or []:
+        if isinstance(entry, dict):
+            path, why = str(entry.get("path") or "").strip(), str(entry.get("why") or "").strip()
+            if path:
+                items.append(f"{path} — {why}" if why else path)
+        elif str(entry).strip():
+            items.append(str(entry).strip())
+    if items:
+        return items
+    note = str(found.get("code_note") or "").strip()
+    if "not found" in note.lower():
+        where = _LIST_IN_BRACKETS.search(note)
+        return [
+            "Not found in the connected repositories" + (f": {where.group(1)}." if where else ".")
+        ]
+    return [_first_sentences(note.split("; searched for")[0], 1)] if note else []
+
+
+def bug_blocks(result: AgentResult, notification: str = "") -> list[tuple[str, object]]:
+    """A bug investigation's reply, kept short (2026-11-02): readiness, what is
+    wrong, the likely cause, the code, the fix, what is still needed once, and
+    what to ask next."""
+    found = result.investigation or {}
+    blocks: list[tuple[str, object]] = [(f"{AGENT_SIGNATURE} · {result.headline}", "")]
+    if result.degraded:
+        blocks.append(("", _DEGRADED_WARNING))
+    if result.summary:
+        blocks.append(("Readiness", _first_sentences(result.summary, 2)))
+    wrong = _lines(
+        [
+            f"Actual: {found['actual']}" if found.get("actual") else "",
+            f"Expected: {found['expected']}" if found.get("expected") else "",
+        ]
+    )
+    if wrong:
+        blocks.append(("What is wrong", wrong))
+    cause = str(found.get("root_cause") or "").strip()
+    if cause:
         confidence = str(found.get("root_cause_confidence") or "").strip().lower()
-        heading = (
-            f"Likely root cause ({confidence} confidence)" if confidence else "Likely root cause"
-        )
-        evidence = _lines([str(e) for e in found.get("evidence") or []])
-        return Section(heading, [cause, *[f"Evidence: {e}" for e in evidence]])
-
-    if name == "files":
-        items = []
-        for entry in found.get("affected_files") or []:
-            if isinstance(entry, dict):
-                path = str(entry.get("path") or "").strip()
-                why = str(entry.get("why") or "").strip()
-                if path:
-                    items.append(f"{path} — {why}" if why else path)
-            elif str(entry).strip():
-                items.append(str(entry).strip())
-        note = str(found.get("code_note") or "").strip()
-        if not items and note:
-            return Section("Affected files", note)
-        if note:
-            items.append(note)
-        return Section("Affected files", items) if items else None
-
-    if name == "fix":
-        fix = str(found.get("proposed_fix") or "").strip()
-        if not fix:
-            return None
-        return Section(
-            "Proposed fix — not implemented",
-            [
-                fix,
-                'Nothing was changed. Say "@Aetherion create TDD" for the design, or '
-                '"@Aetherion code" to implement it.',
-            ],
-        )
-
-    if name == "info":
-        items = _lines([str(i) for i in found.get("missing_information") or []])
-        if not items:
-            return None
-        # A report that is ready to fix needs nothing more; anything left is
-        # worth checking while fixing, not a reason to wait (BTS-31, 2026-10-23).
-        title = (
-            "Worth confirming while fixing (not blocking)" if ready else "Information still needed"
-        )
-        return Section(title, items)
-
-    return None
+        heading = f"Likely cause ({confidence} confidence)" if confidence else "Likely cause"
+        blocks.append((heading, _first_sentences(cause, 3)))
+    code = _code_lines(found)
+    if code:
+        blocks.append(("Code", code))
+    fix = str(found.get("proposed_fix") or "").strip()
+    if fix:
+        blocks.append(("Proposed fix — not applied", fix))
+    needed = _lines([str(i) for i in found.get("missing_information") or []]) or _lines(
+        result.questions
+    )
+    if needed and (result.readiness_score or 0) < 4:
+        # A report ready to fix (4/5 or more) asks for nothing more (BTS-40,
+        # 2026-11-02: an engineer confirmed its information was enough).
+        blocks.append(("Still needed", needed))
+    blocks.append(("Next", _NEXT))
+    if notification:
+        blocks.append(("Notification", notification))
+    blocks.append(("", AGENT_FOOTER))
+    return blocks
 
 
 def compose(
@@ -302,8 +291,11 @@ def compose(
     passed in rather than read from ``result.display_name`` because only the
     router knows whether the child finished — a timed-out child still has a name.
 
-    No ``run_id`` parameter, deliberately — see ``handled_by``.
+    No ``run_id`` parameter, deliberately — see ``handled_by``. A bug
+    investigation has its own short reply (``bug_blocks``).
     """
+    if result.investigation:
+        return bug_blocks(result, notification)
     blocks: list[tuple[str, object]] = [
         (f"{AGENT_SIGNATURE} · {result.headline}", ""),
     ]

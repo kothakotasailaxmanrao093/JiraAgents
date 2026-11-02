@@ -158,7 +158,7 @@ def _text(blocks) -> str:
     return "\n".join(out)
 
 
-def test_the_reply_shows_cause_files_and_fix() -> None:
+def test_the_reply_is_short_cause_code_fix_and_next() -> None:
     result = _investigated(
         actual="The balance shows the old amount",
         expected="The balance shows the amount after the transfer",
@@ -170,28 +170,57 @@ def test_the_reply_shows_cause_files_and_fix() -> None:
         missing_information=["The exact request that showed the stale balance"],
         code_note="Code searched for: transfer, balance.",
     )
-    text = _text(compose(result, routed_to="bug", ran=["Bug Investigation"]))
-    assert "What is wrong" in text and "Actual: The balance shows the old amount" in text
-    assert "Likely root cause (high confidence)" in text
+    blocks = compose(result, routed_to="bug", ran=["Bug Investigation"])
+    headings = [h for h, _ in blocks if h]
+    assert headings == [
+        "AetherionAgent · Bug investigation — likely cause found",
+        "Readiness",
+        "What is wrong",
+        "Likely cause (high confidence)",
+        "Code",
+        "Proposed fix — not applied",
+        "Next",
+    ]
+    text = _text(blocks)
+    assert "Actual: The balance shows the old amount" in text
     assert "Org/repo/src/TransferService.java — saves late" in text
-    assert "Proposed fix — not implemented" in text and "Nothing was changed" in text
-    # 4/5: ready to fix, so what is left does not block it (BTS-31, 2026-10-23)
-    assert "Worth confirming while fixing (not blocking)" in text
-    assert "Information still needed" not in text
+    # Ready (4/5): nothing more is asked (BTS-40, 2026-11-02); no evidence,
+    # findings, sources or routing lines.
+    assert "exact request" not in text and "Evidence" not in text
+    assert "Routed to" not in text and "What I read" not in text and "Findings" not in text
 
 
-def test_a_report_that_is_not_ready_still_lists_what_is_needed() -> None:
+def test_a_report_that_is_not_ready_lists_what_is_needed_once() -> None:
     result = _investigated(
         score=2,
         root_cause="Unknown without the steps to reproduce.",
         missing_information=["The steps that lead to the stale balance"],
     )
     text = _text(compose(result, routed_to="bug", ran=["Bug Investigation"]))
-    assert "Information still needed" in text and "not blocking" not in text
+    assert text.count("The steps that lead to the stale balance") == 1
+    assert "Still needed" in text
+
+
+def test_code_not_found_is_one_short_line() -> None:
+    # BTS-40, live: the note listed every word searched for.
+    result = _investigated(
+        root_cause="The toolbar mounts ARCHIVE only on selection.",
+        code_note=(
+            "The code for this bug was not found in the repositories Planning has "
+            "(FirstRepo, bank, codepulse-springboot-test); searched for: Candidate Status, "
+            "First Name. The cause above comes from the report."
+        ),
+    )
+    text = _text(compose(result, routed_to="bug", ran=["Bug Investigation"]))
+    assert (
+        "Not found in the connected repositories: FirstRepo, bank, codepulse-springboot-test."
+        in text
+    )
+    assert "searched for" not in text
 
 
 def test_an_ordinary_review_has_no_investigation_sections() -> None:
     result = _investigated()
     text = _text(compose(result, routed_to="review", ran=["Requirement Review"]))
-    for heading in ("What is wrong", "Likely root cause", "Affected files", "Proposed fix"):
+    for heading in ("What is wrong", "Likely cause", "Code", "Proposed fix"):
         assert heading not in text
