@@ -221,6 +221,12 @@ def _adf_lines(node: Any) -> list[str]:
     if kind == "rule":
         return []
 
+    if kind == "media":
+        # A picture pasted into a comment: named where it sits, so "Proposed
+        # layout:" above it still points at its attachment (KS-6, 2026-11-04).
+        name = str((node.get("attrs") or {}).get("alt") or "").strip()
+        return [f"[image: {name}]"] if name else ["[image]"]
+
     out = []
     for child in node.get("content") or []:
         out.extend(_adf_lines(child))

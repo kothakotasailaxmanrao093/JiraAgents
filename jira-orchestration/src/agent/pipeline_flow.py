@@ -182,12 +182,19 @@ class Chain:
 
     async def _plan(self, step: Step, issue_text: str, attempt: int) -> str:
         """One Planning run; the stored design's key, or "" with the step marked failed."""
+        # Planning takes a card and its ranked services (2026-11-03): the
+        # request with the tickets built for it, ranked here.
+        card = await self._card(issue_text)
+        if not card["services"]:
+            step.status = "failed"
+            step.detail = "no repository could be matched to the request, so nothing was designed"
+            return ""
         payload = {
             "issue_text": issue_text,
             "repos": self.config.repos,
-            # Not read by Planning today; there for it to use.
             "issue_key": self.issue_key,
             "run_id": self.run_id,
+            **card,
         }
         out, problem = await self._call(
             self.config.planning_agent,
@@ -206,6 +213,27 @@ class Chain:
         step.lines = [await self.keep_design(tdd)]
         self.designs.append(tdd)
         return tdd
+
+    async def _card(self, issue_text: str) -> dict[str, Any]:
+        """{"card", "services", "questions"} for Planning, from the planning text."""
+        title = next((line.strip() for line in issue_text.splitlines() if line.strip()), "")
+        ranked = await _safe(
+            self.execute,
+            "rank_card",
+            issue_text,
+            self.config.repos,
+            start_to_close_timeout=_TOOL_TIMEOUT,
+        )
+        return {
+            "card": {
+                "key": self.issue_key or "REQUEST",
+                "type": "Story",
+                "title": title[:200] or "Request",
+                "description": issue_text,
+            },
+            "services": list(ranked.get("services") or []),
+            "questions": [],
+        }
 
     # --- coding -------------------------------------------------------------------
 

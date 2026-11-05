@@ -29,14 +29,13 @@ from tools.tools import _client
 
 logger = setup_logger(__name__)
 
-GITHUB_API = "https://api.github.com"
 _PENDING_PREFIX = "aetherion-gh-"
 _MAX_PAGES = 3
 
 
 def _github() -> httpx.AsyncClient:
     return httpx.AsyncClient(
-        base_url=GITHUB_API,
+        base_url=settings.github_api_url(),
         timeout=30.0,
         headers={
             "Authorization": f"Bearer {settings.github_token()}",

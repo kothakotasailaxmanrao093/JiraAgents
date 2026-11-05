@@ -37,3 +37,6 @@ coding-agent/
 
 # Plans Task Creation keeps for identical input on a laptop (plan_cache.py).
 .local-cache/
+
+# Local runs of scripts/local_run.py: PDFs and the local memory (2026-11-03).
+local-output/

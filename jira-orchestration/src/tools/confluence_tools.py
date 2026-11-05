@@ -204,12 +204,14 @@ async def publish_tdd(
     run_id: str,
     related: list[dict[str, str]] | None = None,
     fingerprint: str = "",
+    file_key: str = "",
 ) -> dict[str, Any]:
     """The TDD as a Confluence page in the project's space — a new version of the
     story's page when it has one — and the link kept on both sides. ``related``:
     the project's earlier designs, linked in the page's header. ``fingerprint``:
     the story it was written from; a revision asked on the page keeps the one
-    already recorded, since the story did not change."""
+    already recorded, since the story did not change. ``file_key``: the TDD
+    PDF in storage, whose work order Coding implements (2026-11-02)."""
     issue_key = issue_key.strip().upper()
     base, _, _ = settings.jira_credentials()
     story_url = f"{base}/browse/{issue_key}"
@@ -281,6 +283,10 @@ async def publish_tdd(
             await _set_page_property(
                 wiki, page_id, settings.STORY_PROPERTY, {"issue_key": issue_key}
             )
+            if file_key:
+                await _set_page_property(
+                    wiki, page_id, settings.TDD_FILE_PROPERTY, {"file_key": file_key}
+                )
             record = {
                 "page_id": page_id,
                 "url": url,
@@ -345,6 +351,7 @@ async def read_tdd(page_id: str) -> dict[str, Any]:
             page = resp.json()
             story = await _page_property(wiki, page_id, settings.STORY_PROPERTY)
             plan = await _page_property(wiki, page_id, settings.CODE_PLAN_PROPERTY)
+            pdf = await _page_property(wiki, page_id, settings.TDD_FILE_PROPERTY)
             comments = await _comments(wiki, page_id)
     except (httpx.HTTPError, ValueError) as exc:
         return {"ok": False, "error": f"Could not read the TDD page {page_id}: {exc}"}
@@ -358,6 +365,7 @@ async def read_tdd(page_id: str) -> dict[str, Any]:
         "text": storage_to_text(storage),
         "issue_key": str(story.get("issue_key") or ""),
         "code_plan": plan,
+        "tdd_file_key": str(pdf.get("file_key") or ""),
         "discussion": [f"{c['author']}: {c['text']}" for c in comments][-_MAX_DISCUSSION:],
     }
 
@@ -617,7 +625,7 @@ async def _default_branch(repo: str) -> str:
         return ""
     try:
         async with httpx.AsyncClient(
-            base_url="https://api.github.com",
+            base_url=settings.github_api_url(),
             timeout=_TIMEOUT,
             headers={
                 "Authorization": f"Bearer {settings.github_token()}",

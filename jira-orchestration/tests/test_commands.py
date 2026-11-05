@@ -372,7 +372,27 @@ async def test_a_changed_story_gets_a_new_version() -> None:
     agents = Agents()
     await run_command(command("TDD", "@Aetherion create TDD", t, agents, fingerprint="def456"))
     assert "planning_agent" in agents.names()
-    assert t.args("publish_tdd")[-1] == "def456"  # the new story is remembered
+    assert t.args("publish_tdd")[-2] == "def456"  # the new story is remembered
+
+
+async def test_the_tdd_pdf_is_kept_on_its_page() -> None:
+    """Coding implements the work order inside the PDF (2026-11-02)."""
+    planned = {
+        "status": "success",
+        "results": [{"type": "s3_download_link", "file_key": "technical_designs/t.pdf"}],
+        "document": DOCUMENT,
+    }
+    t, agents = tools(), Agents(planning_agent=[planned])
+    await run_command(command("TDD", "@Aetherion create TDD", t, agents))
+    assert t.args("publish_tdd")[-1] == "technical_designs/t.pdf"
+
+
+async def test_coding_gets_the_tdd_pdf_from_the_page() -> None:
+    plan = {"proposed": {"source": "main", "branch": "feature/BGV-105-x", "target": "main"}}
+    page = {**PAGE, "code_plan": plan, "tdd_file_key": "technical_designs/t.pdf"}
+    t, agents = tools(read_tdd=page), Agents()
+    await run_command(command("CODE", "@Aetherion code confirm", t, agents, page_id="9001"))
+    assert agents.payload("coding-agent")["uploaded_files"] == ["technical_designs/t.pdf"]
 
 
 async def test_a_deleted_page_is_written_again() -> None:
@@ -853,7 +873,7 @@ async def test_a_changed_story_is_revised_from_its_current_tdd() -> None:
     assert "This is a REVISION of the technical design below" in sent
     assert PAGE["text"] in sent
     assert "Keep every decision already in the current design" in sent
-    assert t.args("publish_tdd")[-1] == "def456"
+    assert t.args("publish_tdd")[-2] == "def456"
 
 
 async def test_a_first_tdd_is_written_fresh() -> None:

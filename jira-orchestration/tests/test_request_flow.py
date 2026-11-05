@@ -30,7 +30,8 @@ REQUEST = {
     "project_key": "bgv",
 }
 # Only these may run: no tool here reads or writes Jira.
-NO_JIRA = {"request_settings", "keep_design_copy"}
+# rank_card: one model call over the request; it writes nothing (2026-11-03).
+NO_JIRA = {"request_settings", "keep_design_copy", "rank_card"}
 
 
 def broken_down(outcome: Outcome = Outcome.PLANNED, documents: bool = True) -> dict:
@@ -92,6 +93,9 @@ def tools_for(**over: Any) -> Tools:
             "saved": True,
             "path": "/laptop/docs-export/pipeline/tdd-x.pdf",
         },
+        # The services ranked for Planning's card (2026-11-03).
+        rank_card={"ok": True, "services": [{"service": "bank", "repo": "o/bank", "rank": 1}],
+                   "questions": []},
     )
 
 

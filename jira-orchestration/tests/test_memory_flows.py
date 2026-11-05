@@ -395,7 +395,9 @@ FOUND = {
 }
 
 
-async def test_a_bug_gets_the_cause_from_planning_and_keeps_reviews_part() -> None:
+async def test_a_bug_is_reviewed_without_asking_planning() -> None:
+    """A bug's reply is Review's: what is wrong and what is still needed —
+    no code is read for it (2026-11-03)."""
     tools_ = Tools(
         ingress_check=_bug_gate("@Aetherion investigate", commands={"repos": "ui: Org/ui"}),
         story_text={"ok": True, "text": "Submit silently fails", "hash": "h"},
@@ -403,28 +405,10 @@ async def test_a_bug_gets_the_cause_from_planning_and_keeps_reviews_part() -> No
     children = BugChildren(FOUND)
     await run_router(PAYLOAD, tools_.execute, children.dispatch)
 
-    planning = [c for c in children.calls if c[0] == "planning_agent"]
-    assert planning and planning[0][1]["mode"] == "investigate"
-    assert planning[0][1]["report_text"] == "Submit silently fails"
-    assert planning[0][1]["repos"] == "ui: Org/ui"
-    reply = tools_.reply_text()
-    assert "Actual: Submit does nothing" in reply  # Review's part
-    assert "The phone regex runs on the untrimmed value." in reply  # Planning's part
-    assert "ui/src/validators.ts — no trim" in reply
-    stored = [a for n, a in tools_.calls if n == "finish_ticket"]
-    assert stored and stored[-1][1] == "REVIEW"
-    assert stored[-1][3]["investigation"]["root_cause"].startswith("The phone regex")
-    assert stored[-1][3]["headline"] == "Bug investigation — likely cause found"
-
-
-async def test_planning_failing_still_replies_with_reviews_part() -> None:
-    tools_ = Tools(ingress_check=_bug_gate("@Aetherion investigate"))
-    children = BugChildren(RuntimeError("worker gone"))
-    await run_router(PAYLOAD, tools_.execute, children.dispatch)
-
+    assert not [c for c in children.calls if c[0] == "planning_agent"]
     reply = tools_.reply_text()
     assert "Actual: Submit does nothing" in reply
-    assert "The code could not be investigated: RuntimeError: worker gone" in reply
+    assert "Likely cause" not in reply and "Code" not in reply
 
 
 async def test_a_design_question_is_remembered_on_its_page() -> None:

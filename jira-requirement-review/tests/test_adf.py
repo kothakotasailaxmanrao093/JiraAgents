@@ -134,3 +134,22 @@ def test_no_priority_no_prefix():
     md = render_review_to_markdown(review, "ABC-1")
     assert "- Assumes X" in md
     assert "[HIGH]" not in md and "[MEDIUM]" not in md and "[LOW]" not in md
+
+
+def test_a_picture_in_a_comment_is_named_where_it_sits():
+    """KS-6: "Proposed layout:" above a pasted screenshot has to point at its
+    attachment, or the review cannot tell which picture is the proposal."""
+    body = {
+        "type": "doc",
+        "content": [
+            {"type": "paragraph", "content": [{"type": "text", "text": "Proposed layout:"}]},
+            {
+                "type": "mediaSingle",
+                "content": [
+                    {"type": "media", "attrs": {"type": "file", "alt": "image-094200.png"}}
+                ],
+            },
+            {"type": "mediaSingle", "content": [{"type": "media", "attrs": {"type": "file"}}]},
+        ],
+    }
+    assert adf_to_text(body) == "Proposed layout:\n[image: image-094200.png]\n[image]"

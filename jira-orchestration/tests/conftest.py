@@ -19,3 +19,5 @@ def _no_local_model_key(monkeypatch: pytest.MonkeyPatch) -> None:
     # The developer's ORCH_GITHUB_ORG would make every command read GitHub's
     # repository list; tests that want it turn it back on (test_org_repos.py).
     monkeypatch.setenv("ORCH_PLANNING_ORG_REPOS", "false")
+    # Nor the developer's GitHub Enterprise server: tests use github.com's paths.
+    monkeypatch.delenv("GITHUB_API_URL", raising=False)

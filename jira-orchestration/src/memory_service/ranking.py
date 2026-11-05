@@ -30,7 +30,12 @@ from memory_service import model
 
 logger = logging.getLogger(__name__)
 
-MAX_CANDIDATES = 30
+# Every service of the run is shown (BTS-42, 2026-11-03: with 30, "ui" — 51st
+# of 53 by name — was never offered, and a backend matching "criminal" won).
+MAX_CANDIDATES = 120
+# What each repository is, by name: "TypeScript; <its GitHub description>".
+# Filled where the organization's repositories are read (tools/org_repos.py).
+ABOUT: dict[str, str] = {}
 MAX_RANKED = 10
 MIN_RANK = 3
 MAX_TEXT = 12_000
@@ -41,13 +46,14 @@ _SPEC_LINE = re.compile(r"^([^:=#]+?)\s*[:=]\s*([^@\s]+)(?:@(\S+))?$")
 
 def parse_repos(repos_text: str) -> dict[str, tuple[str, str]]:
     """{service: (repo, branch)} from "name: org/repo@branch" lines (Planning's
-    format); no branch is "main"."""
+    format); no branch is "" — Planning then reads the repository's default
+    branch (keystone/ui has no "main", 2026-11-03)."""
     out = {}
     for line in (repos_text or "").splitlines():
         found = _SPEC_LINE.match(line.strip())
         if found:
             name, repo, branch = found.groups()
-            out[name.strip()] = (repo, branch or "main")
+            out[name.strip()] = (repo, branch or "")
     return out
 
 
@@ -104,7 +110,11 @@ from 0 to 10.
 You get the card (its text and the text of its attached files) and the
 project's services, each with the EVIDENCE found for it: the card names it,
 earlier cards about the same thing changed it (with their pull requests).
-Rank each service by what the CARD asks for, using its name and the evidence.
+Rank each service by what the CARD asks for, using its name, what it is (its
+language and description, when given) and the evidence. A card about what a
+person sees — a page, screen, sidebar, menu, button, table or layout — is a
+change in the web UI service (TypeScript or JavaScript), not in a backend
+service whose name merely shares a word with the card.
 The reason is ONE short sentence that names only things in the card or in that
 service's evidence (a file name on the card, an earlier card key or PR
 number). Never name anything that is not there.
@@ -116,7 +126,9 @@ Return ONLY a JSON object:
 def _prompt(card_text: str, found: list[dict[str, Any]]) -> str:
     lines = [f"CARD:\n{card_text[:MAX_TEXT]}", "", "SERVICES:"]
     for c in found:
-        lines.append(f"- {c['service']}: " + ("; ".join(c["evidence"]) or "no evidence found"))
+        about = ABOUT.get(c["service"].lower())
+        name = f"{c['service']} ({about})" if about else c["service"]
+        lines.append(f"- {name}: " + ("; ".join(c["evidence"]) or "no evidence found"))
     return "\n".join(lines)
 
 

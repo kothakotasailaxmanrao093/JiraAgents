@@ -251,6 +251,9 @@ async def create_tdd(cmd: Command) -> CommandResult:
     await cmd.say(
         _working(f"Ready ({score}/5). Planning is writing the design from the code…", "2 of 3")
     )
+    if bundle is None:
+        # Planning takes the card and its ranked services only (2026-11-03).
+        bundle = await _bundle(cmd, story, for_planning=True)
     if bundle is not None:
         text, bundle = await _bundle_input(cmd, bundle, review.to_dict())
         given = await _handoff(cmd, bundle, kept)
@@ -469,7 +472,7 @@ async def _planning(
         str(cmd.settings.get("planning_agent") or "planning_agent"),
         payload,
         f"{name}-{cmd.run_id}",
-        int(cmd.settings.get("planning_timeout_minutes") or 15),
+        int(cmd.settings.get("planning_timeout_minutes") or 20),
         str(cmd.settings.get("planning_queue") or ""),
     )
 
@@ -490,10 +493,13 @@ def _run(cmd: Command) -> handoff_flow.Run:
     return run
 
 
-async def _bundle(cmd: Command, story: dict[str, Any]) -> dict[str, Any] | None:
+async def _bundle(
+    cmd: Command, story: dict[str, Any], for_planning: bool = False
+) -> dict[str, Any] | None:
     """The story read once (ORCH_HANDOFF); None when off or unreadable — the
-    command then reads it as before."""
-    if not _handoff_on(cmd):
+    command then reads it as before. ``for_planning``: read even with the
+    handoff off, since Planning takes only the card (2026-11-03)."""
+    if not _handoff_on(cmd) and not for_planning:
         return None
     bundle = await _tool(
         cmd,
@@ -543,12 +549,20 @@ async def _handoff(
     brought up to date now. None when the memory cannot give it — the TDD is
     then written from the old input."""
     card = handoff.card(bundle, list(bundle.get("files") or []))
-    kept = kept or await handoff_flow.refresh(
-        _run(cmd), cmd.issue_key, bundle, str(cmd.settings.get("repos") or "")
-    )
+    repos = str(cmd.settings.get("repos") or "")
+    if not kept and _handoff_on(cmd):
+        kept = await handoff_flow.refresh(_run(cmd), cmd.issue_key, bundle, repos)
     if not kept:
-        return None
-    return handoff.payload(card, kept["services"], kept["questions"])
+        # No memory to say (off, or Memsy unreadable): the services ranked now,
+        # no questions — Planning still gets the card (2026-11-03).
+        kept = await _tool(cmd, "rank_card", handoff.card_text(card), repos, timeout=_MEMORY_TOOL)
+        if not kept.get("ok"):
+            return None
+    return {
+        "card": card,
+        "services": kept["services"],
+        "questions": handoff.questions_for_planning(kept["questions"]),
+    }
 
 
 async def _story_facts(
@@ -1041,6 +1055,9 @@ async def code(cmd: Command) -> CommandResult:
             str(cmd.settings.get("coding_agent") or "coding-agent"),
             {
                 "mode": "delegated",
+                # The TDD PDF, whose embedded work order Coding implements
+                # (2026-11-02); the text stays for a Coding that reads it.
+                "uploaded_files": [page["tdd_file_key"]] if page.get("tdd_file_key") else [],
                 "tdd_text": tdd_text,
                 "requirements": str(requirements.get("issue_text") or ""),
                 "branches": plan.to_dict(),
@@ -1222,7 +1239,15 @@ async def _plan(
         "run_id": cmd.run_id,
     }
     if given is not None:
-        payload |= {**given, "issue_text": "", "notes": issue_text}
+        if not given.get("services"):
+            return None, (
+                "No repository could be matched to this card. Say which service it is in a "
+                'comment (e.g. "The service is ui"), then ask again.'
+            )
+        payload |= {
+            **handoff.payload(given["card"], given["services"], given["questions"], issue_text),
+            "issue_text": "",
+        }
     if _memory(cmd):
         # The story's decisions in force, and its project's on the ranked
         # services (all of the project's when none is ranked).
@@ -1236,13 +1261,14 @@ async def _plan(
         str(cmd.settings.get("planning_agent") or "planning_agent"),
         payload,
         f"tdd-plan-{cmd.run_id}-{attempt}",
-        int(cmd.settings.get("planning_timeout_minutes") or 15),
+        int(cmd.settings.get("planning_timeout_minutes") or 20),
         str(cmd.settings.get("planning_queue") or ""),
     )
     document = (out or {}).get("document") or {}
     if out is None or out.get("status") != "success" or not document.get("confluence_html"):
         return None, problem or rules.planning_problem(out)
-    return document, ""
+    # The PDF holds the work order Coding implements (2026-11-02): kept on the page.
+    return {**document, "file_key": rules.tdd_key(out)}, ""
 
 
 async def _publish(
@@ -1263,6 +1289,7 @@ async def _publish(
         cmd.run_id,
         [{"title": d["title"], "url": d["url"]} for d in earlier or []],
         cmd.fingerprint,
+        str(document.get("file_key") or ""),
     )
 
 

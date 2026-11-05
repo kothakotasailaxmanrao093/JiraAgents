@@ -108,6 +108,12 @@ for agent in "${AGENTS[@]}"; do
   pids+=($!)
   echo "started $agent  (log: .local-logs/$agent.log)"
 done
+# Review -> plan -> code by hand (local only, scripts/local_run.py), on
+# Orchestration's Python: it does Orchestration's part around each agent.
+(cd "$ROOT/local-agents" && exec "$ROOT/jira-orchestration/.venv/bin/python" \
+   "$ROOT/scripts/local_worker.py" local-agents) >"$LOGS/local-agents.log" 2>&1 &
+pids+=($!)
+echo "started local-agents  (log: .local-logs/local-agents.log)"
 if [ "$POLL" = 1 ]; then
   sleep 20  # let the workers connect first
   (cd "$ROOT/jira-orchestration" && exec .venv/bin/python "$ROOT/scripts/watch_jira_local.py") \
@@ -132,6 +138,10 @@ if [ "$FORM" = 1 ]; then
     pids+=($!)
     echo "form for $agent: http://127.0.0.1:$port"
   done
+  (cd "$ROOT/local-agents" && exec "$ROOT/jira-orchestration/.venv/bin/python" \
+     "$ROOT/scripts/local_form.py" --port 8770) >"$LOGS/form-local-agents.log" 2>&1 &
+  pids+=($!)
+  echo "form for review -> plan -> code by hand: http://127.0.0.1:8770"
 fi
 if [ "$FOLLOW" = 1 ]; then
   # Only what a person reads: no worker-poll retries, raw HTTP GETs or the

@@ -109,18 +109,18 @@ async def test_build_on_a_bug_dispatches_nothing_and_replies_once() -> None:
     assert "@Aetherion investigate" in text and "@Aetherion create TDD" in text
 
 
-async def test_review_on_a_bug_runs_the_investigation_not_the_breakdown() -> None:
+async def test_review_on_a_bug_reviews_the_report_and_reads_no_code() -> None:
     tools = Tools(ingress_check=_bug_gate("@Aetherion review"))
     children = Children(result=reviewed_contract())
 
     await run_router(PAYLOAD, tools.execute, children.dispatch)
 
-    # Review judges the report, then Planning looks for the cause (2026-10-26).
-    assert [c[0] for c in children.calls] == ["JiraRequirementReview", "planning_agent"]
+    # Review judges whether the report is enough to work on; no code is read
+    # and Planning is not asked (2026-11-03).
+    assert [c[0] for c in children.calls] == ["JiraRequirementReview"]
     agent_name, payload, options = children.calls[0]
     assert payload["review_kind"] == "bug" and payload["post_to_jira"] is False
     assert options["workflow_id"].startswith("bug-")
-    assert children.calls[1][1]["mode"] == "investigate"
 
 
 async def test_a_build_on_a_story_still_builds() -> None:

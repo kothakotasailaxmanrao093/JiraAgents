@@ -52,8 +52,17 @@ def card(bundle: dict[str, Any], files: list[dict[str, Any]] | None = None) -> d
         "title": str(root.get("summary") or ""),
         "description": description[: pipeline.MAX_STORY_DESCRIPTION * 2],
         "comments": [str(c) for c in bundle.get("comments") or [] if str(c).strip()],
+        # A file that could not be read is named, not sent empty: Planning
+        # refuses a file with no text at all (2026-11-03).
         "files": [
-            {"name": str(f.get("filename") or "file"), "content": str(f.get("text") or "")}
+            (
+                {"name": str(f.get("filename") or "file"), "content": str(f.get("text") or "")}
+                if str(f.get("text") or "").strip()
+                else {
+                    "name": str(f.get("filename") or "file"),
+                    "description": "attached to the card; its content could not be read",
+                }
+            )
             for f in (files if files is not None else bundle.get("files") or [])
         ],
     }
@@ -114,9 +123,30 @@ def questions_for_planning(questions: list[dict[str, Any]]) -> list[dict[str, An
 
 
 def payload(
-    card: dict[str, Any], services: list[dict[str, Any]], questions: list[dict[str, Any]]
+    card: dict[str, Any],
+    services: list[dict[str, Any]],
+    questions: list[dict[str, Any]],
+    notes: str = "",
 ) -> dict[str, Any]:
-    return {"card": card, "services": services, "questions": questions_for_planning(questions)}
+    """Planning's input. Planning reads the card's title, description and files
+    (2026-11-03): people's comments and this version's notes (a revision's
+    instructions, the earlier designs) go into the description it reads."""
+    return {
+        "card": for_planning(card, notes),
+        "services": services,
+        "questions": questions_for_planning(questions),
+    }
+
+
+def for_planning(card: dict[str, Any], notes: str = "") -> dict[str, Any]:
+    """The card with its comments and ``notes`` written into its description."""
+    parts = [str(card.get("description") or "").strip()]
+    comments = [str(c).strip() for c in card.get("comments") or [] if str(c).strip()]
+    if comments:
+        parts.append("Comments on the card:\n" + "\n".join(f"- {c}" for c in comments))
+    if notes.strip():
+        parts.append("For this version:\n" + notes.strip())
+    return {**card, "description": "\n\n".join(p for p in parts if p)}
 
 
 # --- what the reply shows ---------------------------------------------------------------

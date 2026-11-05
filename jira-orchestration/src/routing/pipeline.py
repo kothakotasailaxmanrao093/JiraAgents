@@ -68,7 +68,7 @@ class PipelineConfig:
     repos: str = ""
     planning_agent: str = "planning_agent"
     planning_queue: str = ""
-    planning_timeout_minutes: int = 15
+    planning_timeout_minutes: int = 20
     coding_agent: str = "coding-agent"
     coding_queue: str = ""
     coding_timeout_minutes: int = 20

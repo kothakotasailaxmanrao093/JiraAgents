@@ -12,6 +12,7 @@ falls back to ORCH_PLANNING_REPOS, so GitHub being down never stops a design.
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -34,7 +35,7 @@ async def _org_repos() -> list[dict]:
         return _cache["repos"]
     repos: list[dict] = []
     async with httpx.AsyncClient(
-        base_url="https://api.github.com",
+        base_url=settings.github_api_url(),
         timeout=30.0,
         headers={
             "Authorization": f"Bearer {settings.github_token()}",
@@ -54,8 +55,39 @@ async def _org_repos() -> list[dict]:
     wanted = settings.github_repos()
     if wanted:  # ORCH_GITHUB_REPOS still narrows the organization when set
         repos = [r for r in repos if str(r.get("name") or "").lower() in wanted]
+    repos = active(repos, settings.org_repo_max_idle_days())
+    # What each repository is, for the ranking of a card's services (2026-11-03).
+    from memory_service import ranking
+
+    ranking.ABOUT.update({
+        str(r.get("name") or "").lower(): "; ".join(
+            str(v) for v in (r.get("language"), r.get("description")) if v
+        )
+        for r in repos
+        if r.get("language") or r.get("description")
+    })
     _cache.update(at=time.monotonic(), org=org, repos=repos)
     return repos
+
+
+def active(repos: list[dict], max_idle_days: int, now: datetime | None = None) -> list[dict]:
+    """The repositories still worked on: not archived, pushed to within
+    ``max_idle_days`` (0 keeps all). One with no push date is kept."""
+    if not max_idle_days:
+        return repos
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=max_idle_days)
+    kept = []
+    for repo in repos:
+        if repo.get("archived"):
+            continue
+        pushed = str(repo.get("pushed_at") or "")
+        try:
+            if pushed and datetime.fromisoformat(pushed.replace("Z", "+00:00")) < cutoff:
+                continue
+        except ValueError:
+            pass
+        kept.append(repo)
+    return kept
 
 
 async def planning_repos() -> str:

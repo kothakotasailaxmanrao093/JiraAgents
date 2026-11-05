@@ -124,10 +124,9 @@ CATALOG: tuple[AgentSpec, ...] = (
         timeout_minutes=8,
         forced_payload={"mode": "delegated", "post_to_jira": False},
     ),
-    # A bug is investigated, never broken down (2026-10-22). Since 2026-10-26
-    # the Review agent judges the REPORT only (steps, actual, expected, trigger);
-    # the router then asks Planning for the cause in the code it already holds
-    # (router_flow._investigate_code). Nothing is created; no code is changed.
+    # A bug is reviewed, never broken down (2026-10-22): the Review agent judges
+    # the REPORT (steps, actual, expected, trigger) — is it enough to work on?
+    # Nothing is created; no code is read or changed (2026-11-03).
     AgentSpec(
         agent_name="JiraRequirementReview",
         display_name="Bug Investigation",

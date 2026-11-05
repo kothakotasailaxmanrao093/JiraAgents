@@ -632,3 +632,31 @@ async def test_a_story_not_ready_lists_its_questions_numbered() -> None:
     assert sections['Open questions — answer in a comment starting "Q<number>:"'] == [
         "Q2 What is the reset time?"
     ]
+
+
+def test_a_file_that_could_not_be_read_is_named_not_sent_empty():
+    """Planning refuses a file with no text at all (2026-11-03)."""
+    bundle = {"root": {"key": "BTS-40", "type": "Bug", "summary": "s", "description": "d"}}
+    card = handoff.card(
+        bundle,
+        [
+            {"filename": "error.png", "text": "a shifted toolbar"},
+            {"filename": "call.mp3", "text": ""},
+        ],
+    )
+    assert card["files"] == [
+        {"name": "error.png", "content": "a shifted toolbar"},
+        {"name": "call.mp3", "description": "attached to the card; its content could not be read"},
+    ]
+
+
+def test_planning_reads_the_comments_and_notes_in_the_description():
+    """Planning reads the card's title, description and files (2026-11-03)."""
+    card = {"key": "BTS-40", "type": "Bug", "title": "t", "description": "Shift on select.",
+            "comments": ["Chrome 130", "  "], "files": []}
+    sent = handoff.payload(card, [{"service": "ui"}], [], notes="Agreed now: keep it disabled.")
+    assert sent["card"]["description"] == (
+        "Shift on select.\n\nComments on the card:\n- Chrome 130"
+        "\n\nFor this version:\nAgreed now: keep it disabled."
+    )
+    assert sent["card"]["comments"] == ["Chrome 130", "  "]  # left as they were

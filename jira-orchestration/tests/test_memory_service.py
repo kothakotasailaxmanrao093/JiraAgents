@@ -17,6 +17,7 @@ import pytest
 
 from memory_service import cards, designs, history, model, ranking, store
 from tests.fake_memsy import FakeMemsy
+from tools import memory_tools
 
 REPOS = (
     "imps-service: AetherionAgentDemo/imps-service\n"
@@ -151,7 +152,6 @@ def test_without_memsy_settings_the_service_says_so(monkeypatch):
     import common_lib.memsy
 
     unconfigured = type("Unconfigured", (), {"is_configured": False})()
-    monkeypatch.setattr(store, "secret", lambda name, default="": "")
     monkeypatch.setattr(common_lib.memsy, "get_memsy_service", lambda: unconfigured)
     with pytest.raises(store.MemoryUnavailable):
         store.service()
@@ -252,6 +252,29 @@ async def test_a_comment_matched_once_is_not_sent_to_the_model_again(memsy, llm)
     memory, _ = await _review("BTS-60", comments, [])
     assert llm["calls"].count(cards.MATCH_SYSTEM_PROMPT) == before
     assert memory["snapshot"]["questions"][1]["answers"][0]["text"].startswith("Never cut")
+
+
+async def test_a_comment_read_before_a_question_was_asked_still_answers_it(memsy, llm):
+    """KS-6: the comments were read on the first review, before any question
+    existed; the questions asked then were never matched to them."""
+    comments = [{"id": "5", "text": "The SMS stays as it is; only the statement shows it."}]
+    llm["answers"] = [{"comment_id": "5", "question_id": "Q3", "quote": "The SMS stays as it is"}]
+    _, kept = await _review("BTS-61", comments, ASKED)
+    answers = {q["id"]: q["answers"] for q in kept["questions"]}
+    assert answers["Q3"] and answers["Q1"] == [] and answers["Q2"] == []
+    calls = llm["calls"].count(cards.MATCH_SYSTEM_PROMPT)
+    await _review("BTS-61", comments, [])
+    # Checked once: an unchanged card is not sent to the model again.
+    assert llm["calls"].count(cards.MATCH_SYSTEM_PROMPT) == calls
+
+
+async def test_the_description_answers_a_question_in_its_own_words(memsy, llm):
+    llm["answers"] = [
+        {"comment_id": "description", "question_id": "Q1", "quote": "must appear on the account statement"}
+    ]
+    _, kept = await _review("BTS-62", [], ASKED)
+    q1 = kept["questions"][0]
+    assert q1["answers"] == ["The card says: must appear on the account statement"]
 
 
 async def test_when_the_model_is_down_comments_are_matched_next_time(memsy, llm, monkeypatch):
@@ -426,3 +449,30 @@ async def test_the_tdd_conversation_is_kept_and_recalled(memsy):
     assert any(
         "paise" in line.lower() for line in await designs.recall("BTS-25", "why paise money")
     )
+
+
+# --- Planning always gets a card with ranked services (2026-11-03) -----------------
+
+
+def test_a_repository_with_no_branch_named_leaves_it_to_planning():
+    """keystone/ui has no "main": Planning reads the repository's default branch."""
+    assert ranking.parse_repos("ui: keystone/ui\nbank: o/bank@develop") == {
+        "ui": ("keystone/ui", ""),
+        "bank": ("o/bank", "develop"),
+    }
+
+
+@pytest.mark.asyncio
+async def test_without_memsy_the_card_is_still_ranked(monkeypatch):
+    async def no_memory(*a, **kw):
+        raise store.MemoryUnavailable("Memsy is not configured")
+
+    async def ranked(card_text, repos_text, related):
+        return [{"service": "ui", "repo": "keystone/ui", "branch": "", "rank": 1}]
+
+    monkeypatch.setattr(memory_tools.cards, "refresh", no_memory)
+    monkeypatch.setattr(memory_tools.ranking, "rank", ranked)
+    fn = getattr(memory_tools.refresh_card, "__wrapped__", memory_tools.refresh_card)
+    out = await fn("BTS-40", "Client UI shift", "Client UI shift", [], "ui: keystone/ui")
+    assert out["ok"] and out["questions"] == [] and out["memory"] is False
+    assert out["services"][0]["repo"] == "keystone/ui"

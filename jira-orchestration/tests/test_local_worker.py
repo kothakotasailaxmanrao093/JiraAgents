@@ -28,7 +28,8 @@ def launcher():
 
 def test_every_agent_folder_has_a_queue_of_its_own(launcher) -> None:
     queues = [launcher.local_queue(folder) for folder in launcher.AGENTS]
-    assert len(set(queues)) == len(queues) == 5
+    # The five agents, and local_flow (review -> plan -> code by hand, 2026-11-03).
+    assert len(set(queues)) == len(queues) == 6
 
 
 def test_every_agent_name_reaches_its_own_folders_queue(launcher) -> None:

@@ -127,6 +127,9 @@ def tools_for(pipeline: dict | None = FULL, **answers: Any) -> Tools:
         ingress_check=gate("@Aetherion build", pipeline=pipeline),
         planning_input={"issue_text": "Requirement BGV-32: Bulk print"},
         attach_tdd={"attached": True, "filename": "BGV-32-technical-design.pdf"},
+        # The services ranked for Planning's card (2026-11-03).
+        rank_card={"ok": True, "services": [{"service": "bank", "repo": "o/bank", "rank": 1}],
+                   "questions": []},
         **answers,
     )
 

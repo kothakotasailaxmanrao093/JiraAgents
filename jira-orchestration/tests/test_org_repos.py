@@ -101,3 +101,20 @@ async def test_the_commands_are_given_the_whole_list(github) -> None:
         BANK,
         "payments-service: AetherionAgentDemo/payments-service",
     ]
+
+
+def test_an_idle_or_archived_repository_is_left_out():
+    """keystone/client-ui, idle since 2022, matched "Client UI" before keystone/ui."""
+    from datetime import UTC, datetime
+
+    from tools.org_repos import active
+
+    now = datetime(2026, 11, 3, tzinfo=UTC)
+    repos = [
+        {"name": "ui", "pushed_at": "2026-11-02T11:18:02Z"},
+        {"name": "client-ui", "pushed_at": "2022-02-09T10:00:00Z"},
+        {"name": "old", "pushed_at": "2026-10-01T00:00:00Z", "archived": True},
+        {"name": "new", "pushed_at": None},
+    ]
+    assert [r["name"] for r in active(repos, 365, now)] == ["ui", "new"]
+    assert len(active(repos, 0, now)) == 4

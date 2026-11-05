@@ -29,7 +29,7 @@ from typing import Any
 
 from aetherion_sdk import tool
 
-from memory_service import cards, designs, history
+from memory_service import cards, designs, history, ranking
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +67,22 @@ async def refresh_card(
 ) -> dict[str, Any]:
     try:
         kept = await cards.refresh(issue_key, title, card_text, list(comments or []), repos)
-    except Exception as error:  # noqa: BLE001 - the TDD uses its old input
-        return _failed("Refreshing the card", issue_key, error)
+    except Exception as error:  # noqa: BLE001 - ranked without the memory instead
+        _failed("Refreshing the card", issue_key, error)
+        return await rank_card(card_text, repos)
     return {"ok": True, **kept}
+
+
+@tool(name="rank_card")
+async def rank_card(card_text: str, repos: str) -> dict[str, Any]:
+    """The services a card touches, ranked with no memory (2026-11-03): one model
+    call over the card and the repositories. Planning needs a card with ranked
+    services even when Memsy cannot be read; the questions are then none."""
+    try:
+        services = await ranking.rank(card_text, repos, [])
+    except Exception as error:  # noqa: BLE001 - reported to the caller
+        return _failed("Ranking the card", "", error)
+    return {"ok": True, "services": services, "questions": [], "memory": False}
 
 
 @tool(name="write_history")

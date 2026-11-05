@@ -8,12 +8,20 @@ review is told before it reviews.
                     "answers": [{"comment_id": "10520", "text": "Yes, same as NEFT."}]}],
      "seen": {"10520": "<hash of the comment's text>"},
      "services": [{"service", "repo", "branch", "rank", "reason", "prs"}],
-     "text_hash": "<hash of the card's text>", "related": [<earlier cards>]}
+     "text_hash": "<hash of the card's text>", "related": [<earlier cards>],
+     "checked": ["Q1"]}  # questions checked once against the whole card
 
 Answers, made safe: a comment that starts "Q2:" (or "A2:") answers Q2,
 without a model. Otherwise a model names the question AND quotes the words of
 the comment that answer it; a link whose quote is not in the comment is
-dropped. The answer kept is always the comment's own text.
+dropped. The answer kept is the comment's own text, or the quoted words when
+the card's description answers it.
+
+The description counts too (2026-11-04): it is read like one more comment, so
+a question it already answers is answered. After a review, every question
+still open is checked against the whole card, comments read before included:
+on KS-6 the comments were read before any question was asked, and were never
+matched to the questions asked after them.
 
 Searches, kept few: one search per review, and none when the card's text has
 not changed since the last one (the earlier cards found then are reused).
@@ -34,6 +42,8 @@ MAX_ANSWER_CHARS = 600
 MAX_EARLIER = 5
 SAME_QUESTION = 0.8  # word overlap at which two questions are one
 MIN_QUOTE_WORDS = 2
+DESCRIPTION_ID = "description"  # the card's own text, as one more comment
+MAX_SOURCE_CHARS = {DESCRIPTION_ID: 6000}  # a comment: 1500
 SOURCE_ID = "card_memory"
 SOURCE_LABEL = "Earlier answers and related work"
 _WORD = re.compile(r"[a-z0-9]+")
@@ -136,6 +146,12 @@ def changed_comments(snapshot: dict, comments: list[dict]) -> list[dict]:
     ]
 
 
+def sources(card_text: str, comments: list[dict]) -> list[dict]:
+    """What can answer a question: the comments, and the card's description."""
+    text = (card_text or "").strip()
+    return list(comments or []) + ([{"id": DESCRIPTION_ID, "text": text}] if text else [])
+
+
 def numbered_matches(questions: list[dict], comments: list[dict]) -> list[dict]:
     """A comment that starts "Q2:" or "A2:" answers Q2 — no model needed."""
     ids = {q["id"] for q in questions}
@@ -165,8 +181,10 @@ For each comment, name every question it answers, and quote the exact words
 of the comment that give the answer. A comment answers a question only when it
 gives the information the question asks for; a comment that only thanks,
 repeats the question, asks something else or says it will answer later answers
-nothing. A comment may answer several questions; most answer none. Use only
-the ids given, and quote the comment word for word.
+nothing. A comment may answer several questions; most answer none. The
+comment with id "description" is the card's own description: link it only
+where it states the answer itself. Use only the ids given, and quote the
+comment word for word.
 
 Return ONLY a JSON object:
 {"answers": [{"comment_id": "...", "question_id": "...", "quote": "..."}]}"""
@@ -184,7 +202,9 @@ async def match_answers(questions: list[dict], comments: list[dict]) -> list[dic
         return numbered
     asked = "\n".join(f"[{q['id']}] {q['question']}" for q in questions)
     said = "\n".join(
-        f"[{c['id']}] {' '.join(str(c.get('text') or '').split())[:1500]}" for c in rest
+        f"[{c['id']}] "
+        f"{' '.join(str(c.get('text') or '').split())[: MAX_SOURCE_CHARS.get(str(c['id']), 1500)]}"
+        for c in rest
     )
     found = await model.ask_json(MATCH_SYSTEM_PROMPT, f"QUESTIONS:\n{asked}\n\nCOMMENTS:\n{said}")
     linked = [m for m in found.get("answers") or [] if isinstance(m, dict) and quoted(m, rest)]
@@ -209,6 +229,13 @@ def with_answers(snapshot: dict, comments: list[dict], matches: list[dict]) -> d
             if a.get("comment_id") in now and a.get("comment_id") not in reread
         ]
         questions.append({**q, "answers": answers})
+    seen = {cid: _hash(text) for cid, text in now.items()}
+    return {**snapshot, **_linked(questions, now, matches), "seen": seen}
+
+
+def _linked(questions: list[dict], now: dict[str, str], matches: list[dict]) -> dict:
+    """{"questions"}: each match kept as an answer, the links already there kept."""
+    questions = [{**q, "answers": list(q.get("answers") or [])} for q in questions]
     by_id = {q["id"]: q for q in questions}
     for m in matches:
         comment_id, question_id = str(m.get("comment_id") or ""), str(m.get("question_id") or "")
@@ -216,11 +243,40 @@ def with_answers(snapshot: dict, comments: list[dict], matches: list[dict]) -> d
             continue  # an id that is not real is dropped
         answers = by_id[question_id]["answers"]
         if all(a["comment_id"] != comment_id for a in answers):
-            # The answer without its "Q2:" label.
-            text = _NUMBERED.sub("", now[comment_id], count=1).strip() or now[comment_id]
+            if comment_id == DESCRIPTION_ID:
+                text = f"The card says: {' '.join(str(m.get('quote') or '').split())}"
+            else:
+                # The answer without its "Q2:" label.
+                text = _NUMBERED.sub("", now[comment_id], count=1).strip() or now[comment_id]
             answers.append({"comment_id": comment_id, "text": text.strip()[:MAX_ANSWER_CHARS]})
-    seen = {cid: _hash(text) for cid, text in now.items()}
-    return {**snapshot, "questions": questions, "seen": seen}
+    return {"questions": questions}
+
+
+async def answered_by_card(card_key: str, snapshot: dict, card: list[dict] | None) -> dict:
+    """The snapshot with each open question checked once against the whole
+    card (``sources``), comments read before included; afterwards only new or
+    edited comments are matched to it (``with_comments``)."""
+    if not card:
+        return snapshot
+    checked = set(snapshot.get("checked") or [])
+    still_open = [
+        q
+        for q in snapshot.get("questions") or []
+        if not q.get("answers") and q["id"] not in checked
+    ]
+    if not still_open:
+        return snapshot
+    try:
+        matches = await match_answers(still_open, card)
+    except Exception as error:  # noqa: BLE001 - checked again after the next review
+        logger.warning("Open questions on %s not checked against the card: %s", card_key, error)
+        return snapshot
+    now = {str(c["id"]): str(c.get("text") or "") for c in card if str(c.get("id") or "")}
+    return {
+        **snapshot,
+        **_linked(snapshot.get("questions") or [], now, matches),
+        "checked": sorted(checked | {q["id"] for q in still_open}),
+    }
 
 
 async def with_comments(card_key: str, snapshot: dict, comments: list[dict]) -> dict:
@@ -273,7 +329,8 @@ async def recall(
     "services", "related", "decisions"}. Nothing is saved yet; ``keep`` saves
     once, after the review."""
     seq, stored = await load(card_key)
-    snapshot = await with_comments(card_key, stored, comments)
+    card = sources(card_text, comments)
+    snapshot = await with_comments(card_key, stored, card)
     related = await _earlier(card_key, title, card_text, snapshot)
     services = await ranking.rank(card_text, repos_text, related)
     snapshot = {**snapshot, "text_hash": _hash(card_text), "related": related}
@@ -289,6 +346,7 @@ async def recall(
         "services": services,
         "related": related,
         "decisions": decisions,
+        "card": card,
     }
 
 
@@ -360,6 +418,7 @@ async def keep(
     services = list(memory.get("services") or [])
     repeats = await repeated(before, asked)
     updated = {**with_questions(before, asked, repeats), "services": services}
+    updated = await answered_by_card(card_key, updated, memory.get("card"))
     if memory.get("changed") or updated != before:
         await save(card_key, seq + 1, updated)
     if services:
@@ -382,8 +441,13 @@ async def refresh(
     services (ranked now when the card was never reviewed with its memory).
     Returns {"services", "questions"}."""
     seq, stored = await load(card_key)
-    updated = await with_comments(card_key, stored, comments)
-    services = ranking.in_order(list(updated.get("services") or []))
+    updated = await with_comments(card_key, stored, sources(card_text, comments))
+    # Only services still among the repositories (an idle one is left out
+    # since 2026-11-03); none left, they are ranked again.
+    current = ranking.parse_repos(repos_text)
+    services = ranking.in_order(
+        [s for s in updated.get("services") or [] if not current or s["service"] in current]
+    )
     if not services:
         related = await _earlier(card_key, title, card_text, updated)
         services = await ranking.rank(card_text, repos_text, related)

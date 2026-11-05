@@ -1,0 +1,6 @@
+{
+    "name": "local_flow Tools",
+    "version": "1.0.0",
+    "description": "Tool activities for local_flow (local only).",
+    "config": {}
+}

@@ -176,13 +176,20 @@ def queue_wait_minutes() -> int:
 GITHUB_STATE_PROPERTY = "aetherion-github-poll"
 DEFAULT_GITHUB_BRANCH = "main"
 DEFAULT_PLANNING_AGENT = "planning_agent"
-DEFAULT_PLANNING_TIMEOUT_MINUTES = 15
+# Above Planning's own 15-minute limit, so its own error arrives first (2026-11-03).
+DEFAULT_PLANNING_TIMEOUT_MINUTES = 20
 DEFAULT_GITHUB_MAX_TRIES = 5
 
 
 def github_token() -> str:
-    """A fine-grained token for the organization's repositories."""
+    """A token for the organization's repositories (classic: repo, read:org)."""
     return secret("GITHUB_TOKEN")
+
+
+def github_api_url() -> str:
+    """The GitHub API: github.com unless GITHUB_API_URL names a GitHub Enterprise
+    Server (``https://<host>/api/v3``), 2026-11-02."""
+    return (os.environ.get("GITHUB_API_URL", "").strip() or "https://api.github.com").rstrip("/")
 
 
 def github_org() -> str:
@@ -196,6 +203,14 @@ def github_branch() -> str:
 def github_repos() -> tuple[str, ...]:
     """Repos to watch, by name; empty means every repo of the organization."""
     return tuple(r.lower() for r in env_list("ORCH_GITHUB_REPOS"))
+
+
+def org_repo_max_idle_days() -> int:
+    """ORCH_ORG_REPO_MAX_IDLE_DAYS (2026-11-03): an organization repository with no
+    push for this many days, or archived, is left out of the services — a look-alike
+    old repo is never designed or coded against ("Client UI" -> keystone/client-ui,
+    idle since 2022, instead of keystone/ui). 0 keeps every repository."""
+    return env_int("ORCH_ORG_REPO_MAX_IDLE_DAYS", 365, minimum=0)
 
 
 def github_state_project() -> str:
@@ -225,8 +240,9 @@ def github_max_tries() -> int:
 
 PIPELINE_STEPS = ("review", "plan", "code")
 DEFAULT_CODING_AGENT = "coding-agent"
-# Coding's own limit is 30 minutes (its change, then up to 10 for the PR's CI).
-DEFAULT_CODING_TIMEOUT_MINUTES = 35
+# Coding's own limits: up to 10 minutes to sync the code graph (2026-11-02), then
+# 30 for its change and up to 10 of them for the PR's CI.
+DEFAULT_CODING_TIMEOUT_MINUTES = 45
 DEFAULT_CODING_ATTEMPTS = 2
 
 
@@ -339,6 +355,7 @@ TDD_PROPERTY = "aetherion-tdd"  # on the Jira story: which page is its TDD
 STORY_PROPERTY = "aetherion-story"  # on the Confluence page: which story it designs
 ANSWERED_PAGE_PROPERTY = "aetherion-answered-comments"  # on the page: comments answered
 CODE_PLAN_PROPERTY = "aetherion-code-plan"  # on the page: branches proposed / confirmed
+TDD_FILE_PROPERTY = "aetherion-tdd-file"  # on the page: the TDD PDF's storage key (2026-11-02)
 
 
 def confluence_base() -> str:

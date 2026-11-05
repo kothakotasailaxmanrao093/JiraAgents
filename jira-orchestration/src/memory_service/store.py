@@ -24,9 +24,10 @@ unchanged (``payload.source_metadata``):
   its own session, because Memsy merges similar events of one session;
 - a save waits until Memsy has processed it, so the next request reads it.
 
-The service reads ``MEMSY_API_KEY`` and ``MEMSY_BASE_URL`` from the
-environment; they and the key are taken from the platform's secret files first
-(``shared.settings.secret``).
+The platform injects ``MEMSY_API_KEY`` and ``MEMSY_BASE_URL`` at run time; the
+agent's .env must not declare them (an empty value overrides the injected one).
+``CODE_GRAPH_KEY`` is read from the platform's secret files first, then the
+environment (``shared.settings.secret``).
 """
 
 from __future__ import annotations
@@ -74,21 +75,19 @@ def project_of(key: str) -> str:
 
 
 def service() -> Any:
-    """Aetherion's Memsy service; raises when it is not configured."""
-    for name in ("MEMSY_API_KEY", "MEMSY_BASE_URL"):
-        if not os.environ.get(name, "").strip() and secret(name):
-            # The service reads the environment; a mounted secret file is passed on.
-            os.environ[name] = secret(name)
+    """Aetherion's shared Memsy service (``get_memsy_service``); raises when the
+    platform has not configured it."""
     from common_lib.memsy import get_memsy_service
 
     memsy = get_memsy_service()
     if not memsy.is_configured:
-        raise MemoryUnavailable("MEMSY_API_KEY and MEMSY_BASE_URL are not set")
+        raise MemoryUnavailable("Memsy is not configured: MEMSY_API_KEY or MEMSY_BASE_URL missing")
     return memsy
 
 
 def _lister() -> Any:
-    """The Aetherion client the service wraps, for listing (see the module's note)."""
+    """The one client the service itself wraps, for listing (see the module's
+    note); the same shared client, never a new one."""
     service()
     from common_lib.memsy.client import _get_raw_client
 
