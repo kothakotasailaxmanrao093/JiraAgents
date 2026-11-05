@@ -89,7 +89,7 @@ def webhook_secret() -> str:
     This is the style a **Jira Automation** rule uses, because there you can set
     an arbitrary header (``X-LTW-Secret``).
     """
-    return os.environ.get("LTW_WEBHOOK_SECRET", "").strip()
+    return os.environ.get("TASK_WEBHOOK_SECRET", "").strip()
 
 
 def jira_signing_secret() -> str:
@@ -99,7 +99,7 @@ def jira_signing_secret() -> str:
     request body and sends the result in ``X-Hub-Signature``, so the check is a
     signature comparison rather than a string match.
     """
-    return os.environ.get("LTW_JIRA_WEBHOOK_SECRET", "").strip()
+    return os.environ.get("TASK_JIRA_WEBHOOK_SECRET", "").strip()
 
 
 def verify_signature(body: bytes, header: str, secret: str) -> bool:
@@ -121,16 +121,16 @@ def verify_signature(body: bytes, header: str, secret: str) -> bool:
 
 
 def debounce_seconds() -> float:
-    raw = os.environ.get("LTW_WEBHOOK_DEBOUNCE_SECONDS", "").strip()
+    raw = os.environ.get("TASK_WEBHOOK_DEBOUNCE_SECONDS", "").strip()
     try:
         return float(raw) if raw else DEFAULT_DEBOUNCE_SECONDS
     except ValueError:
-        logger.warning("LTW_WEBHOOK_DEBOUNCE_SECONDS is not a number; using the default")
+        logger.warning("TASK_WEBHOOK_DEBOUNCE_SECONDS is not a number; using the default")
         return DEFAULT_DEBOUNCE_SECONDS
 
 
 def max_concurrent_runs() -> int:
-    raw = os.environ.get("LTW_WEBHOOK_MAX_CONCURRENT", "").strip()
+    raw = os.environ.get("TASK_WEBHOOK_MAX_CONCURRENT", "").strip()
     try:
         return max(1, int(raw)) if raw else DEFAULT_MAX_CONCURRENT_RUNS
     except ValueError:
@@ -302,7 +302,7 @@ def local_execution() -> bool:
     false once runs are started through the Aetherion platform, so the SDK's
     own executor is left alone.
     """
-    return env_bool("LTW_LOCAL_EXECUTION", default=True)
+    return env_bool("TASK_LOCAL_EXECUTION", default=True)
 
 
 _executor_installed = False
@@ -492,8 +492,8 @@ async def jira_webhook(
         # deployment is an open write endpoint. Previously a blank secret simply
         # skipped the check, which is the wrong direction to fail in.
         logger.error(
-            "Refusing a delivery: neither LTW_WEBHOOK_SECRET nor "
-            "LTW_JIRA_WEBHOOK_SECRET is set, so deliveries cannot be "
+            "Refusing a delivery: neither TASK_WEBHOOK_SECRET nor "
+            "TASK_JIRA_WEBHOOK_SECRET is set, so deliveries cannot be "
             "authenticated. Set one and restart."
         )
         raise HTTPException(status_code=503, detail="webhook authentication is not configured")

@@ -10,7 +10,7 @@ import pytest
 
 from src.jira import api as jira
 from src.models.schemas import ExistingIssue, ResultStatus, WorkBreakdown
-from src.tools.tools import create_jira_issues, jira_configuration_status
+from src.tools.tools import create_jira_issues
 from tests.test_schemas import make_epic, make_story, make_subtask
 
 REQUIREMENT = "Send email and SMS notifications and let users manage preferences."
@@ -34,7 +34,7 @@ def small_breakdown() -> dict:
 
 def medium_breakdown() -> dict:
     return WorkBreakdown(
-        classification="Medium",
+        classification="Large",
         analysis="Three related notification capabilities.",
         epic=make_epic(),
         stories=[
@@ -328,22 +328,6 @@ async def test_a_different_requirement_is_not_treated_as_a_duplicate(fake_jira, 
     assert result["status"] == ResultStatus.JIRA_CREATED.value
 
 
-# --- configuration status -------------------------------------------------
-
-
-async def test_configuration_status_reports_not_ready_without_credentials():
-    status = await jira_configuration_status()
-    assert status["ready"] is False
-    assert status["token_set"] is False
-
-
-async def test_configuration_status_reports_ready(jira_env):
-    status = await jira_configuration_status()
-    assert status["ready"] is True
-    assert status["project_key"] == "ABC"
-    assert status["issue_types"]["subtask"] == "Sub-task"
-
-
 # --- attaching sub-tasks to a ticket, twice ---------------------------------
 # Live defect on FL-53: "please break this down into stories" was asked three
 # times in three comments and produced NINE sub-tasks, three of each. The
@@ -451,7 +435,7 @@ def test_the_status_name_alone_is_not_trusted() -> None:
 
 
 def test_closed_work_can_be_compared_again_on_request(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LTW_MATCH_CLOSED_WORK", "true")
+    monkeypatch.setenv("TASK_MATCH_CLOSED_WORK", "true")
     issues = [closed_issue("Log a rest break", "Won't Do", "done")]
     assert len(jira.find_overlaps(["Log a rest break"], issues)) == 1
 

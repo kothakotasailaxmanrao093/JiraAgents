@@ -31,6 +31,7 @@ import pytest
 from agent.router_flow import run_router
 from shared.contract import AgentResult, Outcome
 from shared.keywords import AGENT_FOOTER, AGENT_SIGNATURE, mentions_trigger
+from tests.fake_tools import Tools
 
 CONTRACTS = Path(__file__).resolve().parents[2] / "integration" / "contracts"
 
@@ -46,36 +47,6 @@ ALL_CONTRACTS = sorted(p.stem for p in CONTRACTS.glob("*.json")) if CONTRACTS.ex
 
 
 # --- the harness -------------------------------------------------------------
-
-
-class Tools:
-    def __init__(self, **answers: Any) -> None:
-        self.answers = answers
-        self.calls: list[tuple[str, tuple]] = []
-
-    async def execute(self, name: str, *args: Any, **kwargs: Any) -> Any:
-        self.calls.append((name, args))
-        answer = self.answers.get(name)
-        return answer if answer is not None else {}
-
-    def count(self, name: str) -> int:
-        return [n for n, _ in self.calls].count(name)
-
-    def args(self, name: str) -> tuple:
-        for called, args in self.calls:
-            if called == name:
-                return args
-        raise AssertionError(f"{name} was never called")
-
-    def reply_text(self) -> str:
-        out: list[str] = []
-        for heading, body in self.args("post_reply")[1]:
-            out.append(str(heading))
-            if isinstance(body, list):
-                out.extend(str(x) for x in body)
-            else:
-                out.append(str(body))
-        return "\n".join(out)
 
 
 class Child:
@@ -110,7 +81,11 @@ def gate(**over: Any) -> dict[str, Any]:
     return base
 
 
-PAYLOAD = {"issue_key": "FL-120", "comment_id": "10501", "webhookEvent": "comment_created"}
+PAYLOAD = {
+    "issue_key": "FL-120",
+    "comment_id": "10501",
+    "webhookEvent": "comment_created",
+}
 VERB = {"build": "@Aetherion build a thing", "review": "@Aetherion review this"}
 
 
@@ -223,7 +198,12 @@ def test_the_child_itself_refuses_to_recommend_an_email_for_an_invalid_request()
 
 # The claims a reply could make about email. D1a: none may appear unless an
 # email was actually sent — and on the routed path none is sent yet.
-_EMAIL_CLAIMS = ("An email was recommended", "Emailed", "email was sent", "Notification")
+_EMAIL_CLAIMS = (
+    "An email was recommended",
+    "Emailed",
+    "email was sent",
+    "Notification",
+)
 
 
 @pytest.mark.parametrize("name", ALL_CONTRACTS)
@@ -263,7 +243,11 @@ async def test_the_already_exists_outcome_names_what_it_matched() -> None:
 async def test_a_redelivery_never_reaches_the_child_at_all() -> None:
     """Layer 1 of three. The child's own idempotency label is the third."""
     tools = Tools(
-        ingress_check={"outcome": "ignored", "ignored": "DUPLICATE", "run_id": "4a81f7c2"}
+        ingress_check={
+            "outcome": "ignored",
+            "ignored": "DUPLICATE",
+            "run_id": "4a81f7c2",
+        }
     )
     child = Child(contract=load("build_created"))
 
@@ -285,7 +269,9 @@ async def test_the_child_workflow_id_prevents_a_replay_running_it_twice() -> Non
 
 
 @pytest.mark.parametrize("name", ALL_CONTRACTS)
-async def test_the_label_and_answered_record_are_passed_on_every_path(name: str) -> None:
+async def test_the_label_and_answered_record_are_passed_on_every_path(
+    name: str,
+) -> None:
     """Both belong to the router now. Every answered path must carry them, or a
     redelivery would be answered a second time."""
     tools, _, _ = await run_with(name)
@@ -313,8 +299,11 @@ async def test_the_children_never_stamp_a_label_themselves() -> None:
 def test_every_real_contract_survives_a_json_round_trip(name: str) -> None:
     """It crosses the agent boundary as JSON, so this is the real journey."""
     original = load(name)
-    revived = AgentResult.from_dict(json.loads(json.dumps(original)))
-    assert revived.to_dict() == original
+    revived = AgentResult.from_dict(json.loads(json.dumps(original))).to_dict()
+    # Every field the child sent survives; a field added to the contract since
+    # it was captured takes its default — how an older child is still read.
+    assert {key: revived[key] for key in original} == original
+    assert revived["proposed"] == original.get("proposed", [])
 
 
 def test_both_children_are_represented() -> None:

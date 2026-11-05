@@ -95,7 +95,7 @@ Open `.env` and fill in the four settings under **REQUIRED**:
 | `JIRA_BASE_URL` | Your site address, no trailing slash — `https://yourcompany.atlassian.net` |
 | `JIRA_EMAIL` | The agent's Jira account |
 | `JIRA_API_TOKEN` | The token from step 3 above |
-| `LTW_WEBHOOK_SECRET` | Any long random string |
+| `TASK_WEBHOOK_SECRET` | Any long random string |
 
 Generate the secret with:
 
@@ -123,33 +123,40 @@ ones that matter most, by group.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `LTW_ALLOWED_PROJECT_KEYS` | *(blank = any)* | Which projects it may write to. **Strongly recommended** |
-| `LTW_READ_ONLY` | `false` | `true` refuses every write. A safe dry run — the breakdown is still produced and reported |
-| `LTW_REQUIRE_LLM` | `false` | `true` refuses to run without the model rather than producing plainer wording. **Set this explicitly before production** — the preflight insists on it. With it off, a gateway outage still produces tickets, and although the reply comment and the email both say so in as many words, the tickets themselves are generically worded |
+| `TASK_ALLOWED_PROJECT_KEYS` | *(blank = any)* | Which projects it may write to. **Strongly recommended** |
+| `TASK_READ_ONLY` | `false` | `true` refuses every write. A safe dry run — the breakdown is still produced and reported |
+| `TASK_REQUIRE_LLM` | `false` | `true` refuses to run without the model rather than producing plainer wording. **Set this explicitly before production** — the preflight insists on it. With it off, a gateway outage still produces tickets, and although the reply comment and the email both say so in as many words, the tickets themselves are generically worded |
 
 ### Behaviour
 
 | Setting | Default | What it does |
 |---|---|---|
-| `LTW_TRIGGER_KEYWORD` | `Aetherion` | The word that starts a run |
-| `LTW_PROCESSED_LABEL` | `ltw-processed` | Label stamped once a request is answered |
-| `LTW_AWAITING_LABEL` | `ltw-awaiting-input` | Label stamped when waiting on a person |
-| `LTW_DUPLICATE_THRESHOLD` | `0.75` | How alike two **titles** must be to count as the same work |
-| `LTW_DESCRIPTION_MATCH_THRESHOLD` | `0.85` | The same test against **descriptions** |
-| `LTW_REQUIREMENT_MATCH_THRESHOLD` | `0.80` | How much of the **requirement** must already exist to count as a duplicate |
-| `LTW_DUPLICATE_ADJUDICATE` | `true` | Ask the model about pairs that scored close but did not cross the line |
-| `LTW_DUPLICATE_ADJUDICATE_FLOOR` | `0.30` | The bottom of that band. Below it, two titles share too little to be worth asking about |
-| `LTW_MATCH_CLOSED_WORK` | `false` | `false` is correct — a decision not to build is not a duplicate |
-| `LTW_CONTEXT_MAX_CHARS` | `24000` | Size budget. Least valuable sections drop first, and it says which |
+| `TASK_TRIGGER_KEYWORD` | `Aetherion` | The word that starts a run |
+| `TASK_PROCESSED_LABEL` | `ltw-processed` | Label stamped once a request is answered |
+| `TASK_AWAITING_LABEL` | `ltw-awaiting-input` | Label stamped when waiting on a person |
+| `TASK_DUPLICATE_THRESHOLD` | `0.75` | How alike two **titles** must be to count as the same work |
+| `TASK_DESCRIPTION_MATCH_THRESHOLD` | `0.85` | The same test against **descriptions** |
+| `TASK_REQUIREMENT_MATCH_THRESHOLD` | `0.80` | How much of the **requirement** must already exist to count as a duplicate |
+| `TASK_DUPLICATE_ADJUDICATE` | `true` | Ask the model about pairs that scored close but did not cross the line |
+| `TASK_DUPLICATE_ADJUDICATE_FLOOR` | `0.30` | The bottom of that band. Below it, two titles share too little to be worth asking about |
+| `TASK_MATCH_CLOSED_WORK` | `false` | `false` is correct — a decision not to build is not a duplicate |
+| `TASK_CONTEXT_MAX_CHARS` | `24000` | Size budget. Least valuable sections drop first, and it says which |
 
 ### Attachments
 
 | Setting | Default | What it does |
 |---|---|---|
-| `LTW_ATTACHMENT_MAX_FILES` | `10` | Files read per ticket |
-| `LTW_ATTACHMENT_MAX_BYTES` | `10485760` | Largest single file (10 MB) |
-| `LTW_ATTACHMENT_MAX_CHARS` | `20000` | Text kept per file |
-| `LTW_ATTACHMENT_READ_IMAGES` | `true` | Reading images costs a model call each and slows the run |
+| `TASK_ATTACHMENT_MAX_FILES` | `10` | Files read per ticket |
+| `TASK_ATTACHMENT_MAX_BYTES` | `10485760` | Largest single file (10 MB) |
+| `TASK_ATTACHMENT_MAX_CHARS` | `20000` | Text kept per file |
+| `TASK_ATTACHMENT_READ_IMAGES` | `true` | Reading images costs a model call each and slows the run |
+| `TASK_READ_CONCURRENCY` | `4` | Attachments downloaded and read at the same time (at least 1) |
+| `TASK_DUPLICATE_INDEX` | `true` | Compare against **every** ticket in the project (kept in memory; later builds read only what changed) |
+| `TASK_INDEX_FULL_REFRESH_HOURS` | `24` | Full re-read this often; a match is checked to still exist before it is reported anyway |
+| `TASK_PARALLEL_BREAKDOWN` | `true` | Plan first, then write the Stories at the same time (6+ requirement lines); same checks, one-call fallback |
+| `TASK_LLM_CONCURRENCY` | `6` | Stories written at the same time |
+| `TASK_WRITE_CONCURRENCY` | `4` | Tickets created in Jira at the same time |
+| `TASK_LLM_FAST_MODEL` | empty | A quicker model for triage and the related-ticket check only; falls back to the main model |
 
 **Supported file types:** PDF, Word (`.doc`, `.docx`), Excel (`.xls`, `.xlsx`),
 PowerPoint (`.pptx`), `.csv`, `.json`, `.jsonl`, `.txt`, `.md`, and images
@@ -167,13 +174,27 @@ truncation threw exactly those away.
 
 | Setting | Default | What it does |
 |---|---|---|
-| `LTW_CONFLUENCE_ENABLED` | `true` | Read linked wiki pages |
-| `LTW_CONFLUENCE_MAX_PAGES` | `5` | Pages per ticket |
-| `LTW_CONFLUENCE_MAX_CHARS` | `20000` | Text kept per page |
-| `LTW_CONFLUENCE_READ_ATTACHMENTS` | `true` | Read files attached to those pages — the spec is often the attached sheet |
+| `TASK_CONFLUENCE_ENABLED` | `true` | Read linked wiki pages |
+| `TASK_CONFLUENCE_MAX_PAGES` | `5` | Pages per ticket |
+| `TASK_CONFLUENCE_MAX_CHARS` | `20000` | Text kept per page |
+| `TASK_CONFLUENCE_READ_ATTACHMENTS` | `true` | Read files attached to those pages — the spec is often the attached sheet |
 
 Only pages on the **same Atlassian site** are ever fetched. Anyone who can
 comment on a ticket can put a URL in front of this code.
+
+### Local PDF
+
+| Setting | Default | What it does |
+|---|---|---|
+| `GENERATE_LOCAL_PDF` | `false` | `true`: `@Aetherion build` makes the whole breakdown into a PDF and **emails it to `TASK_NOTIFY_EMAILS`**. The reply on the ticket says where it went and lists what it proposes. **No Jira ticket is created, converted, labelled, edited or attached to.** `false`: the tickets are built. |
+
+The PDF (`aetherion-breakdown-<KEY>-<hash>.pdf`) opens with an "At a glance" box
+and a contents list, then: card numbers, what the ticket would become, sources
+read and skipped, confirmed facts, missing information (including the
+review's), the duplicate check, every proposed ticket numbered E / S1 / S1.1
+with its full detail and criteria, risks, placement, and which ticket delivers
+each requirement line — page numbers on every page. The same breakdown is not
+emailed twice within the repeat window.
 
 ### Email
 
@@ -181,12 +202,12 @@ comment on a ticket can put a URL in front of this code.
 |---|---|---|
 | `GMAIL_SENDER` | | Leave blank to disable email entirely |
 | `GMAIL_APP_PASSWORD` | | The 16-character app password |
-| `LTW_NOTIFY_EMAILS` | | Who hears about requirements needing attention |
-| `LTW_ADMIN_EMAILS` | *(falls back to above)* | Who hears about **system failures** |
-| `LTW_NOTIFY_ON` | `clarification,duplicates,failed` | Which outcomes send email |
-| `LTW_EMAIL_REPEAT_WINDOW` | `900` | Seconds an identical email is suppressed, so a retry cannot flood you |
+| `TASK_NOTIFY_EMAILS` | | Who hears about requirements needing attention |
+| `TASK_ADMIN_EMAILS` | *(falls back to above)* | Who hears about **system failures** |
+| `TASK_NOTIFY_ON` | `clarification,duplicates,failed` | Which outcomes send email |
+| `TASK_EMAIL_REPEAT_WINDOW` | `900` | Seconds an identical email is suppressed, so a retry cannot flood you |
 
-`LTW_NOTIFY_ON` accepts any of `clarification`, `duplicates`, `failed`,
+`TASK_NOTIFY_ON` accepts any of `clarification`, `duplicates`, `failed`,
 `created`. There is **no value that makes an invalid comment send email** —
 that is deliberate and not configurable. See [BEHAVIOUR.md](BEHAVIOUR.md).
 
@@ -208,7 +229,7 @@ rejected.
 |---|---|
 | URL | your endpoint, with `?tenant_id=<your tenant id>` |
 | Method | `POST` |
-| Headers | `X-Jira-Webhook-Secret` = your `LTW_WEBHOOK_SECRET` |
+| Headers | `X-Jira-Webhook-Secret` = your `TASK_WEBHOOK_SECRET` |
 | Body | Custom data, including a top-level `event_type` of `issue.commented` |
 
 **4. Add an Event Subscription** on the platform, with these filters:
@@ -334,8 +355,8 @@ receives. See [../shared/README.md](../shared/README.md).
 | A thin breakdown | Read *"What I could not read"* in the reply. The spec was probably never opened |
 | Generic, wooden ticket wording | Read *"⚠ Please review the wording"* at the top of the reply. The model was unreachable and the fallback wrote them |
 | A duplicate still got created | The reply names what it compared against. Reworded duplicates are caught by the model; if it was unreachable, only word overlap ran |
-| Repeated identical emails | A run is failing and retrying. `LTW_EMAIL_REPEAT_WINDOW` caps the noise; fix the run |
-| Runs are slow | `LTW_ATTACHMENT_READ_IMAGES=true` costs a model call per image |
+| Repeated identical emails | A run is failing and retrying. `TASK_EMAIL_REPEAT_WINDOW` caps the noise; fix the run |
+| Runs are slow | `TASK_ATTACHMENT_READ_IMAGES=true` costs a model call per image |
 
 **The reply comment on the ticket is always the first place to look.** It says
 what was read, what was not, and why.

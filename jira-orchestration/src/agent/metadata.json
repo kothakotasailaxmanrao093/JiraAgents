@@ -1,14 +1,44 @@
 {
     "name": "JiraOrchestration",
-    "version": "0.1.24",
-    "description": "One ingress for Jira comment webhooks. Filters comments that mention the agent, ignores its own replies and redelivered events, classifies what was asked for, dispatches to exactly one specialist agent, and posts the single reply — so a comment is never answered twice and never silently ignored.",
+    "version": "0.1.58",
+    "description": "One ingress for Jira comment webhooks, and a form for a request with no ticket. A comment that mentions the agent is classified and dispatched (build, review, question) with one reply on the ticket; after a build it can go on to Requirement Review, Planning (a technical design) and Coding (a pull request). A request typed on this form — a description and files — is broken down into a PDF by Task Creation, reviewed, designed and implemented as a pull request without writing anything to Jira.",
     "config": {
         "triggers": [
             {
+                "name": "requirement",
+                "type": "textarea",
+                "required": false,
+                "description": "A request with no Jira ticket: describe the work. Task Creation breaks it down into a PDF, Requirement Review scores that PDF, and at the minimum score or above Planning writes a technical design and Coding raises a pull request. Nothing is written to Jira; it is only read to find work that already exists.",
+                "friendly_name": "Requirement"
+            },
+            {
+                "name": "supporting_files",
+                "type": "file",
+                "required": false,
+                "multiple": true,
+                "accepts": ".pdf,.docx,.doc,.xlsx,.csv,.pptx,.txt,.md,.json,.vtt,.png,.jpg,.jpeg",
+                "description": "Optional, with a Requirement: files the request lives in — a spec, a transcript, screenshots. Read by Task Creation and by Requirement Review.",
+                "friendly_name": "Files"
+            },
+            {
+                "name": "project_key",
+                "type": "str",
+                "required": false,
+                "description": "With a Requirement: the Jira project searched for work that already exists (read only). Empty uses the default project.",
+                "friendly_name": "Project Key"
+            },
+            {
+                "name": "min_review_score",
+                "type": "number",
+                "required": false,
+                "description": "With a Requirement: the review score (1-5) the breakdown needs before Planning starts. Empty uses the setting (4).",
+                "friendly_name": "Minimum Review Score"
+            },
+            {
                 "name": "issue_key",
                 "type": "str",
-                "required": true,
-                "description": "The Jira issue the comment was left on (e.g. ABC-123).",
+                "required": false,
+                "description": "The Jira issue the comment was left on (e.g. ABC-123). Leave empty when you type a Requirement below.",
                 "friendly_name": "Jira Issue Key"
             },
             {
@@ -24,6 +54,55 @@
                 "required": false,
                 "description": "The Jira event name, e.g. comment_created. Forms half of the idempotency key, so an edited comment counts as a new request.",
                 "friendly_name": "Webhook Event"
+            },
+            {
+                "name": "confluence_page_id",
+                "type": "str",
+                "required": false,
+                "description": "The TDD page a comment was posted on. Filled by the Confluence webhook — leave empty when running by hand.",
+                "friendly_name": "Confluence Page Id"
+            },
+            {
+                "name": "confluence_comment_id",
+                "type": "str",
+                "required": false,
+                "description": "The comment to answer, under it on the page. Filled by the Confluence webhook — leave empty when running by hand.",
+                "friendly_name": "Confluence Comment Id"
+            },
+            {
+                "name": "github_event",
+                "type": "str",
+                "required": false,
+                "description": "pull_request, issue_comment, pull_request_review_comment or pull_request_review. Filled by the GitHub webhook — leave empty when running by hand.",
+                "friendly_name": "GitHub Event"
+            },
+            {
+                "name": "github_action",
+                "type": "str",
+                "required": false,
+                "description": "closed (a merge), created or submitted (a comment). Filled by the GitHub webhook — leave empty when running by hand.",
+                "friendly_name": "GitHub Action"
+            },
+            {
+                "name": "github_repo",
+                "type": "str",
+                "required": false,
+                "description": "org/name. Filled by the GitHub webhook — leave empty when running by hand.",
+                "friendly_name": "GitHub Repository"
+            },
+            {
+                "name": "pr_number",
+                "type": "number",
+                "required": false,
+                "description": "Filled by the GitHub webhook — leave empty when running by hand.",
+                "friendly_name": "Pull Request Number"
+            },
+            {
+                "name": "github_comment_id",
+                "type": "str",
+                "required": false,
+                "description": "Filled by the GitHub webhook — leave empty when running by hand.",
+                "friendly_name": "GitHub Comment Id"
             }
         ]
     }

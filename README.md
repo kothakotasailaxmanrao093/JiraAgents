@@ -56,11 +56,7 @@ wrong costs ten stories in one case and one comment in the other.
 
 | | |
 |---|---|
-| [PHASES.md](PHASES.md) | what is done, what is next, test counts |
-| [PLAN.md](PLAN.md) | the architecture and why it is shaped this way |
-| [FLAWS.md](FLAWS.md) | **every defect found, its cause, and its status** |
-| [MIGRATION.md](MIGRATION.md) | the webhook change, and the rollback |
-| [docs/AGENT_TO_AGENT.md](docs/AGENT_TO_AGENT.md) | how one agent calls another |
+| [WORKFLOW.md](WORKFLOW.md) | the commands, the full flow, running it locally, testing and publishing |
 | `<agent>/README.md` | how to run and deploy that one |
 | `<agent>/BEHAVIOUR.md` | exactly what it replies, word for word |
 | `<agent>/ARCHITECTURE.md` | how it works inside |
@@ -129,13 +125,3 @@ Two rules the pipeline exists to enforce, both from real incidents:
   reporting success.
 - **`202 Accepted` means the upload was received, not that the worker
   restarted.** Always confirm from the logs.
-
----
-
-## The one thing that is not yet proven
-
-Everything here is tested against fakes and against real captured child output.
-**No cross-agent invocation has ever been run against a live worker** —
-[FLAWS.md](FLAWS.md) O3. That is the first step of Phase 6, before the webhook is
-repointed, and the fallback if it does not work is recorded at the end of
-[docs/AGENT_TO_AGENT.md](docs/AGENT_TO_AGENT.md).

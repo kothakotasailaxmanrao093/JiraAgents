@@ -30,6 +30,8 @@ class ResultStatus(str, Enum):
     EXPLAINED = "EXPLAINED"
     JIRA_CREATED = "JIRA_CREATED"
     JIRA_CREATION_FAILED = "JIRA_CREATION_FAILED"
+    # GENERATE_LOCAL_PDF: the breakdown as an attached PDF; nothing created.
+    PLANNED = "PLANNED"
 
 
 class RequestBucket(str, Enum):
@@ -308,8 +310,9 @@ class Defect(_Strict):
 class WorkBreakdown(_Strict):
     """The validated decomposition: classification + optional epic + stories.
 
-    Invariant enforced here (not in the prompt): Small requirements never carry
-    an Epic; Medium and Large always do.
+    Invariant enforced here (not in the prompt): Small (one Task) and Medium
+    (one Story) never carry an Epic and hold exactly one item; Large always has
+    an Epic and two or more Stories.
     """
 
     classification: Classification
@@ -327,25 +330,27 @@ class WorkBreakdown(_Strict):
 
     @model_validator(mode="after")
     def _epic_matches_classification(self) -> WorkBreakdown:
-        if self.classification is Classification.SMALL:
-            if self.epic is not None:
-                raise ValueError("A Small requirement must not produce an Epic.")
-            if len(self.stories) != 1:
-                raise ValueError("A Small requirement must produce exactly one Story.")
-        else:
+        # Owner decision, 2026-10-07: Small is one Task, Medium one Story (each
+        # with its Sub-tasks), Large an Epic with a Story per feature.
+        if self.classification is Classification.LARGE:
             if self.epic is None:
-                raise ValueError(f"A {self.classification.value} requirement must produce an Epic.")
+                raise ValueError("A Large requirement must produce an Epic.")
             if len(self.stories) < 2:
+                raise ValueError("A Large requirement must produce at least two Stories.")
+        else:
+            size = self.classification.value
+            if self.epic is not None:
+                raise ValueError(f"A {size} requirement must not produce an Epic.")
+            if len(self.stories) != 1:
                 raise ValueError(
-                    f"A {self.classification.value} requirement must produce "
-                    "at least two Stories."
+                    f"A {size} requirement must produce exactly one item "
+                    f"({'a Task' if self.classification is Classification.SMALL else 'a Story'}) "
+                    "with its Sub-tasks."
                 )
-        if self.work_kind is not WorkKind.FEATURE and self.classification is not (
-            Classification.SMALL
-        ):
+        if self.work_kind is not WorkKind.FEATURE and self.classification is Classification.LARGE:
             raise ValueError(
-                f'work_kind "{self.work_kind.value}" is only for a Small requirement; '
-                'a Medium or Large one is "feature".'
+                f'work_kind "{self.work_kind.value}" is only for a Small or Medium '
+                'requirement; a Large one is "feature".'
             )
         if self.work_kind is WorkKind.DEFECT and self.defect is None:
             raise ValueError(
@@ -479,15 +484,6 @@ class DuplicateMatch(_Strict):
     existing_type: str = ""
     existing_url: str = ""
 
-    def explain(self) -> str:
-        """Why this counts as already-covered, in one sentence."""
-        where = "title" if self.matched_on == "summary" else "description"
-        return (
-            f'"{self.proposed_title}" is already covered by {self.existing_key} '
-            f'("{self.existing_summary}", {self.existing_status or "status unknown"}) '
-            f"— matched on its {where}, similarity {self.score}."
-        )
-
 
 class OverlapReport(_Strict):
     """Whether existing work covers all, some, or none of a proposal."""
@@ -505,10 +501,6 @@ class OverlapReport(_Strict):
     def is_partial(self) -> bool:
         """Some of it exists and some does not."""
         return bool(self.covered_titles) and bool(self.remaining_titles)
-
-    @property
-    def blocked(self) -> bool:
-        return bool(self.covered_titles)
 
 
 class JiraContext(_Strict):
@@ -583,6 +575,13 @@ class TicketWiseResult(_Strict):
     # Set when the run says something more specific than its status does
     # ("BGV-25 is now an Epic"); the reply's heading otherwise.
     headline: str = ""
+    # PLANNED: the proposed items, numbered (E, S1, S1.1 …) — none exists.
+    proposed: list[str] = Field(default_factory=list)
+    # The breakdown PDF, kept in shared storage when asked (keep_document):
+    # [{"name", "file_key"}] — what the orchestrator hands to Review.
+    documents: list[dict[str, str]] = Field(default_factory=list)
+    # What a previous review of the unchanged ticket left open (from the router).
+    review_questions: list[str] = Field(default_factory=list)
     classification: Classification | None = None
     analysis: str = ""
     epic: dict[str, Any] | None = None
@@ -792,6 +791,8 @@ class NotificationKind(str, Enum):
     INVALID_REQUEST = "invalid_request"
     FAILED = "failed"
     CREATED = "created"
+    # GENERATE_LOCAL_PDF: the work breakdown itself, as a PDF — always sent.
+    BREAKDOWN_PDF = "breakdown_pdf"
 
 
 class NotificationResult(_Strict):

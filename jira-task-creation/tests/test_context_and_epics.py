@@ -251,7 +251,7 @@ def test_sibling_capabilities_are_not_flagged_as_duplicates():
 
 
 def test_threshold_is_configurable(monkeypatch):
-    monkeypatch.setenv("LTW_DUPLICATE_THRESHOLD", "0.1")
+    monkeypatch.setenv("TASK_DUPLICATE_THRESHOLD", "0.1")
     assert jira.duplicate_threshold() == 0.1
-    monkeypatch.setenv("LTW_DUPLICATE_THRESHOLD", "not-a-number")
+    monkeypatch.setenv("TASK_DUPLICATE_THRESHOLD", "not-a-number")
     assert jira.duplicate_threshold() == 0.75

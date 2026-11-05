@@ -34,6 +34,13 @@ TOOLS = {
     "read_jira_issue": tool_module.read_jira_issue,
     "notify_email": tool_module.notify_email,
     "report_to_issue": tool_module.report_to_issue,
+    # Asked before creating: tickets, or a PDF (GENERATE_LOCAL_PDF, off here).
+    "delivery_mode": tool_module.delivery_mode,
+    "generate_breakdown_pdf": tool_module.generate_breakdown_pdf,
+    # Every run fits its requirement to the model (unchanged when it fits),
+    # and a run on a ticket asks whether it is on a laptop.
+    "condense_requirement": tool_module.condense_requirement,
+    "run_environment": tool_module.run_environment,
 }
 
 # Gate 1 always runs, so every successful pipeline starts with it.
@@ -178,6 +185,7 @@ async def test_small_requirement_creates_a_story_and_subtasks(run_agent, fake_ji
         INSPECT,
         "validate_requirement",
         "generate_work_breakdown",
+        "delivery_mode",
         "create_jira_issues",
         "notify_email",
     ]
@@ -189,7 +197,10 @@ async def test_small_requirement_creates_a_story_and_subtasks(run_agent, fake_ji
 # --- Example F/G: medium and large ----------------------------------------
 
 
-@pytest.mark.parametrize("requirement,expected", [(MEDIUM, "Medium"), (LARGE, "Large")])
+# The test stand-in for the model sizes several capabilities as Large (it
+# cannot tell parts of one feature from separate features); Medium — one Story
+# with its Sub-tasks — is pinned in test_size_rules below (2026-10-07).
+@pytest.mark.parametrize("requirement,expected", [(MEDIUM, "Large"), (LARGE, "Large")])
 async def test_medium_and_large_create_a_linked_hierarchy(
     run_agent, fake_jira, jira_env, requirement, expected
 ):
@@ -231,7 +242,8 @@ async def test_review_mode_returns_the_breakdown_without_touching_jira(
 
     assert result["status"] == ResultStatus.READY_FOR_JIRA.value
     assert result["epic"] is not None
-    assert calls == [INSPECT, "validate_requirement", "generate_work_breakdown"]
+    # delivery_mode: with GENERATE_LOCAL_PDF on, the PDF is emailed instead of a preview.
+    assert calls == [INSPECT, "validate_requirement", "generate_work_breakdown", "delivery_mode"]
     assert fake.writes == [], "review mode must not write to Jira"
 
 
@@ -342,7 +354,7 @@ async def test_a_model_response_failing_validation_never_reaches_jira(
         return json.dumps(bad)
 
     monkeypatch.setattr(decomposer, "_chat", _chat)
-    monkeypatch.setenv("LTW_REQUIRE_LLM", "true")
+    monkeypatch.setenv("TASK_REQUIRE_LLM", "true")
     fake = fake_jira()
     result, calls = await run_agent({"requirement": SMALL, "project_key": "ABC"})
 

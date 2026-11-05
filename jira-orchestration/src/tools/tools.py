@@ -22,7 +22,10 @@ into a helper nobody thought of as configuration.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
@@ -31,16 +34,24 @@ from common_lib.utils.logger import setup_logger
 from dotenv import load_dotenv
 
 from routing import settings
+from routing.catalog import CATALOG
 from routing.ingress import IgnoreReason, IngressOutcome, idempotency_key, screen_comment
+from routing.orchestration import FINISHED_LABEL, RUNNING_LABEL, STATUS_LABELS
+from routing.pipeline import requirement_words
+from shared import llm
 from shared.adf import blocks_to_doc, comment_text
+from shared.keywords import is_agent_comment, mentions_trigger
 from shared.mailer import Delivery, check_login, deliver
+from tools.org_repos import with_repos
 
 load_dotenv()
 logger = setup_logger(__name__)
 
 _TIMEOUT = 30.0
 # Fields the router needs, and no more. It routes; it does not gather context.
-_ISSUE_FIELDS = "summary,labels,project,subtasks,comment"
+# description and attachment: what a review reads, for the unchanged-ticket fingerprint.
+# issuetype: a Bug is investigated, never broken down (2026-10-22).
+_ISSUE_FIELDS = "summary,labels,project,subtasks,comment,description,attachment,issuetype"
 
 
 def _client() -> httpx.AsyncClient:
@@ -175,12 +186,23 @@ async def ingress_check(
                 # A signal the classifier uses: an issue that already has
                 # sub-tasks has almost certainly been broken down already.
                 "has_children": bool(fields.get("subtasks")),
+                # "Bug", "Story", … — decides investigate vs build (2026-10-22).
+                "issue_type": str((fields.get("issuetype") or {}).get("name") or ""),
                 "idempotency_key": key,
                 "trigger_keyword": settings.trigger_keyword(),
                 "processed_label": settings.processed_label(),
                 "existing_labels": list(fields.get("labels") or []),
                 "read_only": settings.read_only(),
                 "task_queue_overrides": settings.task_queue_overrides(),
+                # The orchestrator's view of this ticket (routing/orchestration.py).
+                "fingerprint": content_fingerprint(fields, settings.trigger_keyword()),
+                "orchestration": await _live_state(client, issue_key),
+                "build_min_readiness": settings.build_min_readiness(),
+                "queue_wait_minutes": settings.queue_wait_minutes(),
+                # What follows a build: review, planning, coding (routing/pipeline.py).
+                "pipeline": await with_repos(settings.pipeline()),
+                # The TDD, design and code commands (agent/command_flow.py).
+                "commands": await with_repos(settings.commands()),
             }
     except Exception as exc:  # noqa: BLE001 — a failure is reported, never dropped
         logger.error(f"run {run_id}: ingress failed on {issue_key}: {exc}", exc_info=True)
@@ -245,9 +267,12 @@ async def classify_intent(comment_body: str, issue_summary: str = "") -> dict[st
     prompt = (
         "Classify what this Jira comment is asking for. Answer with ONLY a JSON "
         "object of confidences summing to 1.0, over exactly these keys: "
-        '{"BUILD": 0.0, "REVIEW": 0.0, "QUESTION": 0.0, "CHATTER": 0.0}.\n\n'
+        '{"BUILD": 0.0, "REVIEW": 0.0, "BUG": 0.0, "QUESTION": 0.0, "CHATTER": 0.0}.\n\n'
         "BUILD    — asking for the work to be broken into Jira issues.\n"
         "REVIEW   — asking whether the requirement is clear, complete or ready.\n"
+        "BUG      — reporting that something that already exists is broken or "
+        "wrong (an error, a wrong value, a failing page or API), or asking to "
+        "investigate or find the cause of a fault.\n"
         "QUESTION — asking about this ticket, wanting an explanation.\n"
         "CHATTER  — anything else: greetings, questions about the world, "
         "comments not addressed to an automated system.\n\n"
@@ -256,7 +281,8 @@ async def classify_intent(comment_body: str, issue_summary: str = "") -> dict[st
         'record a tyre pressure check"), is a request for the work — weight '
         "BUILD over REVIEW for it. Reserve REVIEW for comments that actually "
         "ask about completeness, gaps or readiness, not merely comments that "
-        "happen to read like a spec.\n\n"
+        "happen to read like a spec. A report of broken existing behaviour is BUG, "
+        "never BUILD: a bug is investigated, not broken into new work items.\n\n"
         f"Ticket: {issue_summary}\n"
         f"Comment: {comment_body}"
     )
@@ -266,17 +292,26 @@ async def classify_intent(comment_body: str, issue_summary: str = "") -> dict[st
         # The AI Gateway client, exactly as the two child agents call it. The
         # previous `agent_lib.llm.llm_factory` path never reached the gateway —
         # every Layer 2 decision this router made fell through to "ask".
-        from agent_lib.gateway.ai import AiGatewayClient  # activity-side only
-
-        async with AiGatewayClient() as client:
-            reply = await client.chat(
+        if llm.direct_openai():  # a laptop run: no gateway there
+            text = await llm.openai_chat(
                 provider=settings.provider_for_model(model),
-                model_name=model,
+                model=model,
                 prompt=prompt,
                 temperature=0.0,
                 max_tokens=200,
             )
-        text = (reply or {}).get("content") or ""
+        else:
+            from agent_lib.gateway.ai import AiGatewayClient  # activity-side only
+
+            async with AiGatewayClient() as client:
+                reply = await client.chat(
+                    provider=settings.provider_for_model(model),
+                    model_name=model,
+                    prompt=prompt,
+                    temperature=0.0,
+                    max_tokens=200,
+                )
+            text = (reply or {}).get("content") or ""
         scores = _parse_scores(text)
         if not scores:
             logger.warning(f"Classifier returned no usable scores: {text[:200]}")
@@ -300,7 +335,7 @@ def _parse_scores(text: str) -> dict[str, float]:
     except json.JSONDecodeError:
         return {}
 
-    valid = {"BUILD", "REVIEW", "QUESTION", "CHATTER"}
+    valid = {"BUILD", "REVIEW", "BUG", "QUESTION", "CHATTER"}
     out: dict[str, float] = {}
     for key, value in (data or {}).items():
         name = str(key).strip().upper()
@@ -420,13 +455,23 @@ async def _add_label(client: httpx.AsyncClient, issue_key: str, label: str) -> l
 @tool(name="notify_admins")
 async def notify_admins(subject: str, body: str, run_id: str) -> dict[str, Any]:
     """Tell the administrators the router itself could not do its job — a child
-    that never answered, or a reply that would not post.
+    that never answered, a reply that would not post, coding that gave up.
 
-    Always logged. Emailed too, through the shared sender; the result says which,
-    and a reply may only say "Emailed" when ``sent`` is true.
+    Always logged (an "ADMIN ALERT" line, for log-based alerting); posted to the
+    alert channel when ORCH_ALERT_WEBHOOK_URL is set, whatever the email
+    setting; and emailed, through the shared sender. The result says which, and
+    a reply may only say "Emailed" when ``sent`` is true.
     """
     recipients = list(settings.notify_emails())
     logger.error(f"run {run_id}: ADMIN ALERT to {', '.join(recipients) or '-'} — {subject}: {body}")
+    channel = await _post_alert(subject, body, run_id)
+    if settings.email_off():
+        return {
+            "attempted": False,
+            "sent": False,
+            "skipped": "email is off (ORCH_NOTIFY_ON=none)",
+            **channel,
+        }
     if not recipients:
         return {"attempted": False, "sent": False, "error": "ORCH_NOTIFY_EMAILS is not set"}
     delivery = await deliver(
@@ -437,6 +482,22 @@ async def notify_admins(subject: str, body: str, run_id: str) -> dict[str, Any]:
         repeat_window_seconds=settings.email_repeat_window_seconds(),
     )
     return _delivery_dict(delivery)
+
+
+async def _post_alert(subject: str, body: str, run_id: str) -> dict[str, Any]:
+    """The alert in the chat channel (2026-10-15); {} when none is configured."""
+    url = settings.alert_webhook_url()
+    if not url:
+        return {}
+    text = f"[Aetherion] ALERT — {subject}\n{body}\n(run {run_id})"
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            resp = await client.post(url, json={"text": text})
+            resp.raise_for_status()
+        return {"alerted": True}
+    except httpx.HTTPError as exc:
+        logger.error(f"run {run_id}: the alert channel refused the alert: {exc}")
+        return {"alerted": False, "alert_error": f"{type(exc).__name__}: {exc}"}
 
 
 @tool(name="send_outcome_email")
@@ -488,3 +549,263 @@ def _delivery_dict(delivery: Delivery) -> dict[str, Any]:
         "error": delivery.error,
         "suppressed_repeat": delivery.suppressed_repeat,
     }
+
+
+# --------------------------------------------------------------------------
+# Per-ticket orchestration state (routing/orchestration.py decides with it)
+# --------------------------------------------------------------------------
+
+# A stored result larger than this keeps its headline and summary only: Jira
+# caps a property value at 32,768 characters.
+_MAX_STORED_CHARS = 24_000
+
+
+def content_fingerprint(fields: dict[str, Any], keyword: str = "Aetherion") -> str:
+    """What a review reads — summary, description, attachments, people's comments — as one hash.
+
+    Not the ticket's ``updated`` time: the agent's own replies and labels move
+    that, which would make every ticket look changed. People's comments count
+    (2026-10-08): answering the review's questions in a comment must make the
+    next "@Aetherion review" read the ticket again. The agent's replies, and the
+    comments asking it something, do not.
+    """
+    attachments = sorted(
+        f"{a.get('id')}:{a.get('filename')}" for a in fields.get("attachment") or []
+    )
+    comments = []
+    for c in (fields.get("comment") or {}).get("comments") or []:
+        text = comment_text(c.get("body"), keep=keyword)
+        if _is_answer(text, keyword):
+            comments.append(f"{c.get('id')}:{c.get('updated') or c.get('created') or ''}")
+        elif not is_agent_comment(text) and requirement_words(text, keyword):
+            # A request that adds to the requirement ("… the limit is per
+            # account") counts too, so the story is checked again (2026-10-26).
+            comments.append(f"{c.get('id')}:{requirement_words(text, keyword)}")
+    material = json.dumps(
+        [fields.get("summary") or "", fields.get("description"), attachments, comments],
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()[:16]
+
+
+def _is_answer(text: str, keyword: str) -> bool:
+    """A person's comment, not the agent's reply and not a request to it."""
+    return (
+        bool(text.strip())
+        and not is_agent_comment(text)
+        and not mentions_trigger(text, keyword=keyword)
+    )
+
+
+def _stale_after(intent: str, minutes: int = 0) -> timedelta:
+    """A job older than its own timeout (plus margin) died with its worker.
+
+    ``minutes`` is the job's own budget when it said one — a build followed by
+    review, planning and coding holds the ticket far longer than a build alone.
+    """
+    if minutes <= 0:
+        minutes = next((spec.timeout_minutes for spec in CATALOG if spec.intent == intent), 10)
+    return timedelta(minutes=minutes + 3)
+
+
+async def _read_state(client: httpx.AsyncClient, issue_key: str) -> dict[str, Any]:
+    resp = await client.get(f"/rest/api/3/issue/{issue_key}/properties/{settings.STATE_PROPERTY}")
+    if resp.status_code == 404:
+        return {}
+    resp.raise_for_status()
+    value = resp.json().get("value")
+    return value if isinstance(value, dict) else {}
+
+
+# How many steps a ticket keeps: enough for its whole story, small enough for
+# one Jira property.
+_HISTORY_MAX = 50
+
+
+def _add_step(state: dict[str, Any], step: str, status: str, detail: str, run_id: str) -> None:
+    """One line of the ticket's history (2026-10-15): what ran, how it ended, when."""
+    history = list(state.get("history") or [])
+    history.append(
+        {
+            "at": datetime.now(UTC).isoformat(timespec="seconds"),
+            "step": step,
+            "status": status,
+            "detail": detail[:300],
+            "run_id": run_id,
+        }
+    )
+    state["history"] = history[-_HISTORY_MAX:]
+
+
+@tool(name="record_step")
+async def record_step(
+    issue_key: str, step: str, status: str, detail: str, run_id: str
+) -> dict[str, Any]:
+    """Add one step to the ticket's history — a TDD published, a PR raised, a merge.
+    Never raises: a history that could not be written loses one line, nothing else."""
+    issue_key = (issue_key or "").strip().upper()
+    if not issue_key:
+        return {"recorded": False}
+    try:
+        async with _client() as client:
+            state = await _live_state(client, issue_key)
+            _add_step(state, step, status, detail, run_id)
+            await _write_state(client, issue_key, state)
+        return {"recorded": True}
+    except Exception as exc:  # noqa: BLE001 — the history is a record, not the work
+        logger.warning(f"run {run_id}: could not record {step} on {issue_key}: {exc}")
+        return {"recorded": False, "error": str(exc)}
+
+
+async def _write_state(client: httpx.AsyncClient, issue_key: str, state: dict[str, Any]) -> None:
+    resp = await client.put(
+        f"/rest/api/3/issue/{issue_key}/properties/{settings.STATE_PROPERTY}", json=state
+    )
+    resp.raise_for_status()
+
+
+async def _live_state(client: httpx.AsyncClient, issue_key: str) -> dict[str, Any]:
+    """The ticket's state, with a job that outlived its timeout dropped."""
+    try:
+        state = await _read_state(client, issue_key)
+    except httpx.HTTPError as exc:
+        # No state is "nothing running": the request still gets answered.
+        logger.warning(f"Could not read orchestration state on {issue_key}: {exc}")
+        return {}
+    active = state.get("active")
+    if isinstance(active, dict):
+        try:
+            started = datetime.fromisoformat(str(active.get("started")))
+        except ValueError:
+            started = datetime.min.replace(tzinfo=UTC)
+        budget = int(active.get("minutes") or 0)
+        if datetime.now(UTC) - started > _stale_after(str(active.get("intent") or ""), budget):
+            logger.warning(f"Dropping a stale {active.get('intent')} job on {issue_key}")
+            state["active"] = None
+    return state
+
+
+async def _set_status_label(client: httpx.AsyncClient, issue_key: str, label: str) -> None:
+    """One status label on the card at a time. Never fails the run."""
+    if not settings.status_labels() or settings.read_only():
+        return
+    ops = [{"remove": other} for other in STATUS_LABELS if other != label]
+    if label:
+        ops.append({"add": label})
+    try:
+        resp = await client.put(f"/rest/api/3/issue/{issue_key}", json={"update": {"labels": ops}})
+        resp.raise_for_status()
+    except httpx.HTTPError as exc:
+        logger.warning(f"Could not set the status label on {issue_key}: {exc}")
+
+
+def _storable(result: dict[str, Any] | None) -> dict[str, Any] | None:
+    """The result as it is kept for reuse: whole, unless too big for Jira."""
+    if not result:
+        return None
+    if len(json.dumps(result, default=str)) <= _MAX_STORED_CHARS:
+        return result
+    keep = ("outcome", "headline", "summary", "readiness_score", "questions", "produced_by")
+    return {k: result.get(k) for k in keep} | {"display_name": result.get("display_name", "")}
+
+
+@tool(name="ticket_state")
+async def ticket_state(issue_key: str) -> dict[str, Any]:
+    """The job running on a ticket now, if any (a queued request polls this)."""
+    try:
+        async with _client() as client:
+            return {"state": await _live_state(client, issue_key.strip().upper())}
+    except Exception as exc:  # noqa: BLE001 — unreadable reads as idle
+        return {"state": {}, "error": str(exc)}
+
+
+@tool(name="claim_ticket")
+async def claim_ticket(
+    issue_key: str, intent: str, run_id: str, reply_id: str, minutes: int = 0
+) -> dict[str, Any]:
+    """Mark the ticket as having this job running, and show it on the card.
+
+    ``minutes``: how long the job may take, when longer than its agent's own
+    timeout (a build with the steps after it); 0 = the agent's timeout.
+    """
+    issue_key = issue_key.strip().upper()
+    started = datetime.now(UTC).isoformat(timespec="seconds")
+    try:
+        async with _client() as client:
+            state = await _live_state(client, issue_key)
+            state["active"] = {
+                "intent": intent,
+                "run_id": run_id,
+                "started": started,
+                "reply_id": reply_id,
+            }
+            if minutes > 0:
+                state["active"]["minutes"] = minutes
+            _add_step(state, intent, "started", "", run_id)
+            await _write_state(client, issue_key, state)
+            await _set_status_label(client, issue_key, RUNNING_LABEL.get(intent, ""))
+        return {"claimed": True, "started": started}
+    except Exception as exc:  # noqa: BLE001 — the job still runs, only unrecorded
+        logger.warning(f"run {run_id}: could not claim {issue_key}: {exc}")
+        return {"claimed": False, "started": started, "error": str(exc)}
+
+
+@tool(name="finish_ticket")
+async def finish_ticket(
+    issue_key: str,
+    intent: str,
+    run_id: str,
+    result: dict[str, Any] | None,
+    fingerprint: str,
+) -> dict[str, Any]:
+    """Keep the result for reuse, free the ticket, and show the outcome on the card."""
+    issue_key = issue_key.strip().upper()
+    try:
+        async with _client() as client:
+            state = await _live_state(client, issue_key)
+            active = state.get("active") or {}
+            if active.get("run_id") == run_id:
+                state["active"] = None
+            if result:
+                state.setdefault("last", {})[intent] = {
+                    "result": _storable(result),
+                    "fingerprint": fingerprint,
+                    "finished": datetime.now(UTC).isoformat(timespec="seconds"),
+                }
+            _add_step(
+                state,
+                intent,
+                "finished",
+                str((result or {}).get("headline") or (result or {}).get("outcome") or ""),
+                run_id,
+            )
+            await _write_state(client, issue_key, state)
+            outcome = str((result or {}).get("outcome") or "")
+            await _set_status_label(client, issue_key, FINISHED_LABEL.get(outcome, ""))
+        return {"finished": True}
+    except Exception as exc:  # noqa: BLE001 — a stale job expires by itself
+        logger.warning(f"run {run_id}: could not record the result on {issue_key}: {exc}")
+        return {"finished": False, "error": str(exc)}
+
+
+@tool(name="update_reply")
+async def update_reply(issue_key: str, reply_id: str, blocks: list[Any], run_id: str) -> dict:
+    """Replace the "processing" reply with the result — the same comment, edited."""
+    issue_key = issue_key.strip().upper()
+    if not reply_id:
+        return {"updated": False, "error": "no reply to update"}
+    if settings.read_only():
+        return {"updated": False, "read_only": True}
+    document = blocks_to_doc([(str(b[0]), b[1]) for b in blocks])
+    try:
+        async with _client() as client:
+            resp = await client.put(
+                f"/rest/api/3/issue/{issue_key}/comment/{reply_id}", json={"body": document}
+            )
+            resp.raise_for_status()
+        logger.info(f"run {run_id}: updated reply {reply_id} on {issue_key}")
+        return {"updated": True, "comment_id": reply_id}
+    except Exception as exc:  # noqa: BLE001 — the caller posts a new reply instead
+        logger.warning(f"run {run_id}: could not update reply {reply_id} on {issue_key}: {exc}")
+        return {"updated": False, "error": str(exc)}

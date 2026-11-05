@@ -1,7 +1,7 @@
 """Text extraction for Jira attachments — this agent's caps over the shared engine.
 
 The extraction itself (PDF, Word, Excel, PowerPoint, CSV, JSON, text, images via
-OCR, the size caps and the middle-out truncation) now lives in
+the platform's vision model, the size caps and the middle-out truncation) now lives in
 :mod:`src.shared.attachments`, so the review agent reads attachments through the
 same tested code rather than growing a second copy of it.
 
@@ -12,6 +12,13 @@ have to know that those variable names exist.
 """
 
 from __future__ import annotations
+
+import asyncio
+import os
+from collections.abc import Awaitable, Callable
+from typing import Any
+
+import httpx
 
 from src.config.settings import env_bool, env_int
 from src.models.schemas import AttachmentText
@@ -27,19 +34,41 @@ from src.shared.attachments import supported as _shared_supported
 
 # Named in the note a user reads when an image was skipped, so the message can
 # tell them which variable to change without the shared engine knowing it.
-IMAGES_OFF_HINT = " (set LTW_ATTACHMENT_READ_IMAGES=true to read it)"
+IMAGES_OFF_HINT = " (set TASK_ATTACHMENT_READ_IMAGES=true to read it)"
 
 
 def max_file_bytes() -> int:
-    return env_int("LTW_ATTACHMENT_MAX_BYTES", DEFAULT_MAX_FILE_BYTES)
+    return env_int("TASK_ATTACHMENT_MAX_BYTES", DEFAULT_MAX_FILE_BYTES)
 
 
 def max_files() -> int:
-    return env_int("LTW_ATTACHMENT_MAX_FILES", DEFAULT_MAX_FILES)
+    return env_int("TASK_ATTACHMENT_MAX_FILES", DEFAULT_MAX_FILES)
+
+
+# A file is read in full (2026-10-06): an hour-long transcript is ~60,000
+# characters and was cut at 20,000, losing the end of the meeting. What does not
+# fit the model is condensed afterwards (src/context/condense.py), not cut here.
+# The byte limit (TASK_ATTACHMENT_MAX_BYTES) still guards against huge files.
+FULL_FILE_CHARS = 1_000_000
 
 
 def max_chars() -> int:
-    return env_int("LTW_ATTACHMENT_MAX_CHARS", DEFAULT_MAX_CHARS_PER_FILE)
+    return env_int("TASK_ATTACHMENT_MAX_CHARS", FULL_FILE_CHARS)
+
+
+DEFAULT_READ_CONCURRENCY = 4
+
+
+def read_concurrency() -> int:
+    """How many attachments are downloaded and read at the same time.
+
+    4, and at least 1. Jira Cloud rate-limits per account, and a burst of
+    parallel downloads from one agent account is exactly what trips it; four
+    covers the usual two to five files in one round while staying well inside
+    the limit. Measured (BGV-69, 2026-09-29): a download takes 0.6-1.0 s, so
+    serial reads of four files cost about 3 s and parallel ones about 1 s.
+    """
+    return max(1, env_int("TASK_READ_CONCURRENCY", DEFAULT_READ_CONCURRENCY))
 
 
 def images_enabled() -> bool:
@@ -51,9 +80,9 @@ def images_enabled() -> bool:
 
     It is not free: each image costs a vision call and adds seconds to the run,
     so a ticket with a dozen screenshots is noticeably slower. Set
-    ``LTW_ATTACHMENT_READ_IMAGES=false`` to turn it off.
+    ``TASK_ATTACHMENT_READ_IMAGES=false`` to turn it off.
     """
-    return env_bool("LTW_ATTACHMENT_READ_IMAGES", default=True)
+    return env_bool("TASK_ATTACHMENT_READ_IMAGES", default=True)
 
 
 def limits() -> Limits:
@@ -62,6 +91,8 @@ def limits() -> Limits:
         max_file_bytes=max_file_bytes(),
         max_chars=max_chars(),
         read_images=images_enabled(),
+        # Videos are read and explained by this agent's own model (2026-10-22).
+        video_model=os.environ.get("TASK_LLM_MODEL", "").strip() or Limits.video_model,
     )
 
 
@@ -70,14 +101,20 @@ def supported(filename: str) -> bool:
     return _shared_supported(filename, read_images=images_enabled())
 
 
-async def extract(data: bytes, filename: str, mime_type: str = "") -> AttachmentText:
-    """Extract text from one attachment. Never raises."""
+async def extract(
+    data: bytes, filename: str, mime_type: str = "", context: str = ""
+) -> AttachmentText:
+    """Extract text from one attachment. Never raises.
+
+    ``context`` is the ticket's subject, so a video is explained in its terms.
+    """
     result = await _shared_extract(
         data,
         filename,
         mime_type,
         limits=limits(),
         images_off_hint=IMAGES_OFF_HINT,
+        context=context,
     )
     return AttachmentText(
         filename=result.filename,
@@ -102,3 +139,59 @@ __all__ = [
     "max_files",
     "supported",
 ]
+
+
+async def read_all(
+    items: list[dict[str, Any]],
+    download: Callable[[str], Awaitable[bytes]],
+    context: str = "",
+) -> tuple[list[AttachmentText], list[str]]:
+    """Read Jira's attachment list: capped, in parallel, never failing the run.
+
+    Returns the extracted attachments **in Jira's order** — whatever order the
+    downloads finish in — plus the notes for the reply. A file that cannot be
+    downloaded or read becomes an attachment carrying a note, exactly as when
+    they were read one at a time, so "what could not be read" is unchanged.
+    """
+    notes: list[str] = []
+    limit = max_files()
+    if len(items) > limit:
+        notes.append(f"{len(items)} attachments found; only the first {limit} were read.")
+
+    gate = asyncio.Semaphore(read_concurrency())
+
+    async def read_one(item: dict[str, Any]) -> AttachmentText | None:
+        filename = item.get("filename", "") or ""
+        mime = item.get("mimeType", "") or ""
+        url = item.get("content", "") or ""
+        if not (filename and url):
+            return None
+        if not supported(filename):
+            return await extract(b"", filename, mime)
+        async with gate:
+            try:
+                data = await download(url)
+            except httpx.HTTPError as exc:
+                return AttachmentText(
+                    filename=filename,
+                    mime_type=mime,
+                    note=f"Could not download this attachment: {exc}",
+                )
+            return await extract(data, filename, mime, context)
+
+    wanted = items[:limit]
+    read = await asyncio.gather(*(read_one(item) for item in wanted), return_exceptions=True)
+    out: list[AttachmentText] = []
+    for item, result in zip(wanted, read, strict=True):
+        if isinstance(result, BaseException):
+            # Anything unexpected is still one unreadable file, never a lost run.
+            out.append(
+                AttachmentText(
+                    filename=item.get("filename", "") or "attachment",
+                    mime_type=item.get("mimeType", "") or "",
+                    note=f"Could not read this attachment: {result}",
+                )
+            )
+        elif result is not None:
+            out.append(result)
+    return out, notes

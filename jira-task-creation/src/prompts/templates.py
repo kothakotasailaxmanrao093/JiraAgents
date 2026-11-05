@@ -34,12 +34,14 @@ belongs to it. If you cannot tell confidently, ask a focused clarification
 question rather than rejecting.
 
 CLASSIFICATION (scope and complexity, never description length)
-- Small: one focused feature or change. One Story with its Subtasks. No Epic.
-- Medium: several related capabilities. One Epic with multiple Stories.
-- Large: several connected workflows or modules. One Epic with a Story per
-  workflow, each with its Subtasks.
+- Small: one focused change or job. ONE item (it becomes a Jira Task) with its
+  Subtasks. No Epic.
+- Medium: one feature with several parts. ONE Story with a Subtask per part
+  (usually 2 to 4). No Epic. Do not split one feature into several Stories.
+- Large: several distinct features or connected workflows. One Epic with a
+  Story per feature, each with its Subtasks.
 
-EPIC (Medium and Large only) — exactly these business fields:
+EPIC (Large only) — exactly these business fields:
 business objective, scope, out-of-scope items, priority, acceptance criteria,
 related user stories. Nothing else. If out-of-scope items are unknown, use
 "Not specified".
@@ -143,7 +145,7 @@ Decompose the requirement. Return JSON only, in exactly this shape:
     "impact": "<who is affected and how badly>",
     "widespread": true | false       // everyone, or a whole feature, is affected
   },
-  "epic": {                          // omit entirely when classification is Small
+  "epic": {                          // only when classification is Large; omit otherwise
     "business_objective": "...",
     "scope": ["..."],
     "out_of_scope": ["..."],         // ["Not specified"] when unknown
@@ -176,14 +178,15 @@ Decompose the requirement. Return JSON only, in exactly this shape:
 }
 
 Rules the output is checked against, so satisfy them up front:
-- Small -> no "epic" key, exactly one story.
+- Small or Medium -> no "epic" key, exactly one story (Small: the Task;
+  Medium: the Story).
 - work_kind: "defect" when something that already exists is BROKEN in
   production or for real users (an error, a page that will not load, people
   unable to do what they could before). "technical" when it is one technical
   job with no user-facing behaviour (rotate a password, upgrade a library,
   change a configuration value). Otherwise "feature" — any new or changed
-  behaviour, and every Medium or Large requirement.
-- Medium/Large -> "epic" present, at least two stories.
+  behaviour, and every Large requirement.
+- Large -> "epic" present, at least two stories.
 - Every story has at least one subtask and at least one acceptance criterion.
 - No subtask text may contain a source filename.
 """
@@ -214,9 +217,10 @@ Input: "Allow users to update their preferred language."
 
 Examples of the expected sizing:
 
-"Allow users to update their preferred language." -> Small (one Story, no Epic)
-"Send email and SMS notifications and allow users to manage notification
- preferences." -> Medium (Epic + one Story per capability)
+"Allow users to update their preferred language." -> Small (one Task, no Epic)
+"Client users select several reports on the dashboard and print them in bulk,
+ as the client or the candidate version." -> Medium (one Story; Subtasks for
+ the selection, the PDF retrieval and the version choice)
 "Support mobile registration, OTP verification, login, token refresh, logout,
  password recovery, and active session management." -> Large (Epic + one Story
  per workflow)
@@ -330,4 +334,97 @@ def related_ticket_prompt(key: str, summary: str, description: str, request: str
         f"{RELATED_TICKET_INSTRUCTIONS}\n"
         f"TICKET {key}: {summary}\n{(description or '(no description)')[:1500]}\n\n"
         f"WORK ASKED FOR:\n{request[:1500]}\n"
+    )
+
+
+# --------------------------------------------------------------------------
+# The breakdown in two steps: a plan, then every Story at once (2026-09-30)
+# --------------------------------------------------------------------------
+# One call wrote the whole breakdown — Epic, every Story, every Sub-task — and
+# was the slowest step of a build (tens of seconds of output). The plan is
+# short; the Stories are then written in parallel, so the wait is one Story's,
+# not all of them. The result goes through exactly the same checks.
+
+PLAN_INSTRUCTIONS = """\
+Plan the breakdown of the requirement — the Epic and the list of Stories only,
+not the Stories' details. Return JSON only, in exactly this shape:
+
+{
+  "classification": "Small" | "Medium" | "Large",
+  "analysis": "<2-3 sentences on why this classification>",
+  "work_kind": "feature" | "technical" | "defect",
+  "defect": { ... },                 // only when work_kind is "defect", as described below
+  "epic": {                          // only when classification is Large; omit otherwise
+    "business_objective": "...",
+    "scope": ["..."],
+    "out_of_scope": ["..."],         // ["Not specified"] when unknown
+    "priority": "Low|Medium|High|Critical",
+    "acceptance_criteria": ["..."],
+    "jira_summary": "<short title for the Jira Summary field>"
+  },
+  "stories": [
+    {"title": "<the Story's title>", "focus": "<one sentence: what this Story delivers>"}
+  ],
+  "coverage": {"<requirement line number>": "<exact title of the Story that delivers it>"}
+}
+
+Rules the output is checked against:
+- Small/Medium -> no "epic", exactly one story. Large -> "epic", at least two stories.
+- One behaviour per Story; together the Stories deliver EVERY requirement line,
+  and "coverage" maps every line number to one of the titles above.
+- "defect": {"actual": "...", "expected": "...", "impact": "...", "widespread": true|false}
+"""
+
+STORY_INSTRUCTIONS = """\
+Write ONE Story of the planned breakdown below, in full. The other Stories are
+written separately — deliver only this Story's part, and do not repeat theirs.
+Return JSON only: exactly one Story object, in this shape:
+
+{
+  "title": "<exactly the planned title>",
+  "user_story_statement": "As a ..., I want ..., so that ....",
+  "description": "...",
+  "business_value": "...",
+  "priority": "Low|Medium|High|Critical",
+  "estimated_complexity": "Low|Medium|High",
+  "dependencies": "None",
+  "acceptance_criteria": ["Given ..., when ..., then ..."],
+  "open_questions": ["<a decision the requirement leaves open>"],
+  "subtasks": [
+    {"title": "...", "description": "...", "expected_outcome": "...",
+     "dependencies": "None", "completion_criteria": "..."}
+  ]
+}
+
+Carry EVERY number, quoted name, limit and rule of the requirement lines this
+Story delivers (listed below) into its acceptance criteria or Sub-tasks.
+"""
+
+
+def plan_prompt(requirement: str, project_context: str, lines: list[str]) -> str:
+    """The first step: classification, Epic, and the Story titles."""
+    return (
+        coverage_instructions(lines) + f"{PLAN_INSTRUCTIONS}\n"
+        f"PROJECT CONTEXT:\n{project_context}\n\n"
+        f"REQUIREMENT:\n{requirement}\n"
+    )
+
+
+def story_prompt(
+    requirement: str,
+    project_context: str,
+    plan: list[tuple[str, str]],
+    title: str,
+    lines: list[str],
+) -> str:
+    """The second step, once per Story: that Story in full."""
+    others = "\n".join(f"- {t}: {focus}" for t, focus in plan)
+    mine = "\n".join(f"- {line}" for line in lines) or "- (see the requirement)"
+    return (
+        f"{STORY_INSTRUCTIONS}\n"
+        f"THE PLANNED STORIES:\n{others}\n\n"
+        f"WRITE THIS ONE: {title}\n"
+        f"THE REQUIREMENT LINES IT DELIVERS:\n{mine}\n\n"
+        f"PROJECT CONTEXT:\n{project_context}\n\n"
+        f"REQUIREMENT:\n{requirement}\n"
     )

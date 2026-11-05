@@ -68,11 +68,6 @@ def _person(node: Any) -> str:
     return str(node.get("displayName") or node.get("name") or node.get("emailAddress") or "")
 
 
-def sign(blocks: list[tuple[str, Any]], headline: str) -> dict[str, Any]:
-    """Render an agent reply: a signed heading, the blocks, a signed footer."""
-    return adf([(f"{AGENT_SIGNATURE} · {headline}", "")] + blocks + [("", AGENT_FOOTER)])
-
-
 async def answered_comment_ids(client: httpx.AsyncClient, issue_key: str) -> set[str]:
     """Comment ids this agent has already answered on an issue.
 

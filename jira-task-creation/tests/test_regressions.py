@@ -15,18 +15,8 @@ from src.jira import api as jira
 from src.models.schemas import ResultStatus
 from src.tools import tools as tool_module
 
-TOOLS = {
-    "inspect_jira_context": tool_module.inspect_jira_context,
-    "validate_requirement": tool_module.validate_requirement,
-    "generate_work_breakdown": tool_module.generate_work_breakdown,
-    "create_jira_issues": tool_module.create_jira_issues,
-    # Webhook-era tools. These runs are manual-mode (no issue_key), so the
-    # notifier is unconfigured and the write-back is a no-op, but the agent
-    # still dispatches them by name.
-    "read_jira_issue": tool_module.read_jira_issue,
-    "notify_email": tool_module.notify_email,
-    "report_to_issue": tool_module.report_to_issue,
-}
+# One map of tool names, shared with test_agent.py so a new tool is added once.
+from tests.test_agent import TOOLS  # noqa: E402
 
 
 @pytest.fixture
@@ -285,17 +275,15 @@ async def test_bug_c_create_path_also_returns_sorted_keys(run_agent, fake_jira, 
 # BUGS D, E, F, G — heuristic output quality
 # ==========================================================================
 
-from src.classification.decompose import (  # noqa: E402
+from src.classification.decompose import split_capabilities  # noqa: E402
+from src.classification.validate import ProjectContext, has_action_intent  # noqa: E402
+from tests.heuristic_breakdown import (  # noqa: E402
     MAX_SUMMARY_CHARS,
-    classify,
     extract_actor,
     heuristic_breakdown,
     normalise_capability,
-    split_capabilities,
     truncate,
 )
-from src.classification.validate import ProjectContext, has_action_intent  # noqa: E402
-from src.models.schemas import Classification  # noqa: E402
 
 CTX = ProjectContext(name="TenantSpace")
 
@@ -670,7 +658,6 @@ def test_r2_explanation_ends_the_capability_list():
     caps = split_capabilities(R2_EXPLANATION)
     assert len(caps) == 1, caps
     assert not any("spreadsheet" in c.lower() for c in caps)
-    assert classify(R2_EXPLANATION) is Classification.SMALL
 
 
 def test_r2_explanation_case_produces_one_story_and_no_epic():
@@ -696,7 +683,6 @@ def test_r2_the_dropped_capability_is_kept():
     caps = split_capabilities(R2_DROPPED_CAPABILITY)
     assert len(caps) == 2, caps
     assert any("alert" in c.lower() for c in caps)
-    assert classify(R2_DROPPED_CAPABILITY) is Classification.MEDIUM
 
 
 @pytest.mark.parametrize(
@@ -747,7 +733,7 @@ async def test_allowlist_blocks_a_project_not_on_the_list(
 ):
     """With several people sharing one service account, a mistyped key must
     not be able to reach a project the deployment never authorised."""
-    monkeypatch.setenv("LTW_ALLOWED_PROJECT_KEYS", "TT2,KS")
+    monkeypatch.setenv("TASK_ALLOWED_PROJECT_KEYS", "TT2,KS")
     fake = fake_jira()
 
     result, calls = await run_agent(
@@ -766,7 +752,7 @@ async def test_allowlist_blocks_a_project_not_on_the_list(
 
 
 async def test_allowlist_permits_a_listed_project(run_agent, fake_jira, jira_env, monkeypatch):
-    monkeypatch.setenv("LTW_ALLOWED_PROJECT_KEYS", "ABC,TT2")
+    monkeypatch.setenv("TASK_ALLOWED_PROJECT_KEYS", "ABC,TT2")
     fake_jira()
     result, _ = await run_agent(
         {
@@ -792,7 +778,7 @@ async def test_empty_allowlist_keeps_the_old_behaviour(run_agent, fake_jira, jir
 
 
 async def test_read_only_mode_refuses_every_write(run_agent, fake_jira, jira_env, monkeypatch):
-    monkeypatch.setenv("LTW_READ_ONLY", "true")
+    monkeypatch.setenv("TASK_READ_ONLY", "true")
     fake = fake_jira()
 
     result, _ = await run_agent(
@@ -810,7 +796,7 @@ async def test_read_only_mode_refuses_every_write(run_agent, fake_jira, jira_env
 
 def test_benefit_clause_varies_with_the_verb():
     """One fixed 'so that' on every story was the round-1 complaint."""
-    from src.classification.decompose import _benefit
+    from tests.heuristic_breakdown import _benefit
 
     assert _benefit("assign a job to a driver") != _benefit("export the list as CSV")
     assert "hand-off" in _benefit("assign a job")
@@ -935,7 +921,7 @@ async def test_adjudication_failure_falls_back_to_the_word_scores(
 async def test_adjudication_can_be_switched_off(run_agent, fake_jira, jira_env, monkeypatch):
     fake = fake_jira()
     seed_story(fake, "ABC-43", "Allow drivers to log a rest break")
-    monkeypatch.setenv("LTW_DUPLICATE_ADJUDICATE", "false")
+    monkeypatch.setenv("TASK_DUPLICATE_ADJUDICATE", "false")
 
     called = False
 

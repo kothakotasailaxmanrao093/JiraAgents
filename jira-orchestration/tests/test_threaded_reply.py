@@ -73,7 +73,9 @@ async def test_the_reply_is_posted_under_the_triggering_comment(jira) -> None:
     assert [p.get("parentId") for p in fake.posts] == [ROOT]
 
 
-async def test_if_jira_refuses_the_thread_the_reply_still_posts_as_a_comment(jira) -> None:
+async def test_if_jira_refuses_the_thread_the_reply_still_posts_as_a_comment(
+    jira,
+) -> None:
     fake = jira(FakeJira(refuse_parent=True))
     result = await _post(ROOT)
     assert result["posted"] is True and result["threaded"] is False
@@ -87,7 +89,9 @@ async def test_no_thread_id_posts_a_plain_comment(jira) -> None:
     assert [p.get("parentId") for p in fake.posts] == [None]
 
 
-async def test_a_trigger_that_is_itself_a_reply_is_answered_in_its_parents_thread(jira) -> None:
+async def test_a_trigger_that_is_itself_a_reply_is_answered_in_its_parents_thread(
+    jira,
+) -> None:
     jira(FakeJira())
     async with tools._client() as client:
         assert await tools._thread_root(client, "BGV-1", REPLY) == ROOT

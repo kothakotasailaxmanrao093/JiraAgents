@@ -88,14 +88,34 @@ _DESCRIPTION_SNIPPET = 1500
 
 
 def max_context_issues() -> int:
-    """How many existing tickets to read, from ``LTW_MAX_CONTEXT_ISSUES``."""
-    raw = os.environ.get("LTW_MAX_CONTEXT_ISSUES", "").strip()
+    """How many existing tickets to read, from ``TASK_MAX_CONTEXT_ISSUES``."""
+    raw = os.environ.get("TASK_MAX_CONTEXT_ISSUES", "").strip()
     try:
         value = int(raw) if raw else DEFAULT_MAX_CONTEXT_ISSUES
     except ValueError:
-        logger.warning(f"LTW_MAX_CONTEXT_ISSUES is not an integer ({raw!r}); using default")
+        logger.warning(f"TASK_MAX_CONTEXT_ISSUES is not an integer ({raw!r}); using default")
         value = DEFAULT_MAX_CONTEXT_ISSUES
     return max(1, value)
+
+
+EXISTING_FIELDS = "summary,issuetype,status,parent,labels,description"
+
+
+def parse_existing(item: dict[str, Any], base_url: str = "") -> ExistingIssue:
+    """One search result as the ticket duplicate detection compares against."""
+    f = item.get("fields", {})
+    key = item.get("key", "")
+    return ExistingIssue(
+        key=key,
+        summary=f.get("summary", "") or "",
+        issue_type=(f.get("issuetype") or {}).get("name", "") or "",
+        status=(f.get("status") or {}).get("name", "") or "",
+        status_category=((f.get("status") or {}).get("statusCategory") or {}).get("key", "") or "",
+        parent_key=(f.get("parent") or {}).get("key", "") or "",
+        labels=[str(x) for x in (f.get("labels") or [])],
+        description=_plain_text(f.get("description"))[:_DESCRIPTION_SNIPPET],
+        url=browse_url(base_url, key),
+    )
 
 
 async def fetch_existing_issues(
@@ -118,7 +138,7 @@ async def fetch_existing_issues(
     """
     cap = max_context_issues() if limit is None else max(1, limit)
     jql = f"project = {_quote(project_key)} ORDER BY created DESC"
-    fields = "summary,issuetype,status,parent,labels,description"
+    fields = EXISTING_FIELDS
 
     issues: list[ExistingIssue] = []
     unavailable: list[str] = []
@@ -146,24 +166,7 @@ async def fetch_existing_issues(
 
         payload = resp.json()
         pages += 1
-        for item in payload.get("issues", []):
-            f = item.get("fields", {})
-            key = item.get("key", "")
-            issues.append(
-                ExistingIssue(
-                    key=key,
-                    summary=f.get("summary", "") or "",
-                    issue_type=(f.get("issuetype") or {}).get("name", "") or "",
-                    status=(f.get("status") or {}).get("name", "") or "",
-                    status_category=(
-                        ((f.get("status") or {}).get("statusCategory") or {}).get("key", "") or ""
-                    ),
-                    parent_key=(f.get("parent") or {}).get("key", "") or "",
-                    labels=[str(x) for x in (f.get("labels") or [])],
-                    description=_plain_text(f.get("description"))[:_DESCRIPTION_SNIPPET],
-                    url=browse_url(base_url, key),
-                )
-            )
+        issues.extend(parse_existing(item, base_url) for item in payload.get("issues", []))
 
         token = payload.get("nextPageToken")
         if payload.get("isLast") or not token:
@@ -171,7 +174,7 @@ async def fetch_existing_issues(
 
     if token and not payload.get("isLast") and len(issues) >= cap:
         unavailable.append(
-            f"Stopped after {len(issues)} existing tickets (LTW_MAX_CONTEXT_ISSUES). "
+            f"Stopped after {len(issues)} existing tickets (TASK_MAX_CONTEXT_ISSUES). "
             f"Older work was not compared."
         )
 

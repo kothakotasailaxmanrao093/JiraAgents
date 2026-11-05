@@ -80,7 +80,6 @@ cp .env.template .env      # then fill it in
 | `JIRA_API_TOKEN` | yes | — | that account's API token |
 | `ORCH_TRIGGER_KEYWORD` | no | `Aetherion` | the word that makes it act |
 | `ORCH_PROCESSED_LABEL` | no | `aetherion-processed` | stamped once a comment is answered |
-| `ORCH_IDEMPOTENCY_TTL_HOURS` | no | `24` | how long a handled `comment.id` is remembered |
 | `ORCH_CLASSIFIER_MODEL` | no | `gpt-5.1` | the Layer 2 model |
 | `ORCH_NOTIFY_EMAILS` | no | — | who hears about failures |
 | `ORCH_ALLOWED_PROJECT_KEYS` | no | *(any)* | restricts which projects it will answer in |
@@ -141,6 +140,5 @@ was chosen, what was read, and what was missing.
 - [ARCHITECTURE.md](ARCHITECTURE.md) — how it works inside, and why the router
   owns the reply
 - [BEHAVIOUR.md](BEHAVIOUR.md) — exactly what it replies, word for word
-- [../docs/AGENT_TO_AGENT.md](../docs/AGENT_TO_AGENT.md) — how one agent calls
-  another on this platform
-- [../FLAWS.md](../FLAWS.md) — every defect found so far, and its status
+- [../WORKFLOW.md](../WORKFLOW.md) — the full flow across the agents, and how
+  to run, test and publish it

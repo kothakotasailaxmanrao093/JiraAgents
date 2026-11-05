@@ -28,6 +28,7 @@ from config import (
     MAX_CONFLUENCE_CHARS,
     MAX_CONFLUENCE_PAGES,
     READ_ATTACHMENT_IMAGES,
+    model_id_from_env,
 )
 from shared.attachments import Limits
 from shared.attachments import extract as extract_attachment
@@ -46,6 +47,8 @@ def attachment_limits() -> Limits:
         max_file_bytes=MAX_ATTACHMENT_BYTES,
         max_chars=MAX_ATTACHMENT_CHARS,
         read_images=READ_ATTACHMENT_IMAGES,
+        # Videos are read and explained by the review's own model (2026-10-22).
+        video_model=model_id_from_env(None),
     )
 
 
@@ -108,6 +111,7 @@ class AttachmentsSource(ContextSource):
                 item.get("mime_type") or "",
                 limits=limits,
                 images_off_hint=IMAGES_OFF_HINT,
+                context=f"{key}: {bundle.get('summary') or ''}".strip(": "),
             )
             if not extracted.usable:
                 # Named, never silent: "the spec could not be opened" and "the

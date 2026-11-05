@@ -8,10 +8,11 @@ from __future__ import annotations
 
 import pytest
 
-from src.classification.decompose import heuristic_breakdown, split_capabilities
+from src.classification.decompose import split_capabilities
 from src.classification.validate import ProjectContext
 from src.context.ingest import assemble_requirement, is_pointer_comment
 from src.models.schemas import SourceIssue
+from tests.heuristic_breakdown import heuristic_breakdown
 
 CTX = ProjectContext(
     name="FleetLinkTest",

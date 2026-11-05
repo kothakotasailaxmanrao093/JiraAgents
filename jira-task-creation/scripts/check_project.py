@@ -160,16 +160,16 @@ async def check(project_key: str) -> int:
     allowed = jira.allowed_project_keys()
     if allowed and project_key.upper() not in allowed:
         line(
-            BAD, "LTW_ALLOWED_PROJECT_KEYS", f"blocks '{project_key}' (allows {', '.join(allowed)})"
+            BAD, "TASK_ALLOWED_PROJECT_KEYS", f"blocks '{project_key}' (allows {', '.join(allowed)})"
         )
-        problems.append(f"LTW_ALLOWED_PROJECT_KEYS does not include {project_key}")
+        problems.append(f"TASK_ALLOWED_PROJECT_KEYS does not include {project_key}")
     else:
-        line(OK, "LTW_ALLOWED_PROJECT_KEYS", ", ".join(allowed) if allowed else "any project")
+        line(OK, "TASK_ALLOWED_PROJECT_KEYS", ", ".join(allowed) if allowed else "any project")
 
     if jira.read_only():
-        line(WARN, "LTW_READ_ONLY", "true — the agent will refuse to create anything")
+        line(WARN, "TASK_READ_ONLY", "true — the agent will refuse to create anything")
     else:
-        line(OK, "LTW_READ_ONLY", "false — writes are allowed")
+        line(OK, "TASK_READ_ONLY", "false — writes are allowed")
 
     line(OK, "trigger keyword", jira.trigger_keyword())
     line(OK, "marker labels", f"{jira.processed_label()} / {jira.awaiting_label()}")
@@ -182,7 +182,7 @@ async def check(project_key: str) -> int:
         line(
             WARN,
             "email alerts",
-            "not configured — set GMAIL_SENDER, GMAIL_APP_PASSWORD, LTW_NOTIFY_EMAILS",
+            "not configured — set GMAIL_SENDER, GMAIL_APP_PASSWORD, TASK_NOTIFY_EMAILS",
         )
 
     # --- verdict ------------------------------------------------------------

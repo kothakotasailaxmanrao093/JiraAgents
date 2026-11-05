@@ -26,40 +26,62 @@ if str(Path(__file__).resolve().parent) not in sys.path:
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Clear every LTW/Gmail/Jira override so defaults are what is tested."""
     for name in (
-        "LTW_TRIGGER_KEYWORD",
-        "LTW_PROCESSED_LABEL",
-        "LTW_AWAITING_LABEL",
-        "LTW_CONTEXT_MAX_CHARS",
-        "LTW_ATTACHMENT_MAX_FILES",
-        "LTW_ATTACHMENT_MAX_BYTES",
-        "LTW_ATTACHMENT_MAX_CHARS",
-        "LTW_ATTACHMENT_READ_IMAGES",
-        "LTW_NOTIFY_EMAILS",
-        "LTW_NOTIFY_ON",
-        "LTW_READ_ONLY",
-        "LTW_ALLOWED_PROJECT_KEYS",
-        "LTW_DUPLICATE_THRESHOLD",
+        # Exported by scripts/run_local.sh; would switch model calls to OpenAI.
+        "OPENAI_API_KEY",
+        "AETHERION_LOCAL_RUN",
+        "TASK_TRIGGER_KEYWORD",
+        "TASK_PROCESSED_LABEL",
+        "TASK_AWAITING_LABEL",
+        "TASK_CONTEXT_MAX_CHARS",
+        "TASK_ASSEMBLY_MAX_CHARS",
+        "TASK_ATTACHMENT_MAX_FILES",
+        "TASK_ATTACHMENT_MAX_BYTES",
+        "TASK_ATTACHMENT_MAX_CHARS",
+        "TASK_ATTACHMENT_READ_IMAGES",
+        "TASK_NOTIFY_EMAILS",
+        "TASK_NOTIFY_ON",
+        "TASK_READ_ONLY",
+        "TASK_ALLOWED_PROJECT_KEYS",
+        "TASK_DUPLICATE_THRESHOLD",
         "GMAIL_SENDER",
         "GMAIL_APP_PASSWORD",
         "GMAIL_SMTP_HOST",
         "GMAIL_SMTP_PORT",
-        "LTW_WEBHOOK_SECRET",
-        "LTW_JIRA_WEBHOOK_SECRET",
+        "TASK_WEBHOOK_SECRET",
+        "TASK_JIRA_WEBHOOK_SECRET",
         "JIRA_BASE_URL",
         "JIRA_EMAIL",
         "JIRA_API_TOKEN",
         "JIRA_PROJECT_KEY",
         "JIRA_BOARD_ID",
         "JIRA_EPIC_LINK_FIELD_ID",
-        # The AI-model settings too: production sets LTW_REQUIRE_LLM=true, and
+        # The AI-model settings too: production sets TASK_REQUIRE_LLM=true, and
         # the suite runs with no gateway, so leaking it from .env failed every
         # test that exercises the fallback. A test that wants it sets it.
-        "LTW_REQUIRE_LLM",
-        "LTW_LLM_PROVIDER",
-        "LTW_LLM_MODEL",
-        "LTW_LLM_MAX_TOKENS",
+        "TASK_REQUIRE_LLM",
+        "TASK_LLM_PROVIDER",
+        "TASK_LLM_MODEL",
+        "TASK_LLM_MAX_TOKENS",
+        # A deployment's .env sets these; a test sees the defaults unless it
+        # sets them itself.
+        "TASK_READ_CONCURRENCY",
+        "GENERATE_LOCAL_PDF",
+        "TASK_DUPLICATE_INDEX",
+        "TASK_LLM_FAST_MODEL",
+        "TASK_LLM_CONCURRENCY",
+        "TASK_WRITE_CONCURRENCY",
+        "TASK_INDEX_FULL_REFRESH_HOURS",
+        "TASK_DOCUMENT_DIR",
+        "TASK_PLAN_CACHE_DIR",
     ):
         monkeypatch.delenv(name, raising=False)
+    # Same input, same plan is off in tests: each test writes its own plan, or
+    # one test's fake model answer would be reused by the next. A test of the
+    # plan cache turns it on itself.
+    monkeypatch.setenv("TASK_PLAN_CACHE_HOURS", "0")
+    from src.classification import plan_cache
+
+    plan_cache._memory.clear()
 
 
 @pytest.fixture
@@ -76,7 +98,7 @@ def gmail_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """A configured Gmail sender and two recipients."""
     monkeypatch.setenv("GMAIL_SENDER", "bot@example.com")
     monkeypatch.setenv("GMAIL_APP_PASSWORD", "abcd efgh ijkl mnop")
-    monkeypatch.setenv("LTW_NOTIFY_EMAILS", "lead@example.com, pm@example.com")
+    monkeypatch.setenv("TASK_NOTIFY_EMAILS", "lead@example.com, pm@example.com")
 
 
 @pytest.fixture(autouse=True)
@@ -92,6 +114,7 @@ def _stand_in_model_breakdown(monkeypatch: pytest.MonkeyPatch, request) -> None:
     """
     from src.classification import decompose
     from src.tools import tools
+    from tests import heuristic_breakdown
 
     real = tools.build_breakdown
 
@@ -105,7 +128,10 @@ def _stand_in_model_breakdown(monkeypatch: pytest.MonkeyPatch, request) -> None:
             cause = exc.__cause__
             if cause is None or isinstance(cause, decompose.DecompositionError | ValidationError):
                 raise
-            return decompose.heuristic_breakdown(requirement, context), decompose.GENERATOR_LLM
+            return (
+                heuristic_breakdown.heuristic_breakdown(requirement, context),
+                decompose.GENERATOR_LLM,
+            )
 
     monkeypatch.setattr(tools, "build_breakdown", _fake)
 
@@ -117,7 +143,7 @@ def _no_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
 
     Without it, tests that ran the fallback path did so by really dialling the
     gateway and failing to connect — and the SDK client loads ``.env`` when it
-    is built, re-adding production's LTW_REQUIRE_LLM=true mid-test.
+    is built, re-adding production's TASK_REQUIRE_LLM=true mid-test.
     """
     from src.classification import decompose
 
@@ -313,6 +339,12 @@ class FakeJira:
         if url.startswith("/rest/api/3/issue/"):
             key = url.rsplit("/", 1)[-1]
             spec = self.epics.get(key)
+            stored = next((i for i in self.store if i.get("key") == key), None)
+            if spec is None and stored is not None:
+                # Any ticket the fake site holds can be read back, as in Jira.
+                fields = stored.get("fields") or {}
+                project = fields.get("project") or {"key": key.split("-")[0]}
+                return _Response(200, {"key": key, "fields": {**fields, "project": project}})
             if spec is None:
                 return _Response(404, {"errorMessages": [f"Issue does not exist: {key}"]})
             return _Response(
@@ -456,3 +488,18 @@ def _clean_email_ledger() -> None:
     from src.notifications import email as notifier
 
     notifier.forget_recent_sends()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_ticket_index() -> None:
+    """Each test reads its own fake project: the in-memory index starts empty."""
+    from src.jira import ticket_index
+
+    ticket_index._INDEXES.clear()
+
+
+@pytest.fixture(autouse=True)
+def _one_call_breakdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The breakdown tests stub the one-call answer; the planned (parallel)
+    path has its own tests in test_parallel_breakdown.py, which turn it on."""
+    monkeypatch.setenv("TASK_PARALLEL_BREAKDOWN", "false")

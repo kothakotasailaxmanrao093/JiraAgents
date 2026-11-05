@@ -55,7 +55,9 @@ def test_subtasks_enabled_only_with_keys_and_flag():
 
 def test_transcript_enabled_only_with_file_key():
     assert not TranscriptSource().is_enabled(FetchContext("ABC-1"))
-    assert TranscriptSource().is_enabled(FetchContext("ABC-1", transcript_file_key="meeting.txt"))
+    assert TranscriptSource().is_enabled(
+        FetchContext("ABC-1", transcript_file_keys=["meeting.txt"])
+    )
 
 
 async def test_target_source_emits_description_and_comments():

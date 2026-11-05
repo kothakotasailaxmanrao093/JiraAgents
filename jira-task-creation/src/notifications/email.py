@@ -7,7 +7,7 @@ Three situations stop the pipeline and are reported by email:
 * **failed** — the agent could not complete for any other reason.
 
 A fourth, **created**, is an optional success receipt; add ``created`` to
-``LTW_NOTIFY_ON`` to turn it on.
+``TASK_NOTIFY_ON`` to turn it on.
 
 Delivery is Gmail SMTP with an app password, read from the environment and
 never logged. A send failure is reported in the result and never fails the run:
@@ -18,6 +18,8 @@ tickets because a mail server hiccuped would be worse than a missed message.
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 from typing import Any
 
 from common_lib.utils.logger import setup_logger
@@ -27,7 +29,7 @@ from src.models.schemas import NotificationKind, NotificationResult
 
 # Delivery is shared — one sender for every agent (shared/mailer.py). The names
 # below are kept so callers and tests that patch ``_send_sync`` keep working.
-from src.shared.mailer import explain_failure, is_repeat, remember, smtp_settings
+from src.shared.mailer import Attachment, explain_failure, is_repeat, remember, smtp_settings
 from src.shared.mailer import forget_recent_sends as forget_recent_sends  # re-exported
 from src.shared.mailer import send_sync as _send_sync
 
@@ -45,6 +47,7 @@ _SUBJECTS = {
     NotificationKind.INVALID_REQUEST: "{key} — Not a work requirement",
     NotificationKind.FAILED: "{key} — Failed: the request could not be processed",
     NotificationKind.CREATED: "{key} — Items created",
+    NotificationKind.BREAKDOWN_PDF: "{key} — breakdown PDF",
 }
 
 
@@ -127,12 +130,12 @@ def _mask(secret: str) -> str:
 
 
 def recipients() -> list[str]:
-    """Comma-separated recipients from ``LTW_NOTIFY_EMAILS``."""
-    return env_list("LTW_NOTIFY_EMAILS")
+    """Comma-separated recipients from ``TASK_NOTIFY_EMAILS``."""
+    return env_list("TASK_NOTIFY_EMAILS")
 
 
 def admin_recipients() -> list[str]:
-    """Who hears about a system failure, from ``LTW_ADMIN_EMAILS``.
+    """Who hears about a system failure, from ``TASK_ADMIN_EMAILS``.
 
     A failed run is an operations problem, not a project update: the Jira token
     expired, the Sub-task type is missing, the API refused a write. Sending that
@@ -140,7 +143,7 @@ def admin_recipients() -> list[str]:
     team to filter the agent out. Unset falls back to the normal list, so an
     unconfigured install still hears about breakage.
     """
-    return env_list("LTW_ADMIN_EMAILS") or recipients()
+    return env_list("TASK_ADMIN_EMAILS") or recipients()
 
 
 def recipients_for(kind: NotificationKind) -> list[str]:
@@ -156,6 +159,7 @@ def recipients_for(kind: NotificationKind) -> list[str]:
 # on the ticket is the record — and a comment that was never a requirement is
 # not an event at all.
 DEFAULT_NOTIFY_ON = ("clarification", "duplicates", "failed")
+OFF = "email is turned off (TASK_NOTIFY_ON=none)"
 
 _KIND_EVENT = {
     NotificationKind.CREATED: "created",
@@ -167,13 +171,20 @@ _KIND_EVENT = {
 
 
 def notify_on() -> tuple[str, ...]:
-    """Which events email, from ``LTW_NOTIFY_ON``.
+    """Which events email, from ``TASK_NOTIFY_ON``.
 
     Comma-separated, any of ``created``, ``failed``, ``clarification``,
     ``duplicates``. Unset means the default above.
     """
-    chosen = tuple(item.lower() for item in env_list("LTW_NOTIFY_ON"))
+    chosen = tuple(item.lower() for item in env_list("TASK_NOTIFY_ON"))
+    if "none" in chosen:
+        return ()
     return chosen or DEFAULT_NOTIFY_ON
+
+
+def email_off() -> bool:
+    """``TASK_NOTIFY_ON=none``: this agent sends no email at all, not even the PDF (2026-10-08)."""
+    return "none" in {item.lower() for item in env_list("TASK_NOTIFY_ON")}
 
 
 def should_notify(kind: NotificationKind) -> bool:
@@ -212,7 +223,7 @@ DEFAULT_REPEAT_WINDOW_SECONDS = 900  # 15 minutes
 
 def repeat_window_seconds() -> float:
     """How long an identical email is suppressed for. 0 disables suppression."""
-    return max(env_float("LTW_EMAIL_REPEAT_WINDOW", DEFAULT_REPEAT_WINDOW_SECONDS), 0.0)
+    return max(env_float("TASK_EMAIL_REPEAT_WINDOW", DEFAULT_REPEAT_WINDOW_SECONDS), 0.0)
 
 
 def _is_repeat(kind: NotificationKind, issue_key: str, subject: str) -> bool:
@@ -226,12 +237,42 @@ def _remember_send(kind: NotificationKind, issue_key: str, subject: str) -> None
 
 
 def _issue_line(base_url: str, key: str) -> str:
-    return f"{base_url}/browse/{key}" if base_url and key else key
+    if not key:
+        return "none (asked on the agent's form, not on a ticket)"
+    return f"{base_url}/browse/{key}" if base_url else key
 
 
 def _indent(text: str, prefix: str = "  ") -> str:
     """Indent a block so the original request reads as quoted material."""
     return "\n".join(f"{prefix}{line}" for line in (text or "").strip().splitlines())
+
+
+# The request quoted in an email is at most this long; the PDF and the ticket
+# hold the rest.
+REQUEST_QUOTE_CHARS = 1_200
+_SOURCE_LINE = re.compile(r"(?m)^### (?:Attachment|Confluence page): (.+)$")
+
+
+def request_quote(requirement: str) -> str:
+    """What the person asked, and one line naming what was read with it.
+
+    The requirement text carries every attachment in full: a clarification
+    email for KS-17185 (2026-10-06) quoted an 18,000-character meeting
+    transcript and a screenshot's OCR under THE REQUEST. The email says what
+    was asked; the files are named, not reprinted.
+    """
+    from src.context.ingest import stated_request
+
+    asked = stated_request(requirement or "")
+    # The agent's own section heading ("## Stated requirement (…)") is not
+    # something anyone wrote; a "## " a person typed stays.
+    asked = re.sub(r"(?m)^## Stated requirement.*$\n?", "", asked).strip()
+    if len(asked) > REQUEST_QUOTE_CHARS:
+        asked = asked[:REQUEST_QUOTE_CHARS].rstrip() + " …"
+    sources = list(dict.fromkeys(m.strip() for m in _SOURCE_LINE.findall(requirement or "")))
+    if sources:
+        asked += f"\nRead with it: {', '.join(sources)}"
+    return asked
 
 
 def build_body(
@@ -274,7 +315,7 @@ def build_body(
         lines.append("")
         if requirement:
             lines.append("THE REQUEST")
-            lines.append(_indent(requirement))
+            lines.append(_indent(request_quote(requirement)))
             lines.append("")
         if questions:
             lines.append("The agent needs answers to:")
@@ -285,6 +326,9 @@ def build_body(
             "Add the answers to the Jira issue description (or as a comment) and\n"
             "mention the trigger keyword again. The agent will re-read the ticket\n"
             "and continue from there."
+            if issue_key
+            else "WHAT TO DO NEXT\n"
+            "Add the answers to the Requirement on the form and run it again."
         )
 
     elif kind in (NotificationKind.DUPLICATES_FOUND, NotificationKind.PARTIAL_DUPLICATE):
@@ -304,7 +348,7 @@ def build_body(
 
         if requirement:
             lines.append("THE REQUEST")
-            lines.append(_indent(requirement))
+            lines.append(_indent(request_quote(requirement)))
             lines.append("")
 
         if duplicates:
@@ -354,7 +398,7 @@ def build_body(
         lines.append("")
         if requirement:
             lines.append("THE REQUEST")
-            lines.append(_indent(requirement))
+            lines.append(_indent(request_quote(requirement)))
             lines.append("")
         lines.append(
             "WHAT TO DO NEXT\n"
@@ -413,6 +457,7 @@ async def send(
     requirement: str = "",
     remaining: list[str] | None = None,
     counts: dict[str, int] | None = None,
+    by_hand: bool = False,
 ) -> NotificationResult:
     """Send one notification. Never raises.
 
@@ -437,10 +482,12 @@ async def send(
     # cannot read the environment itself: it always asks, and this decides
     # whether anything is actually sent.
     if not should_notify(kind):
-        logger.info(f"Email suppressed for {kind.value}; LTW_NOTIFY_ON={list(notify_on())}")
+        logger.info(f"Email suppressed for {kind.value}; TASK_NOTIFY_ON={list(notify_on())}")
         return NotificationResult(attempted=False, kind=kind, subject=subject, error="")
 
-    if _is_repeat(kind, issue_key, subject):
+    # A person who pressed "Run" again wants the email again; the repeat guard
+    # is for Jira redelivering one webhook (2026-10-07).
+    if not by_hand and _is_repeat(kind, issue_key, subject):
         logger.info(
             f"Email suppressed for {kind.value}: the identical message for {issue_key or '-'} "
             f"went out within the last {int(repeat_window_seconds())}s (retry)."
@@ -460,7 +507,7 @@ async def send(
             attempted=False,
             kind=kind,
             subject=subject,
-            error="Email not sent: LTW_NOTIFY_EMAILS is empty.",
+            error="Email not sent: TASK_NOTIFY_EMAILS is empty.",
         )
 
     body = build_body(
@@ -489,4 +536,125 @@ async def send(
 
     _remember_send(kind, issue_key, subject)
     logger.info(f"Notification sent to {len(to)} recipient(s): {subject}")
+    return NotificationResult(attempted=True, sent=True, kind=kind, recipients=to, subject=subject)
+
+
+# --------------------------------------------------------------------------
+# GENERATE_LOCAL_PDF: the work breakdown, sent as a PDF
+# --------------------------------------------------------------------------
+
+
+def _pdf_email(
+    *,
+    issue_key: str,
+    issue_summary: str,
+    ticket_url: str,
+    summary: str,
+    proposed: list[str],
+    questions: list[str],
+    filename: str,
+) -> tuple[str, str, str]:
+    """Subject, plain text and HTML for the breakdown email. Pure."""
+    from html import escape
+
+    subject = f"{SUBJECT_PREFIX} {issue_key} — breakdown PDF: {issue_summary}".strip()
+    lines = [
+        f"Work breakdown for {issue_key} — {issue_summary}",
+        f"Ticket: {ticket_url}",
+        "",
+        "No Jira tickets were created or changed. The full breakdown is attached as a PDF.",
+        "",
+        summary,
+        "",
+        "Proposed tickets (not created):",
+        *[f"  {line}" for line in proposed],
+    ]
+    if questions:
+        lines += ["", "Please confirm:", *[f"  - {q}" for q in questions]]
+    lines += ["", f"Attached: {filename}", "", "— AetherionAgent · automated email"]
+    text = "\n".join(lines)
+
+    items = "".join(f"<li>{escape(line)}</li>" for line in proposed)
+    asks = "".join(f"<li>{escape(q)}</li>" for q in questions)
+    style = "font-family:Arial,sans-serif;font-size:14px;color:#1f2328;max-width:720px"
+    html = f"""<div style="{style}">
+<h2 style="margin:0 0 4px">Work breakdown for {escape(issue_key)}</h2>
+<p style="margin:0 0 12px;color:#57606a">{escape(issue_summary)} ·
+<a href="{escape(ticket_url)}">open the ticket</a></p>
+<p style="padding:8px 12px;background:#fff8c5;border:1px solid #d4a72c;border-radius:6px">
+<b>No Jira tickets were created or changed.</b> The full breakdown is attached as a PDF.</p>
+<p>{escape(summary)}</p>
+<h3 style="margin:16px 0 4px">Proposed tickets (not created)</h3><ul>{items}</ul>
+{f'<h3 style="margin:16px 0 4px">Please confirm</h3><ul>{asks}</ul>' if asks else ''}
+<p style="color:#57606a">Attached: <b>{escape(filename)}</b></p>
+<p style="color:#8c959f;font-size:12px">— AetherionAgent · automated email</p></div>"""
+    return subject, text, html
+
+
+async def send_breakdown_pdf(
+    *,
+    issue_key: str,
+    issue_summary: str,
+    summary: str,
+    proposed: list[str],
+    questions: list[str],
+    filename: str,
+    data: bytes,
+    by_hand: bool = False,
+) -> NotificationResult:
+    """Email the breakdown PDF to TASK_NOTIFY_EMAILS. Never raises.
+
+    Always sent — it is the result itself, not a notification about one, so
+    TASK_NOTIFY_ON does not apply. The same PDF (same file name, which carries
+    its content's hash) is not sent twice within the repeat window, so a
+    redelivered request does not email again.
+    """
+    kind = NotificationKind.BREAKDOWN_PDF
+    if email_off():
+        return NotificationResult(kind=kind, error=OFF)
+    host, port, sender, password = smtp_settings()
+    to = recipients()
+    base_url = os.environ.get("JIRA_BASE_URL", "").strip().rstrip("/")
+    subject, text, html = _pdf_email(
+        issue_key=issue_key,
+        issue_summary=issue_summary,
+        ticket_url=_issue_line(base_url, issue_key),
+        summary=summary,
+        proposed=proposed,
+        questions=questions,
+        filename=filename,
+    )
+    # Run by hand on the form: always sent. A redelivered webhook: not twice.
+    if not by_hand and _is_repeat(kind, issue_key, filename):
+        logger.info(f"Breakdown PDF {filename} already emailed within the window; not resent")
+        return NotificationResult(
+            attempted=False, sent=True, kind=kind, recipients=to, subject=subject
+        )
+    if not (sender and password):
+        return NotificationResult(
+            kind=kind, subject=subject, error="GMAIL_SENDER or GMAIL_APP_PASSWORD is not set."
+        )
+    if not to:
+        return NotificationResult(kind=kind, subject=subject, error="TASK_NOTIFY_EMAILS is empty.")
+    try:
+        await asyncio.to_thread(
+            _send_sync,
+            host,
+            port,
+            sender,
+            password,
+            to,
+            subject,
+            text,
+            html=html,
+            attachments=(Attachment(filename=filename, data=data),),
+        )
+    except Exception as exc:  # noqa: BLE001 — reported, never raised
+        reason = explain_failure(exc)
+        logger.error(reason)
+        return NotificationResult(
+            attempted=True, kind=kind, recipients=to, subject=subject, error=reason
+        )
+    _remember_send(kind, issue_key, filename)
+    logger.info(f"Breakdown PDF {filename} emailed to {len(to)} recipient(s)")
     return NotificationResult(attempted=True, sent=True, kind=kind, recipients=to, subject=subject)

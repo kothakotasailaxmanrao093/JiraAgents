@@ -39,6 +39,7 @@ Pure — no I/O, no environment. It runs inside the workflow.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from shared.contract import AgentResult, MissingSource, Outcome
@@ -75,11 +76,14 @@ LAYOUT: dict[Outcome, tuple[str, ...]] = {
     # questions used to reach the reply only inside the child's status block;
     # once that block was dropped they vanished (BGV-32, 2026-09-24).
     Outcome.ALREADY_EXISTS: ("what_happened", "duplicates", "questions", "read", "missing"),
+    # A bug investigation has its own short reply (bug_blocks, 2026-11-02).
     Outcome.REVIEWED: ("readiness", "findings", "questions", "read", "missing"),
     Outcome.NEEDS_INFO: ("what_happened", "questions", "read", "missing"),
     Outcome.NOT_A_REQUIREMENT: ("what_happened", "read", "missing"),
     Outcome.FAILED: ("what_happened", "read", "missing", "problems"),
     Outcome.ANSWERED: ("answer", "read", "missing"),
+    # GENERATE_LOCAL_PDF: the breakdown as a PDF, nothing created in Jira.
+    Outcome.PLANNED: ("what_happened", "proposed", "confirm", "duplicates", "read", "missing"),
 }
 
 # Used when a child returns an outcome this build does not know. Better a plain
@@ -94,6 +98,17 @@ _DEGRADED_WARNING = (
 
 def _lines(items: list[str]) -> list[str]:
     return [item for item in items if item and item.strip()]
+
+
+# A reply is read in a Jira comment: the most important points, not all of them
+# (2026-10-26). The rest is named as a count so nothing is silently hidden.
+MAX_LIST = 6
+
+
+def _capped(items: list[str], where: str = "the full review") -> list[str]:
+    if len(items) <= MAX_LIST:
+        return items
+    return [*items[:MAX_LIST], f"…and {len(items) - MAX_LIST} more in {where}."]
 
 
 def _missing_lines(missing: list[MissingSource]) -> list[str]:
@@ -125,7 +140,10 @@ def _section(name: str, result: AgentResult) -> Section | None:
         return Section("What happened", result.summary) if result.summary else None
 
     if name == "created":
-        items = [f"{c.issue_type} {c.key} — {c.summary}".strip(" —") for c in result.created]
+        items = [
+            f"{c.issue_type} {f'[{c.key}]({c.url})' if c.url else c.key} — {c.summary}".strip(" —")
+            for c in result.created
+        ]
         return Section("Created in Jira", items) if items else None
 
     if name == "duplicates":
@@ -162,11 +180,11 @@ def _section(name: str, result: AgentResult) -> Section | None:
             if not text:
                 continue
             items.append(f"{category.capitalize()}: {text}" if category else text)
-        return Section(f"Findings ({len(items)})", items) if items else None
+        return Section(f"Findings ({len(items)})", _capped(items)) if items else None
 
     if name == "questions":
         items = _lines(result.questions)
-        return Section("What I need to know", items) if items else None
+        return Section("What I need to know", _capped(items)) if items else None
 
     if name == "read":
         items = _lines(result.sources_read)
@@ -176,11 +194,88 @@ def _section(name: str, result: AgentResult) -> Section | None:
         items = _missing_lines(result.sources_missing)
         return Section("What was missing or unreadable", items) if items else None
 
+    if name == "proposed":
+        items = _lines(result.proposed)
+        return Section("Proposed — not created in Jira", items) if items else None
+
     if name == "problems":
         items = _lines(result.errors)
         return Section("Problems", items) if items else None
 
     return None
+
+
+_NEXT = 'Say "@Aetherion create TDD" for the design, or "@Aetherion code" to implement it.'
+_SENTENCE = re.compile(r"(?<=[.!?])\s+")
+_LIST_IN_BRACKETS = re.compile(r"\(([^)]*)\)")
+
+
+def _first_sentences(text: str, count: int) -> str:
+    return " ".join(_SENTENCE.split(" ".join(str(text or "").split()))[:count]).strip()
+
+
+def _code_lines(found: dict) -> list[str]:
+    """The affected files, or one line saying where the code was not found."""
+    items = []
+    for entry in found.get("affected_files") or []:
+        if isinstance(entry, dict):
+            path, why = str(entry.get("path") or "").strip(), str(entry.get("why") or "").strip()
+            if path:
+                items.append(f"{path} — {why}" if why else path)
+        elif str(entry).strip():
+            items.append(str(entry).strip())
+    if items:
+        return items
+    note = str(found.get("code_note") or "").strip()
+    if "not found" in note.lower():
+        where = _LIST_IN_BRACKETS.search(note)
+        return [
+            "Not found in the connected repositories" + (f": {where.group(1)}." if where else ".")
+        ]
+    return [_first_sentences(note.split("; searched for")[0], 1)] if note else []
+
+
+def bug_blocks(result: AgentResult, notification: str = "") -> list[tuple[str, object]]:
+    """A bug investigation's reply, kept short (2026-11-02): readiness, what is
+    wrong, the likely cause, the code, the fix, what is still needed once, and
+    what to ask next."""
+    found = result.investigation or {}
+    blocks: list[tuple[str, object]] = [(f"{AGENT_SIGNATURE} · {result.headline}", "")]
+    if result.degraded:
+        blocks.append(("", _DEGRADED_WARNING))
+    if result.summary:
+        blocks.append(("Readiness", _first_sentences(result.summary, 2)))
+    wrong = _lines(
+        [
+            f"Actual: {found['actual']}" if found.get("actual") else "",
+            f"Expected: {found['expected']}" if found.get("expected") else "",
+        ]
+    )
+    if wrong:
+        blocks.append(("What is wrong", wrong))
+    cause = str(found.get("root_cause") or "").strip()
+    if cause:
+        confidence = str(found.get("root_cause_confidence") or "").strip().lower()
+        heading = f"Likely cause ({confidence} confidence)" if confidence else "Likely cause"
+        blocks.append((heading, _first_sentences(cause, 3)))
+    code = _code_lines(found)
+    if code:
+        blocks.append(("Code", code))
+    fix = str(found.get("proposed_fix") or "").strip()
+    if fix:
+        blocks.append(("Proposed fix — not applied", fix))
+    needed = _lines([str(i) for i in found.get("missing_information") or []]) or _lines(
+        result.questions
+    )
+    if needed and (result.readiness_score or 0) < 4:
+        # A report ready to fix (4/5 or more) asks for nothing more (BTS-40,
+        # 2026-11-02: an engineer confirmed its information was enough).
+        blocks.append(("Still needed", needed))
+    blocks.append(("Next", _NEXT))
+    if notification:
+        blocks.append(("Notification", notification))
+    blocks.append(("", AGENT_FOOTER))
+    return blocks
 
 
 def compose(
@@ -196,8 +291,11 @@ def compose(
     passed in rather than read from ``result.display_name`` because only the
     router knows whether the child finished — a timed-out child still has a name.
 
-    No ``run_id`` parameter, deliberately — see ``handled_by``.
+    No ``run_id`` parameter, deliberately — see ``handled_by``. A bug
+    investigation has its own short reply (``bug_blocks``).
     """
+    if result.investigation:
+        return bug_blocks(result, notification)
     blocks: list[tuple[str, object]] = [
         (f"{AGENT_SIGNATURE} · {result.headline}", ""),
     ]
@@ -269,9 +367,69 @@ AMBIGUOUS_OPTIONS = [
     '"@Aetherion review" — I assess how clear it is and list what is missing, ' "creating nothing",
 ]
 
+# What a Bug card can ask for instead of a build (2026-10-22).
+BUG_OPTIONS = [
+    '"@Aetherion investigate" — find the likely root cause, the affected files and a '
+    "proposed fix, creating nothing",
+    '"@Aetherion create TDD" — write the Technical Design Document for the fix',
+    '"@Aetherion code" — implement the fix from the TDD, when you are ready',
+]
+
 HELP_OPTIONS = [
-    '"@Aetherion build <requirement>" — break a requirement into Jira issues',
-    '"@Aetherion review" — assess this ticket and report what is missing',
-    '"@Aetherion explain" — describe what this ticket is asking for',
+    '"@Aetherion build <requirement>" — break the requirement, or this ticket\'s requirements, '
+    "into Jira work items (a Story gets Sub-tasks, an Epic gets Stories)",
+    '"@Aetherion review" — review this ticket: findings, gaps, missing information and open '
+    "questions. Answer them in the comments and ask again",
+    '"@Aetherion investigate" — on a bug: find the likely root cause, the affected files '
+    "and a proposed fix, creating nothing",
+    '"@Aetherion explain this card" — explain what this ticket is asking for',
+    '"@Aetherion explain why this approach and why not another approach" — the Planning agent '
+    "explains the design's reasoning and weighs the alternative",
+    '"@Aetherion create TDD" — on a Story: check the requirement is ready, then write the '
+    "Technical Design Document in Confluence and link it here; asked again, a story whose "
+    "requirement has not changed (only its words) keeps the same TDD",
+    '"@Aetherion update the TDD: <change>" — the change is checked against the story, the code '
+    'and the decisions already agreed, and applied only when it is valid; "update the TDD '
+    'anyway: <change>" applies it as asked',
+    '"@Aetherion code" — start coding from the Confluence TDD, after confirming the branches; '
+    "the pull request is linked here and on the TDD page",
+    '"@Aetherion status" — what has happened on this ticket so far, and what is running now',
     '"@Aetherion help" — show this list',
 ]
+
+
+# How many of a ticket's steps the status reply shows, newest last.
+STATUS_STEPS = 15
+
+
+def status_blocks(issue_key: str, state: dict) -> list[tuple[str, object]]:
+    """The reply to "@Aetherion status" (2026-10-15): the job running now, if any,
+    and the ticket's latest steps — each with its time and run id."""
+    blocks: list[tuple[str, object]] = [(f"{AGENT_SIGNATURE} · Status of {issue_key}", "")]
+    active = state.get("active") or {}
+    blocks.append(
+        (
+            "Running now",
+            (
+                f"{active.get('intent', 'A job')} — started {active.get('started', '')} "
+                f"(run {active.get('run_id', '')})"
+                if active
+                else "Nothing is running on this ticket."
+            ),
+        )
+    )
+    steps = list(state.get("history") or [])[-STATUS_STEPS:]
+    blocks.append(
+        (
+            "What has happened",
+            [
+                f"{s.get('at', '')} — {s.get('step', '')} {s.get('status', '')}"
+                + (f": {s['detail']}" if s.get("detail") else "")
+                + f" (run {s.get('run_id', '')})"
+                for s in steps
+            ]
+            or ["Nothing has been asked of the agents on this ticket yet."],
+        )
+    )
+    blocks.append(("", AGENT_FOOTER))
+    return blocks

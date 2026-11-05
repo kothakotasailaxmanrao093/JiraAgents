@@ -31,9 +31,10 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from agent.review_flow import questions_from, resolve_document_keys
 from config import AGENT_DISPLAY_NAME, AGENT_NAME, agent_version
 from review.completeness import sources_missing, sources_read, summarise
-from shared.contract import AgentResult, EmailKind, MissingSource, Outcome
+from shared.contract import AgentResult, EmailKind, Outcome
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,10 @@ def _outcome_for(result: dict[str, Any]) -> Outcome:
     agent can act.
     """
     status = result.get("status")
+    if result.get("analysis_error") and not result.get("findings"):
+        # The AI step failed (2026-10-26): there is no review, and calling it
+        # REVIEWED let the router keep and reuse an empty result.
+        return Outcome.FAILED
     if status == "error":
         # "no requirement text" is not a crash — it is a finding about the
         # ticket, reported the same way any other unreadable source is.
@@ -129,10 +134,11 @@ async def run_delegated(
         base.update(over)
         return AgentResult(**base).to_dict()
 
-    if not issue_key:
+    documents = resolve_document_keys(payload)
+    if not issue_key and not documents:
         return _result(
-            summary="No issue key was supplied, so there was nothing to review.",
-            errors=["issue_key is required in delegated mode"],
+            summary="No issue key or document was supplied, so there was nothing to review.",
+            errors=["issue_key or document_file_keys is required in delegated mode"],
         )
 
     # The webhook path never writes. Forced here rather than trusted from the
@@ -142,6 +148,9 @@ async def run_delegated(
     delegated_payload["generate_docx"] = False
     delegated_payload["issue_key"] = issue_key
     delegated_payload["jql_override"] = ""  # a webhook is always one issue
+    if not issue_key:
+        # The orchestrator's form flow: the documents, nothing in Jira.
+        delegated_payload["document_file_keys"] = documents
     if comment_id:
         delegated_payload["comment_id"] = comment_id
 
@@ -191,6 +200,19 @@ def _to_contract(result: dict[str, Any], *, run_id: str) -> AgentResult:
     elif outcome is Outcome.FAILED:
         headline = "Requirement review could not run"
         summary = result.get("message") or "The review did not complete."
+        if result.get("analysis_error"):
+            summary = (
+                f"The AI review step failed ({result['analysis_error']}), so nothing was "
+                "reviewed. Ask again to retry."
+            )
+    elif result.get("review_kind") == "bug":
+        # Review judges the report; the code is investigated by Planning (2026-10-26).
+        headline = (
+            "Bug report reviewed — ready to investigate"
+            if _score(readiness) >= 4
+            else "Bug report reviewed — more information needed"
+        )
+        summary = _readiness_line(readiness) or summarise(read, missing)
     else:
         headline = _headline(readiness_level, len(findings))
         summary = _readiness_line(readiness) or summarise(read, missing)
@@ -212,7 +234,13 @@ def _to_contract(result: dict[str, Any], *, run_id: str) -> AgentResult:
         headline=headline,
         summary=summary,
         findings=findings,
-        questions=_questions_from(findings),
+        questions=questions_from(findings),
+        # A number, so the router can hold a build back after a poor review
+        # without reading it out of the summary's wording.
+        readiness_score=_score(readiness),
+        # A bug report's actual / expected / missing information; empty for a
+        # requirement review. Planning adds the cause, files and fix.
+        investigation=dict(result.get("investigation") or {}),
         # A review never creates anything. Stated as empty rather than omitted,
         # because the router renders "Created in Jira" from this list.
         created=[],
@@ -230,23 +258,9 @@ def _to_contract(result: dict[str, Any], *, run_id: str) -> AgentResult:
     )
 
 
-def _questions_from(findings: list[dict[str, Any]]) -> list[str]:
-    """The open questions, lifted out so the router can show them as questions.
-
-    Only the two genuinely interrogative categories: everything else is a
-    statement about the ticket, and listing it under "questions" would tell the
-    reader to answer something that is not a question.
-    """
-    wanted = {"open_question", "dependency_question"}
-    out: list[str] = []
-    for finding in findings:
-        category = str(finding.get("category") or "").strip().lower()
-        text = str(finding.get("description") or finding.get("title") or "").strip()
-        if category in wanted and text and text not in out:
-            out.append(text)
-    return out
-
-
-def missing_as_sentences(missing: list[MissingSource]) -> list[str]:
-    """Rendering helper for callers that want plain lines."""
-    return [m.as_sentence() for m in missing]
+def _score(readiness: Any) -> int:
+    """Readiness 1-5, or 0 when the review produced none."""
+    try:
+        return int((readiness or {}).get("score") or 0) if isinstance(readiness, dict) else 0
+    except (TypeError, ValueError):
+        return 0

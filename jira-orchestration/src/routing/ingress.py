@@ -61,21 +61,12 @@ class IgnoreReason(str, Enum):
 
 @dataclass(frozen=True)
 class IngressVerdict:
-    """Whether to run, and — when not — which closed reason says why."""
+    """Whether to run: ``ignored`` is None to run, else the closed reason why not."""
 
-    proceed: bool
     ignored: IgnoreReason | None = None
 
-    @property
-    def dropped(self) -> bool:
-        return not self.proceed
 
-    @property
-    def reason(self) -> str:
-        return self.ignored.value if self.ignored else ""
-
-
-PROCEED = IngressVerdict(proceed=True)
+PROCEED = IngressVerdict()
 
 
 def screen_comment(
@@ -95,15 +86,15 @@ def screen_comment(
     text = body or ""
 
     if not mentions_trigger(text, keyword=keyword):
-        return IngressVerdict(False, IgnoreReason.NO_KEYWORD)
+        return IngressVerdict(IgnoreReason.NO_KEYWORD)
 
     if bot_account_id and author_account_id and author_account_id == bot_account_id:
-        return IngressVerdict(False, IgnoreReason.OWN_ACCOUNT)
+        return IngressVerdict(IgnoreReason.OWN_ACCOUNT)
 
     if is_agent_comment(text):
         # The structural guard. Even if the account check is misconfigured, a
         # comment carrying our signature can never start a run.
-        return IngressVerdict(False, IgnoreReason.SIGNATURE)
+        return IngressVerdict(IgnoreReason.SIGNATURE)
 
     return PROCEED
 

@@ -94,17 +94,19 @@ async def test_llm_error_degrades_without_draft():
     assert "render_review" not in ex.calls
 
 
-def test_resolve_transcript_file_key_variants():
-    from agent.review_flow import resolve_transcript_file_key
+def test_resolve_transcript_file_keys_variants():
+    from agent.review_flow import resolve_transcript_file_keys as keys
 
-    assert resolve_transcript_file_key({"uploaded_files": "a.txt"}) == "a.txt"
-    assert resolve_transcript_file_key({"transcript_file": "b.txt"}) == "b.txt"
-    assert resolve_transcript_file_key({"transcript_file_key": "c.txt"}) == "c.txt"
-    assert resolve_transcript_file_key({"attachments": ["d.txt", "e.txt"]}) == "d.txt"
-    assert resolve_transcript_file_key({}) is None
-    assert resolve_transcript_file_key({"attachments": []}) is None
+    assert keys({"uploaded_files": "a.txt"}) == ["a.txt"]
+    assert keys({"transcript_file": "b.txt"}) == ["b.txt"]
+    assert keys({"transcript_file_key": "c.txt"}) == ["c.txt"]
+    # Several files uploaded at once are all kept, in order, without repeats.
+    assert keys({"attachments": ["d.txt", "e.docx", "d.txt"]}) == ["d.txt", "e.docx"]
+    assert keys({"uploaded_files": "f.vtt, g.pdf"}) == ["f.vtt", "g.pdf"]
+    assert keys({}) == []
+    assert keys({"attachments": []}) == []
     # precedence: uploaded_files wins over the trigger name
-    assert resolve_transcript_file_key({"uploaded_files": "u", "transcript_file": "t"}) == "u"
+    assert keys({"uploaded_files": "u", "transcript_file": "t"}) == ["u"]
 
 
 def _ex_with_post(post_response):
@@ -303,3 +305,28 @@ async def test_include_linked_issues_threaded_to_gather_context():
     # gather_context(issue_key, include_parent, include_subtasks, include_linked_issues, ...)
     assert captured["args"][0] == "ABC-1"
     assert captured["args"][3] is False
+
+
+async def test_generate_docx_on_a_laptop_run_points_at_the_saved_file():
+    ex = FakeExecute(
+        {
+            **_single_issue_responses(),
+            "build_review_report": {
+                "s3_key": None,
+                "local_path": "/tmp/reports/ABC_1_2026-01-01.docx",
+                "extension": "docx",
+                "metrics": {"issue_count": 1, "total_findings": 1, "overall_readiness": "ready"},
+                "email_html": "<p>hi</p>",
+                "error": None,
+            },
+        }
+    )
+    out = await run_review({"issue_key": "ABC-1", "generate_docx": True}, ex)
+    assert out[0]["status"] == "success"
+    assert out[1] == {
+        "type": "local_file",
+        "title": "Requirement Review Report — ABC-1",
+        "path": "/tmp/reports/ABC_1_2026-01-01.docx",
+        "extension": "docx",
+    }
+    assert out[2]["status"] == "success"

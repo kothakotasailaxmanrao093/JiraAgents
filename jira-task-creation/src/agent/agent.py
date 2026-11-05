@@ -9,7 +9,8 @@ from typing import Any, Dict
 from aetherion_sdk import agent, toolExecutor
 from common_lib.utils.logger import setup_logger
 
-from src.agent.delegated import agent_version, to_contract
+from src.agent.bug_rules import BUG_HEADLINE, bug_refusal, is_bug_type
+from src.agent.delegated import _sources_missing, _sources_read, agent_version, to_contract
 from src.models.schemas import (
     Classification,
     NotificationKind,
@@ -45,6 +46,24 @@ def delegated() -> bool:
     return _DELEGATED.get()
 
 
+# True when nothing is written back to the ticket: no reply, no label, no
+# answered-comment record (2026-10-06). The default for a laptop run, which is
+# a test — a reply posted from one landed on a real colleague's ticket — and a
+# choice on the form ("Reply on the ticket: no") anywhere else. The result,
+# the email and the PDF are unchanged; tickets are still created when asked.
+_QUIET: ContextVar[bool] = ContextVar("ltw_quiet", default=False)
+
+
+def quiet() -> bool:
+    """True when this run must not write anything back to the ticket."""
+    return _QUIET.get()
+
+
+# The form's "Reply on the ticket" choice; anything else (blank, "auto") means
+# yes on Aetherion and no on a laptop.
+_REPLY_CHOICES = {"yes": True, "no": False}
+
+
 # Reading the trigger issue downloads and parses attachments, so it gets the
 # most headroom of the read-only steps.
 _READ_TIMEOUT = timedelta(minutes=5)
@@ -54,6 +73,12 @@ _BREAKDOWN_TIMEOUT = timedelta(minutes=6)  # D1 self-review adds 1-2 model calls
 _JIRA_TIMEOUT = timedelta(minutes=10)
 _NOTIFY_TIMEOUT = timedelta(minutes=2)
 _REPORT_TIMEOUT = timedelta(minutes=2)
+# Condensing an hour-long transcript reads it in parts, four at a time.
+_CONDENSE_TIMEOUT = timedelta(minutes=15)
+# The smallest model budget there can be (src.context.condense.MIN_BUDGET_CHARS,
+# kept equal by a test): shorter text never needs fitting. Not imported — the
+# condense module reads settings, which workflow code must not reach.
+MIN_BUDGET_CHARS = 1_000
 
 
 # Said in the run result, in the Jira comment and in the email, because a run
@@ -339,6 +364,23 @@ def _unreadable_notes(source: dict[str, Any] | None) -> list[str]:
     return notes
 
 
+async def _laptop_or_platform(payload: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    """Whether to reply on the ticket, and the payload adjusted for a laptop run.
+
+    On a laptop there is no webhook: a run with an Issue Key was started by
+    hand on the form, so it does not wait for an "@Aetherion" comment — it is
+    run as Force Re-process would. Its replies default to off.
+    """
+    env = await toolExecutor.execute("run_environment", start_to_close_timeout=_NOTIFY_TIMEOUT)
+    local = bool((env or {}).get("local_run"))
+    choice = _REPLY_CHOICES.get(str(payload.get("reply_on_ticket") or "").strip().lower())
+    reply = choice if choice is not None else not local
+    if local and not str(payload.get("comment_id") or "").strip():
+        payload = {**payload, "force": True}
+        logger.info("Laptop run by hand: no '@Aetherion' comment needed (run as forced)")
+    return not reply, payload
+
+
 async def _report(
     issue_key: str,
     *,
@@ -364,6 +406,9 @@ async def _report(
     every branch here has to remember).
     """
     if not issue_key or delegated():
+        return {}
+    if quiet():
+        logger.info(f"Not replying on {issue_key} (reply on the ticket: off): {headline}")
         return {}
     result = await toolExecutor.execute(
         "report_to_issue",
@@ -414,10 +459,16 @@ async def JiraTaskCreation(payload: Dict[str, Any]) -> dict:
     # Setting it only when delegated left it true for whatever ran next in the
     # same context — which silently switched write-back off for a direct run.
     # A leak here is invisible: nothing errors, the reply simply never appears.
+    is_quiet = False
+    if not is_delegated and str(payload.get("issue_key") or "").strip():
+        is_quiet, payload = await _laptop_or_platform(payload)
+
     token = _DELEGATED.set(is_delegated)
+    quiet_token = _QUIET.set(is_quiet)
     try:
         result = await _run_breakdown(payload)
     finally:
+        _QUIET.reset(quiet_token)
         _DELEGATED.reset(token)
 
     if not is_delegated:
@@ -667,6 +718,28 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
                 notification=notification,
             )
 
+        # ---- Gate 0d-bug: a Bug is investigated, never broken down ----------
+        # 2026-10-22: "@Aetherion build" on a Bug created Sub-tasks (or a Task
+        # with Sub-tasks). A bug needs its cause found, not a work breakdown;
+        # the router sends it to the Review agent's bug investigation. Checked
+        # before any model call, and nothing is created or changed.
+        if source.get("ticket_is_root") and is_bug_type(source.get("issue_type")):
+            reason, options = bug_refusal(str(source.get("key") or issue_key))
+            await _report(
+                issue_key,
+                headline=BUG_HEADLINE,
+                situation=reason,
+                questions=options,
+                answered_comment_id=trigger_comment_id,
+            )
+            return _result(
+                status=ResultStatus.CLARIFICATION_REQUIRED,
+                message=reason,
+                headline=BUG_HEADLINE,
+                clarifying_questions=options,
+                source_issue=source,
+            )
+
         # ---- Gate 0e: this ticket was already built as a root --------------
         # Its description was rewritten by that build, so the request would
         # hash differently and the idempotency label could not find it. The
@@ -710,6 +783,46 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
             f"sources={source.get('source_counts', {})} | "
             f"requirement_chars={len(requirement)}"
         )
+
+    # ---- Gate 0f: files uploaded on the agent's own form ----------------
+    # Read like the ticket's own attachments, so they reach the breakdown, the
+    # sources listed and the PDF; one that cannot be read is named, with why.
+    uploads = {k: payload[k] for k in _UPLOAD_FIELDS if payload.get(k)}
+    if uploads:
+        uploaded = await toolExecutor.execute(
+            "read_uploaded_files",
+            uploads,
+            payload.get("team_id") or "",
+            start_to_close_timeout=_READ_TIMEOUT,
+        )
+        requirement = "\n\n".join(
+            part for part in (str(requirement).strip(), uploaded.get("section") or "") if part
+        )
+        source = dict(source or {"key": issue_key})
+        source["attachments"] = [
+            *(source.get("attachments") or []),
+            *(uploaded.get("files") or []),
+        ]
+        source["notes"] = [*(source.get("notes") or []), *(uploaded.get("notes") or [])]
+
+    # ---- Gate 0g: a requirement of any length fits the model ------------
+    # Condensed, never refused (src/context/condense.py): an 18,000-character
+    # meeting transcript used to get the card turned away (KS-17185). Within
+    # the budget the text comes back unchanged and no model call is made.
+    # Text shorter than the smallest budget there can be never needs fitting,
+    # so most runs skip the step entirely.
+    fitted: dict[str, Any] = {}
+    if len(str(requirement)) > MIN_BUDGET_CHARS:
+        fitted = await toolExecutor.execute(
+            "condense_requirement",
+            str(requirement),
+            start_to_close_timeout=_CONDENSE_TIMEOUT,
+        )
+    if (fitted or {}).get("notes"):
+        requirement = fitted.get("requirement") or requirement
+        source = dict(source or {"key": issue_key})
+        source["condensed"] = list(fitted["notes"])
+        logger.info(f"condensed : {source['condensed']}")
 
     logger.info(f"requirement_length : {len(str(requirement))}")
     logger.info(f"project_key : {project_key} | epic : {existing_epic_key or '-'}")
@@ -787,6 +900,12 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
         "project_name": project_name,
         # So the overlap check does not match the request against itself.
         "trigger_key": issue_key,
+        # Built on the card itself: its type fixes the structure (2026-10-07).
+        **(
+            {"card_key": issue_key, "card_type": (source or {}).get("issue_type") or ""}
+            if (source or {}).get("ticket_is_root")
+            else {}
+        ),
     }
 
     # ---- Gate 2: input validation, scope, relevance, clarification -------
@@ -922,10 +1041,44 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
     best_match = breakdown_result.get("best_match")
     logger.info(f"classification : {classification.value} | counts : {counts}")
 
+    # ---- Gate 3a: a defect is investigated, never broken down -------------
+    # The model calls broken existing behaviour "defect" (prompts/templates.py).
+    # That label was recorded and then ignored, so a bug report became a Task
+    # with Sub-tasks (2026-10-22). Nothing is created for it.
+    if str(breakdown.get("work_kind") or "").lower() == "defect":
+        key = str((source or {}).get("key") or issue_key or "this ticket")
+        reason, options = bug_refusal(key, described=True)
+        await _report(
+            issue_key,
+            headline=BUG_HEADLINE,
+            situation=reason,
+            questions=options,
+            context_notes=_unreadable_notes(source),
+            answered_comment_id=trigger_comment_id,
+        )
+        return _result(
+            status=ResultStatus.CLARIFICATION_REQUIRED,
+            message=reason,
+            headline=BUG_HEADLINE,
+            clarifying_questions=options,
+            jira_context=context,
+            source_issue=source,
+        )
+
+    # PDF mode or tickets? Asked before the overlap check (2026-10-06): a PDF
+    # creates nothing, so work that already exists does not stop it — the PDF
+    # names what exists and the plan is still emailed. KS-17185 stopped at
+    # "partly exists" and the person asking for a PDF got none.
+    if _output_choice(payload) is None:
+        mode = await toolExecutor.execute("delivery_mode", start_to_close_timeout=_NOTIFY_TIMEOUT)
+        local_pdf = bool(mode.get("local_pdf"))
+    else:
+        local_pdf = bool(_output_choice(payload))
+
     # ---- Gate 3b: overlap with work that already exists ------------------
     # Duplicates are never created. The run stops, the situation is emailed,
     # and a human decides whether this really is new work.
-    if duplicates:
+    if duplicates and not local_pdf:
         # Partly-existing work needs a different answer from wholly-existing
         # work: one asks "shall I build the rest?", the other says "this is done".
         overlap = breakdown_result.get("overlap") or {}
@@ -1005,6 +1158,32 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
             notification=notification,
         )
 
+    # What a previous review of this unchanged ticket left open (the router
+    # passes it): shown under "please confirm", never asked again.
+    review_questions = [str(q) for q in payload.get("review_questions") or [] if str(q).strip()]
+
+    # ---- Gate 3c: GENERATE_LOCAL_PDF ends here, with a PDF -----------------
+    # Before the preview check: in PDF mode nothing is ever created, so the
+    # PDF is always emailed, whatever "Create Issues In Jira" says.
+    if local_pdf:
+        return await _deliver_pdf(
+            source=source,
+            context=context,
+            breakdown_result=breakdown_result,
+            validation=validation,
+            clean_requirement=clean_requirement,
+            project_key=project.get("key") or project_key,
+            issue_key=issue_key,
+            issue_summary=issue_summary,
+            placement=placement,
+            classification=classification,
+            trigger_comment_id=trigger_comment_id,
+            review_questions=review_questions,
+            already_exist=duplicates,
+            # The orchestrator's form flow: Review reads this PDF next.
+            keep=_as_bool(payload.get("keep_document"), default=False),
+        )
+
     if not create_in_jira:
         logger.info("create_in_jira is false; returning the breakdown for review.")
         review_message = (
@@ -1067,6 +1246,8 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
             )
             if part
         ),
+        # The context step already listed them; creation does not ask again.
+        project.get("issue_types") or None,
         start_to_close_timeout=_JIRA_TIMEOUT,
     )
     jira_status = jira_result.get("status", ResultStatus.JIRA_CREATION_FAILED.value)
@@ -1086,10 +1267,12 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
     ]
 
     root = jira_result.get("root") or {}
+    # The card keeps its type (2026-10-07), so the headline says what was added
+    # under it — "BGV-105 is now a Story" read as if it had been changed.
     headline = (
-        f"{root['key']} is now {'an' if root.get('type_after', '').lower() == 'epic' else 'a'} "
-        f"{root.get('type_after')}"
-        if root and jira_status == ResultStatus.JIRA_CREATED.value
+        f"{len(created_refs)} work item{'' if len(created_refs) == 1 else 's'} created under "
+        f"{root['key']}"
+        if root and jira_status == ResultStatus.JIRA_CREATED.value and created_refs
         else ""
     )
     if jira_status == ResultStatus.JIRA_CREATED.value:
@@ -1166,6 +1349,7 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
     return _result(
         status=ResultStatus(jira_status),
         message=message,
+        review_questions=review_questions,
         headline=headline,
         classification=classification,
         analysis=breakdown.get("analysis", ""),
@@ -1180,3 +1364,122 @@ async def _run_breakdown(payload: Dict[str, Any]) -> dict:
         source_issue=source,
         notification=notification,
     )
+
+
+async def _deliver_pdf(
+    *,
+    source: dict[str, Any] | None,
+    context: dict[str, Any],
+    breakdown_result: dict[str, Any],
+    validation: dict[str, Any],
+    clean_requirement: str,
+    project_key: str,
+    issue_key: str,
+    issue_summary: str,
+    placement: str,
+    classification: Classification,
+    trigger_comment_id: str,
+    review_questions: list[str],
+    already_exist: list[dict[str, Any]] | None = None,
+    keep: bool = False,
+) -> dict:
+    """End a build with the breakdown as an attached PDF. Nothing else changes.
+
+    ``keep``: also keep the PDF in shared storage and return its key, for the
+    orchestrator to hand to Review (a request from its form, 2026-10-08).
+    """
+    read = {"source_issue": source, "jira_context": context}
+    related = [
+        f"{link.get('key')} — {link.get('summary')} ({link.get('relationship')})"
+        for link in (source or {}).get("linked_issues") or []
+        if link.get("key")
+    ]
+    request = {
+        "breakdown": breakdown_result["breakdown"],
+        "requirement": clean_requirement,
+        "request": validation.get("request_text") or clean_requirement,
+        "issue_key": issue_key,
+        "issue_summary": issue_summary,
+        "project_key": project_key,
+        "root_key": issue_key if (source or {}).get("ticket_is_root") else "",
+        "agent_version": agent_version(),
+        "review_questions": review_questions,
+        "keep": keep,
+        # The Epic named on the form, already checked by inspect_jira_context.
+        "existing_epic": context.get("epic") or {},
+        "report": {
+            "related_keys": related,
+            # What was condensed to fit the model is said next to what was read.
+            "sources_read": [*_sources_read(read), *((source or {}).get("condensed") or [])],
+            "sources_missing": [m.as_sentence() for m in _sources_missing(read)],
+            "quality_notes": breakdown_result.get("quality_notes") or [],
+            "coverage": breakdown_result.get("coverage") or {},
+            "closest_match": breakdown_result.get("best_match"),
+            "placement": str(placement),
+            "already_exist": list(already_exist or []),
+        },
+    }
+    made = await toolExecutor.execute(
+        "generate_breakdown_pdf", request, start_to_close_timeout=_JIRA_TIMEOUT
+    )
+    breakdown = breakdown_result["breakdown"]
+    if made.get("status") != ResultStatus.PLANNED.value:
+        reason = str(made.get("reason") or "The PDF could not be made.")
+        await _report(
+            issue_key,
+            headline="The PDF could not be made — nothing was changed",
+            situation=reason,
+            errors=[reason],
+            answered_comment_id=trigger_comment_id,
+        )
+        return _result(
+            status=ResultStatus.JIRA_CREATION_FAILED,
+            message=reason,
+            validation_errors=[reason],
+            source_issue=source,
+            jira_context=context,
+        )
+
+    summary = str(made.get("summary") or "")
+    await _report(
+        issue_key,
+        headline=str(made.get("headline") or "Work breakdown ready as a PDF"),
+        situation=summary + "\n" + "\n".join(made.get("proposed") or []),
+        context_notes=_unreadable_notes(source),
+        answered_comment_id=trigger_comment_id,
+    )
+    return _result(
+        status=ResultStatus.PLANNED,
+        message=summary,
+        headline=str(made.get("headline") or ""),
+        proposed=list(made.get("proposed") or []),
+        documents=(
+            [{"name": str(made.get("attachment") or ""), "file_key": str(made["file_key"])}]
+            if made.get("file_key")
+            else []
+        ),
+        review_questions=review_questions,
+        classification=classification,
+        analysis=breakdown.get("analysis", ""),
+        epic=breakdown.get("epic"),
+        stories=breakdown.get("stories", []),
+        quality_notes=breakdown_result.get("quality_notes") or [],
+        jira_context=context,
+        source_issue=source,
+    )
+
+
+# Where the platform puts the storage keys of files picked on the form:
+# ``uploaded_files`` (every file field's keys), or the field's own name.
+_UPLOAD_FIELDS = ("uploaded_files", "supporting_files")
+
+_OUTPUTS = {"pdf_by_email": True, "create_in_jira": False}
+
+
+def _output_choice(payload: Dict[str, Any]) -> bool | None:
+    """The form's "Output" choice: True for the PDF, False for tickets, None for the setting.
+
+    A run from the agent's own form can choose; a Jira comment (through the
+    router) never sets it, so GENERATE_LOCAL_PDF decides there.
+    """
+    return _OUTPUTS.get(str(payload.get("output") or "").strip().lower())

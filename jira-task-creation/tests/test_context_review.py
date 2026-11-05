@@ -75,7 +75,7 @@ async def test_every_page_of_existing_work_is_read() -> None:
 
 
 async def test_paging_stops_at_the_configured_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LTW_MAX_CONTEXT_ISSUES", "10")
+    monkeypatch.setenv("TASK_MAX_CONTEXT_ISSUES", "10")
     pages = [[issue(f"ORD-{n}", f"Story {n}") for n in range(10)]]
     client = FakeClient({"/search/jql": paged(pages)})
 
@@ -137,7 +137,6 @@ def test_work_is_recognised_even_when_the_title_is_worded_differently() -> None:
     assert len(matches) == 1
     assert matches[0].existing_key == "ORD-9"
     assert matches[0].matched_on == "description"
-    assert "matched on its description" in matches[0].explain()
 
 
 def test_an_unrelated_description_does_not_match() -> None:
@@ -180,7 +179,7 @@ def test_everything_already_existing_is_reported_as_full() -> None:
     )
     assert report.is_full
     assert not report.is_partial
-    assert report.blocked
+    assert report.covered_titles
     assert report.remaining_titles == []
 
 
@@ -196,7 +195,7 @@ def test_some_already_existing_is_reported_as_partial() -> None:
 
 def test_nothing_existing_blocks_nothing() -> None:
     report = jira.build_overlap_report(["Create two factor authentication"], existing_login_work())
-    assert not report.blocked
+    assert not report.covered_titles
     assert report.covered_titles == []
     assert report.remaining_titles == ["Create two factor authentication"]
 
@@ -243,7 +242,7 @@ def test_the_trigger_ticket_never_matches_its_own_stories() -> None:
         request_ticket("TT2-164", "Driver rest breaks", "Allow drivers to record rest breaks")
     ]
     report = jira.build_overlap_report(["Record rest breaks"], existing, exclude_keys={"TT2-164"})
-    assert not report.blocked
+    assert not report.covered_titles
     assert report.remaining_titles == ["Record rest breaks"]
 
 
@@ -265,7 +264,7 @@ def test_real_work_still_blocks() -> None:
     """The exclusions must not disarm duplicate detection itself."""
     existing = [real_work("TT2-40", "Track tyre replacement")]
     report = jira.build_overlap_report(["Track tyre replacement"], existing)
-    assert report.blocked
+    assert report.covered_titles
     assert report.matches[0].existing_key == "TT2-40"
 
 

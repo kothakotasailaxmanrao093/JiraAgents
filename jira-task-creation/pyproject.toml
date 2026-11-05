@@ -1,6 +1,6 @@
 [project]
 name = "jira-task-creation"
-version = "4.3.40"
+version = "4.3.59"
 description = "LaxmanTicketWise — validates requirements, classifies them Small/Medium/Large, decomposes them into Epics/Stories/Subtasks, and creates the Jira hierarchy"
 authors = [{ name = "Kothakota Sai Laxman Rao", email = "kothakota.sailaxmanrao@calfus.com" }]
 readme = "README.md"
@@ -15,13 +15,20 @@ dependencies = [
     # which strawberry 0.287.3 imports via the platform's phoenix/agent_lib: the
     # worker pod crashed on start-up. Remove once the platform image supports 3.3.
     "graphql-core>=3.2,<3.3",
-    "aetherion-sdk @ https://sdk.sbox.aetherion.io/Darwin/aetherion_sdk-0.0.83-cp312-cp312-macosx_26_0_arm64.whl",
+    "aetherion-sdk @ https://sdk.sbox.aetherion.io/Darwin/aetherion_sdk-0.0.112-cp312-cp312-macosx_26_0_arm64.whl",
     # Imported directly by src/; previously satisfied only transitively via the
     # SDK, which breaks the moment the SDK drops one of them.
     "fastapi>=0.120,<1.0",
     "httpx>=0.28,<1.0",
     "pydantic>=2.13,<3.0",
     "python-dotenv>=1.2,<2.0",
+    # Renders the GENERATE_LOCAL_PDF breakdown (src/document/breakdown_pdf.py).
+    # The platform already installs it to read PDF attachments; pinned to that
+    # version so a platform change cannot silently remove what we use directly.
+    "pymupdf==1.26.4",
+    # Video/audio attachments: a static ffmpeg binary inside the wheel, so the
+    # platform pod needs no system ffmpeg (shared/video.py, 2026-10-21).
+    "imageio-ffmpeg>=0.6,<1.0",
 ]
 
 [dependency-groups]

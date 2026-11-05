@@ -60,7 +60,12 @@ def test_the_gateway_client_the_classifier_imports_really_exists() -> None:
 
 async def test_scores_come_back_from_the_gateway(fake_gateway) -> None:
     result = await tools.classify_intent("is anything missing here?", "Consent capture")
-    assert result["scores"] == {"BUILD": 0.1, "REVIEW": 0.8, "QUESTION": 0.05, "CHATTER": 0.05}
+    assert result["scores"] == {
+        "BUILD": 0.1,
+        "REVIEW": 0.8,
+        "QUESTION": 0.05,
+        "CHATTER": 0.05,
+    }
 
 
 async def test_the_call_names_a_provider_and_a_model(fake_gateway, monkeypatch) -> None:
@@ -72,7 +77,9 @@ async def test_the_call_names_a_provider_and_a_model(fake_gateway, monkeypatch) 
     assert "Comment: have a look" in call["prompt"]
 
 
-async def test_a_gateway_failure_means_ask_and_names_the_real_error(fake_gateway) -> None:
+async def test_a_gateway_failure_means_ask_and_names_the_real_error(
+    fake_gateway,
+) -> None:
     fake_gateway.raises = TimeoutError("gateway timed out")
     result = await tools.classify_intent("have a look", "")
     assert result["scores"] is None
@@ -104,3 +111,26 @@ def test_the_provider_is_inferred_from_the_model(model: str, provider: str, monk
 def test_an_explicit_provider_wins(monkeypatch) -> None:
     monkeypatch.setenv("ORCH_CLASSIFIER_PROVIDER", "bedrock")
     assert settings.provider_for_model("gpt-5.1") == "bedrock"
+
+
+async def test_on_a_laptop_the_classifier_asks_openai(monkeypatch, fake_gateway) -> None:
+    """No gateway on a laptop: the same question goes to OpenAI (2026-10-03)."""
+    from shared import llm
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+
+    monkeypatch.setenv("LOCAL_OPENAI_CHAT_URL", "https://openai.example/v1/chat/completions")
+    monkeypatch.setenv("AETHERION_LOCAL_RUN", "1")
+    asked: list[dict[str, Any]] = []
+
+    async def openai_chat(**request: Any) -> str:
+        asked.append(request)
+        return '{"BUILD": 0.9, "REVIEW": 0.05, "QUESTION": 0.03, "CHATTER": 0.02}'
+
+    monkeypatch.setattr(llm, "openai_chat", openai_chat)
+    result = await tools.classify_intent("@Aetherion make the tickets", "Referee reminders")
+    assert result["scores"]["BUILD"] == 0.9
+    assert fake_gateway.calls == [], "the gateway is not called on a laptop"
+    [request] = asked
+    assert request["model"] == settings.classifier_model()
+    assert request["temperature"] == 0.0 and request["max_tokens"] == 200

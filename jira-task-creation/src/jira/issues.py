@@ -17,6 +17,7 @@ Two behaviours are specific to this agent:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import re
@@ -25,6 +26,7 @@ from typing import Any
 import httpx
 from common_lib.utils.logger import setup_logger
 
+from src.config.settings import env_int
 from src.jira.adf import (
     epic_description,
     story_description,
@@ -39,6 +41,7 @@ from src.jira.client import (
 )
 from src.jira.context import fetch_epic_children
 from src.models.schemas import (
+    Classification,
     JiraIssueRef,
     JiraResult,
     ResultStatus,
@@ -302,7 +305,28 @@ def with_note(description: dict[str, Any], note: str) -> dict[str, Any]:
     return {**description, "content": [*description["content"], paragraph(note)]}
 
 
-def _reason(exc: Exception) -> str:
+DEFAULT_WRITE_CONCURRENCY = 4
+
+
+def write_concurrency() -> int:
+    """Tickets created at the same time (TASK_WRITE_CONCURRENCY, at least 1).
+
+    4, as for reads: well inside Jira Cloud's per-account rate limit, and
+    enough that 12 tickets take about three rounds instead of twelve.
+    """
+    return max(1, env_int("TASK_WRITE_CONCURRENCY", DEFAULT_WRITE_CONCURRENCY))
+
+
+class _Step(Exception):
+    """A failure, with which ticket it was creating."""
+
+    def __init__(self, step: str, cause: BaseException) -> None:
+        super().__init__(step)
+        self.step = step
+        self.cause = cause
+
+
+def _reason(exc: BaseException) -> str:
     return _http_error_text(exc) if isinstance(exc, httpx.HTTPStatusError) else str(exc)
 
 
@@ -359,43 +383,56 @@ async def _add_subtasks(
     labels: list[str],
     parent_key: str,
     created: list[JiraIssueRef],
+    gate: asyncio.Semaphore | None = None,
 ) -> tuple[list[JiraIssueRef], list[JiraIssueRef]]:
     """Sub-tasks under an existing ticket, skipping any it already carries.
 
     Compared by title against the parent's own children: three runs of one
-    request once left FL-53 carrying nine Sub-tasks, three of each. Returns
-    ``(new, already_there)``; appends each new one to ``created`` as it goes,
-    so a failure part-way still reports what was made. Raises on failure.
+    request once left FL-53 carrying nine Sub-tasks, three of each. The missing
+    ones are created together (bounded by ``gate``). Returns ``(new,
+    already_there)``; every one made is added to ``created`` even when another
+    fails, so a failure part-way still reports what was made. Raises the first
+    failure after the others have finished.
     """
+    gate = gate or asyncio.Semaphore(write_concurrency())
     siblings = await fetch_epic_children(client, parent_key, project_key)
     by_title = {_normalised_title(c.summary): c for c in siblings}
-    new: list[JiraIssueRef] = []
     kept: list[JiraIssueRef] = []
+    missing: list[Subtask] = []
     for subtask in subtasks:
         existing = by_title.get(_normalised_title(subtask.title))
-        if existing is not None:
-            kept.append(
-                JiraIssueRef(
-                    key=existing.key,
-                    url=browse_url(base_url, existing.key),
-                    issue_type=existing.issue_type,
-                    summary=existing.summary,
-                    parent_key=parent_key,
-                )
-            )
+        if existing is None:
+            missing.append(subtask)
             continue
-        ref = await create_issue(
-            client,
-            base_url,
-            project_key,
-            subtask_type,
-            subtask.title,
-            subtask_description(subtask),
-            labels,
-            parent_key=parent_key,
+        kept.append(
+            JiraIssueRef(
+                key=existing.key,
+                url=browse_url(base_url, existing.key),
+                issue_type=existing.issue_type,
+                summary=existing.summary,
+                parent_key=parent_key,
+            )
         )
-        created.append(ref)
-        new.append(ref)
+
+    async def make(subtask: Subtask) -> JiraIssueRef:
+        async with gate:
+            return await create_issue(
+                client,
+                base_url,
+                project_key,
+                subtask_type,
+                subtask.title,
+                subtask_description(subtask),
+                labels,
+                parent_key=parent_key,
+            )
+
+    made = await asyncio.gather(*(make(sub) for sub in missing), return_exceptions=True)
+    new = [ref for ref in made if isinstance(ref, JiraIssueRef)]
+    created.extend(new)
+    failed = next((r for r in made if isinstance(r, BaseException)), None)
+    if failed is not None:
+        raise failed
     return new, kept
 
 
@@ -411,7 +448,7 @@ async def build_under_root(
     create_subtasks: bool,
     types: dict[str, str],
 ) -> JiraResult:
-    """The children of a ticket that has just become the root. No Epic, ever.
+    """The children of the card the work is built on. No Epic, ever.
 
     Safe to repeat: every level is compared by title with what the root (or
     each Story) already holds, so a redelivered or repeated request reuses the
@@ -427,8 +464,9 @@ async def build_under_root(
         if create_stories:
             children = await fetch_epic_children(client, root_key, project_key)
             by_title = {_normalised_title(c.summary): c for c in children}
-            for story in breakdown.stories:
-                step = f"Story '{story.title}'"
+            gate = asyncio.Semaphore(write_concurrency())
+
+            async def one(story: Story) -> tuple[JiraIssueRef, list, list]:
                 existing = by_title.get(_normalised_title(story.title))
                 if existing is not None:
                     story_ref = JiraIssueRef(
@@ -440,12 +478,12 @@ async def build_under_root(
                     )
                     reused.append(story_ref)
                 else:
-                    story_ref = await _create_story(
-                        client, base_url, project_key, types["story"], story, labels, root_key
-                    )
+                    async with gate:
+                        story_ref = await _create_story(
+                            client, base_url, project_key, types["story"], story, labels, root_key
+                        )
                     created.append(story_ref)
                 story_refs.append(story_ref)
-                step = f"Sub-tasks of '{story.title}'"
                 new, kept = await _add_subtasks(
                     client,
                     base_url,
@@ -455,7 +493,19 @@ async def build_under_root(
                     labels,
                     story_ref.key,
                     created,
+                    gate,
                 )
+                return story_ref, new, kept
+
+            # Every Story (and its Sub-tasks) at once, bounded by the gate.
+            outcomes = await asyncio.gather(
+                *(one(story) for story in breakdown.stories), return_exceptions=True
+            )
+            for story, outcome in zip(breakdown.stories, outcomes, strict=True):
+                if isinstance(outcome, BaseException):
+                    step = f"Story '{story.title}'"
+                    raise outcome
+                _, new, kept = outcome
                 subtask_refs += new + kept
                 reused += kept
         elif create_subtasks:
@@ -465,7 +515,9 @@ async def build_under_root(
                 base_url,
                 project_key,
                 types["subtask"],
-                breakdown.stories[0].subtasks,
+                # Every step, even if the model split the work into several
+                # items despite being told the card is one (2026-10-07).
+                [t for story in breakdown.stories for t in story.subtasks],
                 labels,
                 root_key,
                 created,
@@ -564,37 +616,30 @@ async def create_hierarchy(
                 [],
             )
 
-    for story in breakdown.stories:
-        try:
+    gate = asyncio.Semaphore(write_concurrency())
+    # Small is one Task, with Sub-tasks only for two or more steps; Medium is
+    # one Story; Large an Epic with Stories (owner decision, 2026-10-07).
+    small = breakdown.classification is Classification.SMALL and breakdown.epic is None
+    item_type = types.get("task", "Task") if small else types["story"]
+
+    async def one(story: Story) -> tuple[JiraIssueRef, list[JiraIssueRef]]:
+        async with gate:
             story_ref = await _create_story(
                 client,
                 base_url,
                 project_key,
-                types["story"],
+                item_type,
                 story,
                 labels,
                 epic_ref.key if epic_ref else "",
                 note="" if epic_ref else origin_note,
             )
-        except (httpx.HTTPError, RuntimeError) as exc:
-            logger.error(f"Story creation failed: {_reason(exc)}")
-            return _failure(
-                key_label,
-                created,
-                f"Story '{story.title}'",
-                _reason(exc),
-                True,
-                epic_ref,
-                story_refs,
-                subtask_refs,
-            )
-
-        story_refs.append(story_ref)
         created.append(story_ref)
+        story_refs.append(story_ref)
 
-        for subtask in story.subtasks:
-            try:
-                subtask_ref = await create_issue(
+        async def sub(subtask: Subtask) -> JiraIssueRef:
+            async with gate:
+                return await create_issue(
                     client,
                     base_url,
                     project_key,
@@ -604,23 +649,34 @@ async def create_hierarchy(
                     labels,
                     parent_key=story_ref.key,
                 )
-            except httpx.HTTPError as exc:
-                reason = (
-                    _http_error_text(exc) if isinstance(exc, httpx.HTTPStatusError) else str(exc)
-                )
-                logger.error(f"Subtask creation failed: {reason}")
-                return _failure(
-                    key_label,
-                    created,
-                    f"Subtask '{subtask.title}'",
-                    reason,
-                    True,
-                    epic_ref,
-                    story_refs,
-                    subtask_refs,
-                )
-            subtask_refs.append(subtask_ref)
-            created.append(subtask_ref)
+
+        steps = story.subtasks if not small or len(story.subtasks) >= 2 else []
+        made = await asyncio.gather(*(sub(t) for t in steps), return_exceptions=True)
+        good = [ref for ref in made if isinstance(ref, JiraIssueRef)]
+        created.extend(good)
+        subtask_refs.extend(good)
+        failed = next((r for r in made if isinstance(r, BaseException)), None)
+        if failed is not None:
+            bad = steps[made.index(failed)]
+            raise _Step(f"Subtask '{bad.title}'", failed)
+        return story_ref, good
+
+    # Every Story, and then its Sub-tasks, at once — bounded by the gate. One
+    # that fails does not stop the others; what was made is reported with it.
+    outcomes = await asyncio.gather(
+        *(one(story) for story in breakdown.stories), return_exceptions=True
+    )
+    for story, outcome in zip(breakdown.stories, outcomes, strict=True):
+        if isinstance(outcome, BaseException):
+            where, cause = (
+                (outcome.step, outcome.cause)
+                if isinstance(outcome, _Step)
+                else (f"Story '{story.title}'", outcome)
+            )
+            logger.error(f"{where} creation failed: {_reason(cause)}")
+            return _failure(
+                key_label, created, where, _reason(cause), True, epic_ref, story_refs, subtask_refs
+            )
 
     counts = breakdown.issue_count()
     if epic_reused:
@@ -629,7 +685,11 @@ async def create_hierarchy(
     parts = []
     if counts["epics"]:
         parts.append(f"{counts['epics']} Epic")
-    parts.append(f"{counts['stories']} Stor{'y' if counts['stories'] == 1 else 'ies'}")
+    if small:
+        parts.append("1 Task")
+        counts = {**counts, "subtasks": len(subtask_refs)}
+    else:
+        parts.append(f"{counts['stories']} Stor{'y' if counts['stories'] == 1 else 'ies'}")
     parts.append(f"{counts['subtasks']} Subtask{'' if counts['subtasks'] == 1 else 's'}")
 
     summary = (

@@ -50,7 +50,7 @@ _EXPAND = "body.storage,space"
 class FetchConfig:
     """What one agent's deployment allows. Passed in, never read from env here.
 
-    Each agent names its own variables (``LTW_CONFLUENCE_MAX_PAGES``,
+    Each agent names its own variables (``TASK_CONFLUENCE_MAX_PAGES``,
     ``REVIEW_CONFLUENCE_MAX_PAGES``), so a shared module must not pick a winner.
     """
 

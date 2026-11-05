@@ -43,6 +43,61 @@ Four rules, each load-bearing:
 
 ---
 
+## One ticket, one job at a time — answered the moment you ask
+
+Every **build** or **review** is answered at once with a "processing" reply, and
+that same comment is **edited into the result** when the job ends — still one
+reply per comment. The ticket remembers what is running on it and the last
+review and build (issue property `aetherion-orchestration`), and the card shows
+one status label at a time (`ORCH_STATUS_LABELS`): `aetherion-reviewing` →
+`aetherion-reviewed`, `aetherion-building` → `aetherion-built`,
+`aetherion-pdf-ready`, `aetherion-needs-input`.
+
+**At once, when a job starts:**
+```
+AetherionAgent · ⏳ Reviewing BGV-32…
+What happened   Started. The result will replace this message — usually within 2 minutes.
+```
+
+**A build asked while a review runs** (it waits, then runs on the same ticket and uses the review):
+```
+AetherionAgent · ⏳ Build queued for BGV-32
+What happened   Waiting for the review of BGV-32 that started at 10:00 UTC to finish. This build
+                will then start by itself, on BGV-32, and its result will replace this message.
+```
+
+**The same job asked twice** — nothing new starts:
+```
+AetherionAgent · ⏳ Already reviewing BGV-32
+What happened   A review of BGV-32 started at 10:00 UTC is still running. Its result will appear
+                in that reply — nothing new was started.
+```
+
+**A review of a ticket that has not changed** since the last review: the last
+result is shown again, with "The ticket has not changed since the last review,
+so that review is shown again; no new review was run." No model call.
+
+**A build after a poor review** (below `ORCH_BUILD_MIN_READINESS`, default 3) of
+the unchanged ticket — nothing is created:
+```
+AetherionAgent · Build paused — the review scored BGV-32 2/5
+What happened   The last review of BGV-32 scored it 2/5, below the 3/5 needed to build, and the
+                ticket has not changed since. Nothing was created. Answer these in the
+                description (or attach them), then ask again — an edited ticket builds straight away:
+                - How is the employer contacted?
+                - What results can the officer mark?
+```
+After a review of 3/5 or more, the build runs and the review's open points
+appear under "Details I could not determine — please confirm" as
+"From the review: …". "Unchanged" means the summary, description and
+attachments are the same — the agent's own replies and labels do not count.
+
+If the "processing" reply cannot be posted at all, the job is **not started**
+(the administrators are emailed): work nobody is told about is worse than
+asking again.
+
+---
+
 ## Work breakdown created
 
 ```
@@ -435,10 +490,77 @@ When an email was wanted but did not go out, the reply says so and why:
 
 An outcome left out of `ORCH_NOTIFY_ON` is skipped silently — that is
 configuration, not a failure. `ORCH_NOTIFY_ON` uses the same four names as the
-work-breakdown agent's `LTW_NOTIFY_ON`. Both are set to
+work-breakdown agent's `TASK_NOTIFY_ON`. Both are set to
 `clarification,duplicates,failed` — the owner asked for no email on creation
 (2026-09-24), so a created breakdown's reply carries no Notification line.
 
 The email: subject `[Aetherion] <ticket> — <headline>`; body with the headline,
 a link to the ticket, the created keys / questions / existing matches / problems,
 and the run id. Admin alerts: subject `[Aetherion] ALERT — <what failed>`.
+
+## GitHub → Planning agent (2026-10-03)
+
+Each GitHub webhook event (since 2026-10-16 the only way: polling was removed)
+for a watched repository (`ORCH_GITHUB_ORG`, read-only `GITHUB_TOKEN`) gives the Planning
+agent (`ORCH_PLANNING_AGENT`, default `planning_agent`) its one input,
+`issue_text`, for:
+
+| On GitHub | Planning gets |
+|---|---|
+| A PR merged into `ORCH_GITHUB_BRANCH` (main) | **graph refresh only** (2026-10-08): `repos` = that repository's line from `ORCH_PLANNING_REPOS` (else `name: org/name`), no `issue_text` — so the next design sees the merged code; no TDD is written |
+| New comments on a PR | "New comments on a pull request (open) in org/repo …" — the PR, and only the comments not given before — with every repository in `ORCH_PLANNING_REPOS` |
+
+Watched: the organization's repositories and every repository in `ORCH_PLANNING_REPOS`
+(which may live outside it).
+
+- **Ignored:** PRs closed without merging, merges into other branches, bot comments, archived repos, repos outside `ORCH_GITHUB_REPOS` (when set).
+- **Each once:** what was sent is remembered on the Jira project `ORCH_GITHUB_STATE_PROJECT` (project properties, invisible to users).
+- **Never lost:** an event is stored before it is handed out. A failed Planning run is retried with the next event, up to `ORCH_GITHUB_MAX_TRIES` (5), then the admins are emailed.
+- **The run's result** says how many repos were checked and what was sent or failed.
+
+## After a build: Review → Planning → Coding (2026-10-08)
+
+Off until `ORCH_BUILD_PIPELINE` names the steps (`review,plan,code`). Then a build
+that created tickets (or found them, or planned them as a PDF) goes on, in the
+same one reply, edited as each step starts and ends:
+
+```
+✅ Review            readiness 4/5, 1 open point(s) — handed to Planning
+✅ Technical design  written — Attached to BGV-104: BGV-104-technical-design-….pdf
+✅ Pull request      raised — review and merge it in GitHub; nothing is merged automatically
+                     medical: https://github.com/…/pull/7 (tests passed)
+```
+
+- **Review** reads the ticket with its sub-tasks and linked tickets — what the build made.
+  A failed review does not stop Planning. `ORCH_PLAN_MIN_READINESS` (0 = never) pauses
+  Planning when the review scored lower.
+- **Planning** gets the request, every ticket's description (read fresh) and the review's
+  open points as `issue_text`, and `ORCH_PLANNING_REPOS` as `repos`. Its design (a PDF in the
+  agents' shared storage) is attached to the ticket.
+- **Coding** gets that PDF's storage key. When it raises no pull request, its reasons go back
+  to Planning for a revised design and it tries again (`ORCH_CODING_ATTEMPTS`, 2 in all) —
+  unless GitHub refused the token: a new design cannot fix that, so the reply says what the
+  token needs (Contents and Pull requests: read and write).
+- **A person** reviews and merges the PR. The merge reaches Planning through the GitHub
+  check above and refreshes the graph.
+- The ticket stays claimed for the whole chain, so a second request waits for it.
+
+## A request from this agent's form — nothing written to Jira (2026-10-08)
+
+Type a **Requirement**, attach **Files**, optionally a **Project Key** (searched for existing
+work, read only) and a **Minimum Review Score** (default `ORCH_REQUEST_MIN_READINESS`, 4), and run.
+No Issue Key. Jira is only read, by Task Creation, for work that already exists.
+
+| Step | Agent | Reads | Makes |
+|---|---|---|---|
+| 1 | Task Creation | the description and files | the breakdown PDF, kept in shared storage (and emailed) |
+| 2 | Requirement Review | that PDF and the files | a score (1-5) and its open points |
+| 3 | gate | the score | below the minimum: stops, with the points to answer |
+| 4 | Planning | the request, the breakdown, the points, the code graph | the TDD (PDF) |
+| 5 | Coding | the TDD | a pull request; when it cannot, the reasons go back to Planning |
+| 6 | a person | the PR | the merge, which refreshes Planning's graph (GitHub webhook) |
+
+The run's result lists each step (✅ ⏳ ❌ ➖), the download links (breakdown, every TDD
+version) and the PR links. On a laptop the PDFs are also in `docs-export/task-creation/`
+and `docs-export/pipeline/`. The steps are those of the Jira-comment flow above; only
+what Review reads, what Planning is given and where the design goes differ.

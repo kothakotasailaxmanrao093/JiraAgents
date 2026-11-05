@@ -71,7 +71,7 @@ def _story(title: str, subtasks: list[str]) -> dict[str, Any]:
 
 # The five Stories BGV-20 actually produced — no Story or Sub-task for the flag.
 LIVE_BGV20 = {
-    "classification": "Medium",
+    "classification": "Large",
     "analysis": "Several related capabilities.",
     "epic": {
         "business_objective": "Verify declared degrees, flagging Not found results.",
@@ -554,7 +554,7 @@ def test_a_team_managed_projects_subtask_spelling_is_used() -> None:
     from src.jira.client import resolve_issue_types
 
     types = resolve_issue_types(["Subtask", "Epic", "Story", "Bug", "Task"])
-    assert types == {"epic": "Epic", "story": "Story", "subtask": "Subtask"}
+    assert types == {"epic": "Epic", "story": "Story", "subtask": "Subtask", "task": "Task"}
 
 
 def test_a_company_managed_project_keeps_sub_task() -> None:

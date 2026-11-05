@@ -169,14 +169,15 @@ def _mentions_acceptance_criteria(description: str, documents: list[dict[str, An
 
     Deliberately generous: this decides whether to *tell someone off* for not
     writing criteria, and a false accusation is worse than a missed nudge. Any
-    recognisable form counts, in the description or in an attached spec.
+    recognisable form counts, in the description, an attached spec — or the
+    ticket's comments, where a person answers the review's questions (2026-10-08).
     """
     if _AC_HINTS.search(description):
         return True
     return any(
         _AC_HINTS.search(doc.get("text") or "")
         for doc in documents
-        if doc.get("kind") in ("attachment", "confluence", "requirement")
+        if doc.get("kind") in ("attachment", "confluence", "requirement", "target_comments")
     )
 
 

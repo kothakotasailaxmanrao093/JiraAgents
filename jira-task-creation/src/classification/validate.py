@@ -15,8 +15,6 @@ from dataclasses import dataclass
 
 from src.models.schemas import ResultStatus, ValidationVerdict
 
-MAX_REQUIREMENT_CHARS = 20_000
-
 EMPTY_MESSAGE = (
     "Please provide a project, feature, or business requirement before " "creating Jira work items."
 )
@@ -119,6 +117,10 @@ class ProjectContext:
     allowed_domains: tuple[str, ...] = ()
     jira_project_key: str = ""
     existing_titles: tuple[str, ...] = ()
+    # The card the work is built on, when there is one ("KS-17185", "Story").
+    # Its type fixes the structure; the card itself is never changed.
+    card_key: str = ""
+    card_type: str = ""
 
     @classmethod
     def from_jira(
@@ -154,12 +156,12 @@ class ProjectContext:
     @classmethod
     def from_env(cls, overrides: dict[str, str] | None = None) -> ProjectContext:
         over = overrides or {}
-        raw_domains = over.get("allowed_domains") or os.environ.get("LTW_ALLOWED_DOMAINS", "")
+        raw_domains = over.get("allowed_domains") or os.environ.get("TASK_ALLOWED_DOMAINS", "")
         domains = tuple(d.strip() for d in raw_domains.split(",") if d.strip())
         return cls(
-            name=(over.get("project_name") or os.environ.get("LTW_PROJECT_NAME", "")).strip(),
+            name=(over.get("project_name") or os.environ.get("TASK_PROJECT_NAME", "")).strip(),
             description=(
-                over.get("project_description") or os.environ.get("LTW_PROJECT_DESCRIPTION", "")
+                over.get("project_description") or os.environ.get("TASK_PROJECT_DESCRIPTION", "")
             ).strip(),
             allowed_domains=domains,
             jira_project_key=(
@@ -171,11 +173,13 @@ class ProjectContext:
 
     def as_prompt_text(self, *, for_breakdown: bool = False) -> str:
         """Render the context for the LLM. Says so explicitly when unconfigured."""
+        structure = card_structure(self.card_key, self.card_type) if for_breakdown else ""
         if not (self.name or self.description or self.allowed_domains):
-            return (
+            unconfigured = (
                 "No project context is configured. Judge relevance only on whether "
                 "the text is a project, product, software, or business requirement."
             )
+            return "\n\n".join(part for part in (unconfigured, structure) if part)
         lines = []
         if self.name:
             lines.append(f"Project name: {self.name}")
@@ -197,11 +201,44 @@ class ProjectContext:
                 "Tickets that already exist in this project (context only — "
                 f"do not propose stories that repeat them):\n{listed}"
             )
+        if structure:
+            lines.append(structure)
         return "\n".join(lines)
 
     @property
     def is_configured(self) -> bool:
         return bool(self.name or self.description or self.allowed_domains)
+
+
+def card_structure(card_key: str, card_type: str) -> str:
+    """The fixed structure for work built on an existing card (2026-10-07).
+
+    The person chose the card's type; the breakdown follows it and the card
+    itself is never changed. Empty when there is no card.
+    """
+    kind = (card_type or "").strip().lower()
+    if not (card_key and kind):
+        return ""
+    head = (
+        f"STRUCTURE (fixed): the work is built on {card_key}, which is a {card_type} "
+        f"and stays one — it is not changed, re-typed or re-titled."
+    )
+    if kind == "epic":
+        return (
+            f"{head} Write the Stories that go under {card_key}, each with its Subtasks. "
+            f"Classify Large with two or more Stories (any Epic you write stands for "
+            f"{card_key} itself and is not created), or Small/Medium with one Story."
+        )
+    steps = (
+        "with the Subtasks needed to deliver it (usually 2 to 4)"
+        if kind == "story"
+        else "with Subtasks only when the work has two or more real steps"
+    )
+    return (
+        f"{head} Write exactly ONE story entry: it stands for {card_key} itself, "
+        f"{steps}. Classification is Small or Medium; no Epic, and never split the work "
+        f"into several Stories."
+    )
 
 
 def normalise(text: object) -> str:
@@ -321,15 +358,10 @@ def validate_input(raw: object, context: ProjectContext | None = None) -> Valida
             validation_errors=["Requirement description is empty."],
         )
 
-    if len(text) > MAX_REQUIREMENT_CHARS:
-        return ValidationVerdict(
-            status=ResultStatus.VALIDATION_ERROR,
-            reason=(
-                f"The requirement is longer than the supported "
-                f"{MAX_REQUIREMENT_CHARS} characters. Please summarise it."
-            ),
-            validation_errors=[f"Requirement exceeds {MAX_REQUIREMENT_CHARS} characters."],
-        )
+    # No length refusal here (2026-10-06). A long request is real work — an
+    # hour-long transcript, a 40-page spec — and refusing it lost KS-17185
+    # entirely. Size is handled before this gate, by condensing what does not
+    # fit the model (src/context/condense.py), never by asking the person to.
 
     if len(text) < 10 or len(_WORD_RE.findall(text)) < 3:
         return ValidationVerdict(

@@ -8,6 +8,7 @@ we coerce common casing/synonym variations, drop rows we cannot make sense of
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from .models import Confidence, Finding, FindingType, Priority, Readiness, ReadinessLevel, Review
@@ -176,3 +177,47 @@ def parse_readiness(raw: Any) -> Readiness | None:
         summary = ""
 
     return Readiness(level=level, score=score, executive_summary=summary)
+
+
+# --------------------------------------------------------------------------
+# Bug investigation (2026-10-22)
+# --------------------------------------------------------------------------
+
+_MAX_LIST = 8
+
+
+def _text(value: Any, limit: int = 1200) -> str:
+    return str(value or "").strip()[:limit]
+
+
+# A "missing information" item that asks the reporter for code (2026-10-23): the
+# code is Planning's to read when it investigates the bug, never the reporter's.
+_ASKS_FOR_CODE = re.compile(
+    r"\b(code|source files?|files?|modules?|functions?|handlers?|librar(y|ies)|frameworks?"
+    r"|components?|repositor(y|ies)|implementation|class(es)?)\b",
+    re.IGNORECASE,
+)
+
+
+def parse_investigation(raw: dict[str, Any] | None) -> dict[str, Any]:
+    """The bug report as the review read it: actual, expected, the cause the
+    report itself states, and what the reporter still has to supply.
+
+    Review judges the report only (2026-10-26); the root cause in the code, the
+    affected files and the fix come from the Planning agent's investigation.
+    Returns {} when there is no investigation block at all.
+    """
+    block = (raw or {}).get("investigation")
+    if not isinstance(block, dict):
+        return {}
+    out = {
+        "actual": _text(block.get("actual"), 500),
+        "expected": _text(block.get("expected"), 500),
+        "suspected_cause_from_report": _text(block.get("suspected_cause_from_report"), 600),
+        "missing_information": [
+            _text(m, 400)
+            for m in (block.get("missing_information") or [])
+            if _text(m) and not _ASKS_FOR_CODE.search(_text(m))
+        ][:_MAX_LIST],
+    }
+    return out if any(out.values()) else {}

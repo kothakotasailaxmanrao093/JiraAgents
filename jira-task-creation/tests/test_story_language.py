@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.classification.decompose import _article_for, heuristic_breakdown
 from src.classification.validate import ProjectContext
+from tests.heuristic_breakdown import _article_for, heuristic_breakdown
 
 CTX = ProjectContext(
     name="FleetLink",

@@ -87,7 +87,7 @@ def test_an_empty_issue_says_so_rather_than_producing_nothing() -> None:
 
 def test_sections_are_dropped_lowest_value_first(monkeypatch: pytest.MonkeyPatch) -> None:
     # A budget that fits the description and little else.
-    monkeypatch.setenv("LTW_CONTEXT_MAX_CHARS", "1000")
+    monkeypatch.setenv("TASK_ASSEMBLY_MAX_CHARS", "1000")
     source = full_issue()
     source.comments = [CommentInfo(author="Ann", body="x" * 400)]
     source.history = [HistoryEntry(field="status", to_value="y" * 400)]
@@ -103,7 +103,7 @@ def test_sections_are_dropped_lowest_value_first(monkeypatch: pytest.MonkeyPatch
 def test_an_oversized_description_is_truncated_and_the_note_says_so(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("LTW_CONTEXT_MAX_CHARS", "1000")
+    monkeypatch.setenv("TASK_ASSEMBLY_MAX_CHARS", "1000")
     source = SourceIssue(key="KS-1", summary="Big", description="d" * 5_000)
     text, notes = assemble_requirement(source)
     assert len(text) == 1_000
@@ -111,12 +111,17 @@ def test_an_oversized_description_is_truncated_and_the_note_says_so(
 
 
 def test_context_budget_is_configurable_and_floored(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LTW_CONTEXT_MAX_CHARS", "50000")
+    monkeypatch.setenv("TASK_ASSEMBLY_MAX_CHARS", "50000")
     assert max_context_chars() == 50_000
-    monkeypatch.setenv("LTW_CONTEXT_MAX_CHARS", "10")
+    monkeypatch.setenv("TASK_ASSEMBLY_MAX_CHARS", "10")
     assert max_context_chars() == 1_000, "a nonsensically small budget is floored"
-    monkeypatch.setenv("LTW_CONTEXT_MAX_CHARS", "not-a-number")
-    assert max_context_chars() == 24_000
+    monkeypatch.setenv("TASK_ASSEMBLY_MAX_CHARS", "not-a-number")
+    assert max_context_chars() == 1_000_000
+    # The model budget (TASK_CONTEXT_MAX_CHARS) no longer cuts the card here:
+    # condensing fits it afterwards, without dropping a transcript.
+    monkeypatch.setenv("TASK_ASSEMBLY_MAX_CHARS", "")
+    monkeypatch.setenv("TASK_CONTEXT_MAX_CHARS", "1000")
+    assert max_context_chars() == 1_000_000
 
 
 def test_source_counts_report_only_usable_attachments() -> None:
@@ -177,7 +182,7 @@ def test_an_all_instruction_description_is_left_alone() -> None:
 
 
 def test_stripping_respects_a_custom_keyword(monkeypatch) -> None:
-    monkeypatch.setenv("LTW_TRIGGER_KEYWORD", "Jarvis")
+    monkeypatch.setenv("TASK_TRIGGER_KEYWORD", "Jarvis")
     source = requested("Jarvis please create the tickets. Track fuel spend per vehicle.")
     text, _ = assemble_requirement(source)
     assert "please create the tickets" not in text
@@ -191,8 +196,8 @@ def test_context_sections_are_kept_out_of_the_heuristic_breakdown() -> None:
     heuristic fallback cannot read that, so it gets the requirement sections
     alone. Found live on TT2-107, where a comment became its own Story.
     """
-    from src.classification.decompose import heuristic_breakdown
     from src.classification.validate import ProjectContext
+    from tests.heuristic_breakdown import heuristic_breakdown
 
     source = SourceIssue(
         key="TT2-107",
@@ -280,8 +285,8 @@ def test_a_bare_keyword_used_as_a_subject_is_not_stripped() -> None:
 
 
 def test_a_mention_never_reaches_a_story_title() -> None:
-    from src.classification.decompose import heuristic_breakdown
     from src.classification.validate import ProjectContext
+    from tests.heuristic_breakdown import heuristic_breakdown
 
     source = SourceIssue(
         key="TT2-200",
@@ -299,7 +304,7 @@ def test_a_mention_never_reaches_a_story_title() -> None:
 
 
 def test_mention_stripping_respects_a_custom_keyword(monkeypatch) -> None:
-    monkeypatch.setenv("LTW_TRIGGER_KEYWORD", "Jarvis")
+    monkeypatch.setenv("TASK_TRIGGER_KEYWORD", "Jarvis")
     source = requested("@Jarvis Track fuel spend per vehicle.")
     text, _ = assemble_requirement(source)
     assert "Jarvis" not in text.split("## Stated requirement", 1)[1].split("\n", 1)[1]
@@ -377,8 +382,8 @@ def requested(request: str) -> SourceIssue:
 
 
 def test_a_mention_in_the_request_never_reaches_a_story_title() -> None:
-    from src.classification.decompose import heuristic_breakdown
     from src.classification.validate import ProjectContext
+    from tests.heuristic_breakdown import heuristic_breakdown
 
     source = requested(
         "@Aetherion Create a login feature for all users, including email and "
@@ -622,9 +627,9 @@ def test_a_contradicting_page_is_left_out_of_the_work_items() -> None:
     Customers may store up to five saved cards" — the contradiction baked into
     the work item. Saying the ticket was used has to be true.
     """
-    from src.classification.decompose import heuristic_breakdown
     from src.classification.validate import ProjectContext
     from src.context.ingest import assemble_requirement
+    from tests.heuristic_breakdown import heuristic_breakdown
 
     source = _payments(
         "Customers may store one saved card per customer.",
@@ -641,9 +646,9 @@ def test_a_contradicting_page_is_left_out_of_the_work_items() -> None:
 
 def test_a_page_that_agrees_is_still_used() -> None:
     """The counterweight: only a contradicting page is dropped."""
-    from src.classification.decompose import heuristic_breakdown
     from src.classification.validate import ProjectContext
     from src.context.ingest import assemble_requirement
+    from tests.heuristic_breakdown import heuristic_breakdown
 
     source = _payments(
         "Customers may store one saved card.",

@@ -150,12 +150,12 @@ mistaken for a bad requirement when the truth is the spec was never opened.
 
 **Two size limits, both honest about what they did:**
 
-- *Per file* (`LTW_ATTACHMENT_MAX_CHARS`, 20,000). `fit_to_budget` keeps the
+- *Per file* (`TASK_ATTACHMENT_MAX_CHARS`, 20,000). `fit_to_budget` keeps the
   opening **and** the ending, splitting on blank lines, and writes
   `[... N characters omitted from the middle ...]` into the text. Plain
   truncation used to keep only the opening, which is the worst half to keep —
   scope, limits and acceptance criteria are almost always at the end.
-- *Overall* (`LTW_CONTEXT_MAX_CHARS`, 24,000). Whole sections are dropped,
+- *Overall* (`TASK_CONTEXT_MAX_CHARS`, 24,000). Whole sections are dropped,
   least valuable first (work log, then history, then comments…), never cut
   mid-sentence, and each drop is named in the reply.
 
@@ -213,7 +213,7 @@ The requirement text is byte-identical on every re-post, so it is the only
 dependable comparison. Measured on the real project: the genuine duplicate
 scored **0.833**, the nearest unrelated ticket **0.333**.
 
-Closed work is ignored by default (`LTW_MATCH_CLOSED_WORK=false`). Work closed
+Closed work is ignored by default (`TASK_MATCH_CLOSED_WORK=false`). Work closed
 as "Won't Do" is a decision *not* to build something; that is not a reason to
 refuse a new request.
 
@@ -227,9 +227,9 @@ Size is decided first, from the number of distinct capabilities asked for:
 | Medium | One Epic, Stories, Sub-tasks |
 | Large | One Epic, more Stories, Sub-tasks |
 
-Wording comes from the language model where available. When the gateway is
-unreachable, `heuristic_breakdown` produces the same structure with plainer
-wording, and the reply says so — the tickets still appear, just thinner.
+Wording comes from the language model. When the model cannot produce the
+breakdown, nothing is created and the reply says so (owner decision,
+2026-09-25). The tests use a model-free stand-in, `tests/heuristic_breakdown.py`.
 
 Whatever wrote them, **every item is validated before anything reaches Jira**:
 required fields present, the user story in *"As a … I want to … so that …"*
@@ -294,7 +294,6 @@ It may **not** read settings — see Part 5.
 | `create_jira_issues` | Writes the hierarchy to Jira |
 | `report_to_issue` | Posts the reply comment and sets the marker labels |
 | `notify_email` | Sends the email, or decides not to |
-| `jira_configuration_status` | Reports whether Jira is correctly configured |
 
 ### `src/context/` — reading the ticket
 
@@ -355,12 +354,10 @@ Supported: PDF, `.doc`, `.docx`, `.xls`, `.xlsx`, `.pptx`, `.csv`, `.json`,
 
 | Function | What it does |
 |---|---|
-| `build_breakdown` | The entry point. Prefers the model, falls back cleanly |
-| `heuristic_breakdown` | A valid breakdown with no model at all |
+| `build_breakdown` | The entry point. The model's breakdown, or nothing |
 | `llm_breakdown` | Asks the model, validates the answer against the schema |
 | `triage` / `llm_triage` | Second opinion on scope and missing information |
 | `split_capabilities` | Splits a requirement into distinct things being asked for |
-| `classify` | Small / Medium / Large, from that count |
 | `extract_actor` | Splits "allow tenants to X" into `("tenants", "X")` |
 | `to_infinitive` | Makes the action read correctly after "I want to …" |
 | `drop_excluded` | Removes capabilities a later comment ruled out |

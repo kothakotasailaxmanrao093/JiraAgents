@@ -213,3 +213,11 @@ async def test_search_jql_empty_results():
     client, session = _client()
     session.search_results = []
     assert await client.search_jql("project = ABC") == []
+
+
+def test_a_long_comment_is_read_in_full():
+    """A 2,500-character answer lost everything after 1,000 characters (2026-10-15)."""
+    client, _ = _client()
+    answer = "1. Limit is 50,000 per day. " + ("detail " * 350) + "7. Admins can override it."
+    bundle = client.extract_bundle(_issue("ABC-9", desc="d", comments=[("PO", answer)]))
+    assert bundle["comments"][0]["body"].endswith("7. Admins can override it.")

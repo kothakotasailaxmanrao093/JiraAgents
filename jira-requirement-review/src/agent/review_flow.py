@@ -44,19 +44,106 @@ REPORT_EMAIL_ACTIVITY = "send_review_report_email"
 REPORT_EMAIL_TEMPLATE = "jira_requirement_review_report"
 
 
-def resolve_transcript_file_key(payload: dict[str, Any]) -> str | None:
-    """First non-empty transcript file key across the known payload keys.
+def resolve_transcript_file_keys(payload: dict[str, Any]) -> list[str]:
+    """Every uploaded file's storage key, from the first payload key that has any.
 
-    Tolerates a list value (some upload mechanisms pass a list of keys) by taking
-    its first element.
+    The form's upload field takes several files (a transcript and a spec, say);
+    the platform sends their keys as a list, or a comma-separated string.
     """
     for key in _TRANSCRIPT_KEYS:
         value = payload.get(key)
-        if isinstance(value, list):
-            value = value[0] if value else None
-        if value and str(value).strip():
-            return str(value).strip()
-    return None
+        items = value if isinstance(value, list) else str(value or "").split(",")
+        keys = [str(item).strip() for item in items if str(item or "").strip()]
+        if keys:
+            return list(dict.fromkeys(keys))
+    return []
+
+
+PREVIOUS_REVIEW_LABEL = "Previous review's open questions"
+
+
+# Card types investigated as bugs rather than reviewed as requirements.
+BUG_TYPES = frozenset({"bug", "defect"})
+
+
+def bug_report_markdown(investigation: dict[str, Any]) -> str:
+    """A bug review's sections as markdown, for the direct path's draft."""
+    lines = ["### Bug report", ""]
+    if investigation.get("actual"):
+        lines.append(f"**Actual:** {investigation['actual']}")
+    if investigation.get("expected"):
+        lines.append(f"**Expected:** {investigation['expected']}")
+    if investigation.get("suspected_cause_from_report"):
+        lines.append(
+            f"**Cause stated in the report:** {investigation['suspected_cause_from_report']}"
+        )
+    missing = investigation.get("missing_information") or []
+    if missing:
+        lines += ["", "**Information still needed:**", *[f"- {m}" for m in missing]]
+    else:
+        lines += ["", "**Information still needed:** none — the report is enough to investigate."]
+    return "\n".join(lines) + "\n\n"
+
+
+def previous_review_document(questions: list[str]) -> dict[str, Any]:
+    """The last review's questions, for this review to check against the comments.
+
+    The person answers in the ticket's comments and asks again (2026-10-08). A
+    question a later comment answers is settled: it must not be asked again.
+    Only what is still open — or newly found — is reported.
+    """
+    lines = "\n".join(f"- {q}" for q in questions)
+    return {
+        "source_id": "previous_review",
+        "source_label": PREVIOUS_REVIEW_LABEL,
+        "kind": "review_history",
+        "text": (
+            "These questions were asked by the previous review of this ticket. Read the "
+            "ticket's comments for answers. Treat a question a comment answers as settled and "
+            "do not raise it again; report a question only if it is still unanswered, and use "
+            "the answers as part of the requirement.\n" + lines
+        ),
+        "metadata": {"count": len(questions)},
+    }
+
+
+def questions_from(findings: list[dict[str, Any]]) -> list[str]:
+    """The open questions, lifted out so the router can show them as questions.
+
+    Only the two genuinely interrogative categories: everything else is a
+    statement about the ticket, and listing it under "questions" would tell the
+    reader to answer something that is not a question.
+    """
+    wanted = {"open_question", "dependency_question"}
+    out: list[str] = []
+    for finding in findings:
+        # Findings carry ``finding_type`` ("Open Question"); this read ``category``,
+        # which no finding has, so no question was ever listed (2026-10-26).
+        kind = finding.get("finding_type") or finding.get("category") or ""
+        category = str(kind).strip().lower().replace(" ", "_")
+        text = str(finding.get("description") or finding.get("title") or "").strip()
+        if category in wanted and text and text not in out:
+            out.append(text)
+    return out
+
+
+def resolve_document_keys(payload: dict[str, Any]) -> list[str]:
+    """The documents to review when there is no ticket (2026-10-08).
+
+    The orchestrator names them (``document_file_keys``: Task Creation's PDF
+    and the files the person attached). On this agent's own form, files
+    uploaded with no Issue Key and no query are the documents themselves.
+    """
+    named = payload.get("document_file_keys")
+    if named:
+        items = named if isinstance(named, list) else str(named).split(",")
+        return list(dict.fromkeys(str(i).strip() for i in items if str(i or "").strip()))
+    if (
+        str(payload.get("issue_key") or "").strip()
+        or str(payload.get("jql_override") or "").strip()
+    ):
+        return []
+    return resolve_transcript_file_keys(payload)
 
 
 async def _review_one_issue(
@@ -69,27 +156,48 @@ async def _review_one_issue(
     include_attachments: bool,
     include_confluence: bool,
     trigger_comment_id: str | None,
-    transcript_file_key: str | None,
+    transcript_file_keys: list[str],
     team_id: str | None,
     model_id: str | None,
     post_to_jira: bool,
     workflow_id: str | None,
+    document_keys: list[str] | None = None,
+    previous_questions: list[str] | None = None,
+    review_kind: str = "requirement",
+    memory_document: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the full context-gather -> analyze -> render -> (optional post) pipeline
-    for one issue and return a single structured result dict."""
-    ctx = await execute(
-        "gather_context",
-        issue_key,
-        include_parent,
-        include_subtasks,
-        include_linked_issues,
-        include_attachments,
-        include_confluence,
-        trigger_comment_id,
-        transcript_file_key,
-        team_id,
-        start_to_close_timeout=timedelta(minutes=2),
-    )
+    for one issue and return a single structured result dict.
+
+    With ``document_keys`` there is no ticket: those files are what is reviewed,
+    under the label ``issue_key``, and nothing can be posted (2026-10-08).
+
+    ``memory_document``: what the router remembers about this card and earlier
+    work (2026-10-30) — read as one more source. The review keeps nothing.
+    """
+    if document_keys:
+        post_to_jira = False
+        ctx = await execute(
+            "gather_documents",
+            document_keys,
+            issue_key,
+            team_id,
+            start_to_close_timeout=timedelta(minutes=2),
+        )
+    else:
+        ctx = await execute(
+            "gather_context",
+            issue_key,
+            include_parent,
+            include_subtasks,
+            include_linked_issues,
+            include_attachments,
+            include_confluence,
+            trigger_comment_id,
+            transcript_file_keys,
+            team_id,
+            start_to_close_timeout=timedelta(minutes=2),
+        )
     if ctx.get("error"):
         return {
             "status": "error",
@@ -110,13 +218,25 @@ async def _review_one_issue(
             ),
         }
 
+    documents = list(ctx.get("documents", []))
+    if previous_questions:
+        documents.append(previous_review_document(previous_questions))
+    if memory_document and not document_keys:
+        documents.append(memory_document)
+
+    # A bug's REPORT is reviewed (2026-10-26): asked for by the router
+    # (review_kind="bug"), or because the card itself is a Bug. Review never
+    # reads code; the Planning agent investigates the code separately.
+    target_type = str((ctx.get("target_bundle") or {}).get("issue_type") or "")
+    is_bug = review_kind == "bug" or target_type.strip().lower() in BUG_TYPES
     analysis = await execute(
         "analyze_requirement",
-        ctx.get("documents", []),
+        documents,
         issue_key,
         ctx.get("issue_summary"),
         model_id,
         bool((ctx.get("target_bundle") or {}).get("is_subtask")),
+        "bug" if is_bug else "requirement",
         start_to_close_timeout=timedelta(minutes=5),
     )
     if analysis.get("error") and not analysis.get("findings"):
@@ -141,7 +261,12 @@ async def _review_one_issue(
     draft = rendered.get("comment_markdown", "")
     findings = analysis.get("findings", [])
     by_category = rendered.get("by_category", {})
-    warnings = ctx.get("warnings", [])
+    warnings = list(ctx.get("warnings", []))
+    investigation = dict(analysis.get("investigation") or {})
+    if is_bug and investigation:
+        # The direct path reports through the draft, so a bug review's own
+        # sections go at its top (2026-10-26).
+        draft = bug_report_markdown(investigation) + draft
 
     result: dict[str, Any] = {
         "issue_key": issue_key,
@@ -150,12 +275,14 @@ async def _review_one_issue(
         "by_category": by_category,
         "findings": findings,
         "readiness": readiness,
+        "review_kind": "bug" if is_bug else "requirement",
+        "investigation": investigation,
         # Open questions the ticket already lists — not repeated as findings.
         "known_questions": analysis.get("known_questions") or [],
         "warnings": warnings,
         # Carried so the delegated path can account for what was read and what
         # was not. Unused by the direct path, which reports through the draft.
-        "documents": ctx.get("documents") or [],
+        "documents": list(ctx.get("documents") or []),
         "target_bundle": ctx.get("target_bundle") or {},
         "counts": ctx.get("counts") or {},
     }
@@ -238,15 +365,17 @@ async def run_review(
 ) -> list[dict]:
     issue_key = str(payload.get("issue_key") or "").strip()
     jql_override = str(payload.get("jql_override") or "").strip()
+    document_keys = resolve_document_keys(payload)
 
-    if not issue_key and not jql_override:
+    if not issue_key and not jql_override and not document_keys:
         return [
             {
                 "status": "error",
                 "error": "issue_key_or_jql_required",
                 "message": (
-                    "Provide 'issue_key' (e.g. ABC-123) or a Sprint/JQL query "
-                    "('jql_override', e.g. 'sprint = \"Sprint 42\"')."
+                    "Provide 'issue_key' (e.g. ABC-123), a Sprint/JQL query "
+                    "('jql_override', e.g. 'sprint = \"Sprint 42\"'), or upload the "
+                    "documents to review."
                 ),
             }
         ]
@@ -258,11 +387,16 @@ async def run_review(
         include_attachments=flag(payload, "include_attachments"),
         include_confluence=flag(payload, "include_confluence"),
         trigger_comment_id=str(payload.get("comment_id") or "").strip() or None,
-        transcript_file_key=resolve_transcript_file_key(payload),
+        transcript_file_keys=resolve_transcript_file_keys(payload),
         team_id=payload.get("team_id"),
         model_id=payload.get("model_id"),
         post_to_jira=flag(payload, "post_to_jira"),
         workflow_id=workflow_id,
+        previous_questions=[
+            str(q) for q in payload.get("previous_questions") or [] if str(q).strip()
+        ],
+        review_kind=str(payload.get("review_kind") or "requirement").strip().lower(),
+        memory_document=dict(payload.get("memory_document") or {}) or None,
     )
     generate_docx = flag(payload, "generate_docx")
     # TEMPORARILY DISABLED: email delivery is not exposed as a trigger (see
@@ -271,7 +405,12 @@ async def run_review(
     # Re-enable by restoring `bool(payload.get("send_email", False))` once confirmed.
     send_email = False
 
-    if jql_override:
+    if document_keys and not issue_key and not jql_override:
+        # No ticket: review the documents themselves (2026-10-08).
+        label = str(payload.get("document_title") or "").strip() or "Document review"
+        logger.info("Requirement review starting (documents): %d file(s)", len(document_keys))
+        results = [await _review_one_issue(label, execute, **common, document_keys=document_keys)]
+    elif jql_override:
         label = jql_override
         logger.info("Requirement review starting (batch): jql=%s wf=%s", jql_override, workflow_id)
         search = await execute(
@@ -326,6 +465,16 @@ async def run_review(
                     "title": f"Requirement Review Report — {label}",
                     "file_key": s3_key,
                     "label": "Download Review Report",
+                    "extension": report.get("extension", "docx"),
+                }
+            )
+        elif generate_docx and report.get("local_path"):
+            # A laptop run: the report was saved on disk, not uploaded.
+            output.append(
+                {
+                    "type": "local_file",
+                    "title": f"Requirement Review Report — {label}",
+                    "path": report["local_path"],
                     "extension": report.get("extension", "docx"),
                 }
             )

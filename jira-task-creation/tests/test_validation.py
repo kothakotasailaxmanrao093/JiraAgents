@@ -85,10 +85,12 @@ def test_real_requirements_clear_the_gate(raw):
     assert validate_input(raw).may_proceed
 
 
-def test_oversized_input_is_rejected_without_truncation():
+def test_long_input_is_not_refused_for_its_length():
+    # 2026-10-06: a long requirement is condensed to fit the model before this
+    # gate (src/context/condense.py); refusing it lost KS-17185 entirely.
     verdict = validate_input("Add a reporting feature. " * 2000)
-    assert verdict.status is ResultStatus.VALIDATION_ERROR
-    assert "characters" in verdict.reason
+    assert verdict.status is not ResultStatus.VALIDATION_ERROR
+    assert "characters" not in (verdict.reason or "")
 
 
 def test_normalise_handles_none_and_non_strings():
@@ -98,8 +100,8 @@ def test_normalise_handles_none_and_non_strings():
 
 
 def test_project_context_reads_the_environment(monkeypatch):
-    monkeypatch.setenv("LTW_PROJECT_NAME", "Atlas")
-    monkeypatch.setenv("LTW_ALLOWED_DOMAINS", " billing , onboarding ")
+    monkeypatch.setenv("TASK_PROJECT_NAME", "Atlas")
+    monkeypatch.setenv("TASK_ALLOWED_DOMAINS", " billing , onboarding ")
     monkeypatch.setenv("JIRA_PROJECT_KEY", "abc")
     context = ProjectContext.from_env()
     assert context.name == "Atlas"

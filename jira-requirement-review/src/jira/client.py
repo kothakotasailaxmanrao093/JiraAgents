@@ -19,7 +19,6 @@ import aiohttp
 
 from config import (
     MAX_ATTACHMENTS,
-    MAX_CHARS_PER_COMMENT,
     MAX_COMMENTS_PER_ISSUE,
     MAX_DESC_CHARS,
     MAX_JQL_RESULTS,
@@ -102,7 +101,7 @@ class JiraClient:
             -MAX_COMMENTS_PER_ISSUE:
         ]:  # most recent N (Jira returns oldest-first)
             author = (c.get("author") or {}).get("displayName")
-            body = http.adf_to_text(c.get("body"))[:MAX_CHARS_PER_COMMENT]
+            body = http.adf_to_text(c.get("body"))  # in full
             if body:
                 comments.append(
                     {
@@ -156,6 +155,8 @@ class JiraClient:
             "comments": comments,
             "parent_key": parent.get("key"),
             "is_subtask": bool((fields.get("issuetype") or {}).get("subtask")),
+            # "Bug" turns a review into a bug investigation (2026-10-22).
+            "issue_type": (fields.get("issuetype") or {}).get("name") or "",
             "subtask_total": len(subtask_keys),  # full count, before the cap
             "subtask_keys": subtask_keys[:MAX_SUBTASKS],
             "linked_issues_total": len(linked_issues),  # full count, before the cap

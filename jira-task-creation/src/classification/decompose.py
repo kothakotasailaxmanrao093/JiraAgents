@@ -8,6 +8,7 @@ response is a caught error rather than a bad Jira Epic.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -32,14 +33,7 @@ from src.classification.self_review import (
 )
 from src.classification.validate import ProjectContext, has_action_intent, starts_with_verb
 from src.config.settings import env_bool
-from src.context.ingest import requirement_core
 from src.models.schemas import (
-    NO_DEPENDENCIES,
-    NOT_SPECIFIED,
-    Classification,
-    Complexity,
-    Epic,
-    Priority,
     ResultStatus,
     Story,
     Subtask,
@@ -48,14 +42,18 @@ from src.models.schemas import (
     allow_source_files_from,
     statement_reads_badly,
 )
+from src.observability.timing import stage
 from src.prompts.templates import (
     SYSTEM_PROMPT,
     breakdown_prompt,
     coverage_instructions,
     duplicate_adjudication_prompt,
+    plan_prompt,
     related_ticket_prompt,
+    story_prompt,
     triage_prompt,
 )
+from src.shared import llm
 
 logger = setup_logger(__name__)
 
@@ -71,8 +69,8 @@ class DecompositionError(RuntimeError):
 
 
 def _llm_settings() -> tuple[str, str]:
-    provider = os.environ.get("LTW_LLM_PROVIDER", DEFAULT_PROVIDER).strip() or DEFAULT_PROVIDER
-    model = os.environ.get("LTW_LLM_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
+    provider = os.environ.get("TASK_LLM_PROVIDER", DEFAULT_PROVIDER).strip() or DEFAULT_PROVIDER
+    model = os.environ.get("TASK_LLM_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
     return provider, model
 
 
@@ -80,8 +78,8 @@ DEFAULT_MAX_TOKENS = 16000
 
 
 def _max_tokens() -> int:
-    """``LTW_LLM_MAX_TOKENS``, or 16000 — within gpt-4o's 16,384 output cap."""
-    raw = os.environ.get("LTW_LLM_MAX_TOKENS", "").strip()
+    """``TASK_LLM_MAX_TOKENS``, or 16000 — within gpt-4o's 16,384 output cap."""
+    raw = os.environ.get("TASK_LLM_MAX_TOKENS", "").strip()
     try:
         value = int(raw) if raw else DEFAULT_MAX_TOKENS
     except ValueError:
@@ -91,7 +89,7 @@ def _max_tokens() -> int:
 
 def llm_required() -> bool:
     """When true, a gateway failure fails the run instead of falling back."""
-    return env_bool("LTW_REQUIRE_LLM")
+    return env_bool("TASK_REQUIRE_LLM")
 
 
 def _strip_fences(text: str) -> str:
@@ -133,23 +131,79 @@ def _parse_json_object(text: str) -> dict[str, Any]:
 
 
 async def _chat(prompt: str) -> str:
-    """One gateway round-trip. Imported lazily so tests need no gateway."""
+    """One gateway round-trip on the main model (TASK_LLM_MODEL)."""
+    return await _gateway_chat(prompt, _llm_settings()[1])
+
+
+async def condense_chat(prompt: str, system_prompt: str) -> str:
+    """The main model with the caller's own instructions (condensing).
+
+    The main model, not the fast one: a condensed transcript is what the
+    breakdown is written from, so a lost number or rule is a wrong ticket.
+    """
+    return await _gateway_chat(prompt, _llm_settings()[1], system_prompt=system_prompt)
+
+
+def fast_model() -> str:
+    """TASK_LLM_FAST_MODEL: a quicker model for the two yes/no checks, or "".
+
+    Only "is this a requirement?" (triage) and "is the ticket asked on
+    related?" use it — short answers where a smaller model is as good. The
+    breakdown, its self-review, the duplicate second opinion and the repairs
+    stay on the main model: those decide what the tickets say (2026-09-30).
+    """
+    return os.environ.get("TASK_LLM_FAST_MODEL", "").strip()
+
+
+async def _chat_fast(prompt: str) -> str:
+    """The fast model when one is set — and the main model if it fails."""
+    model = fast_model()
+    if not model:
+        return await _chat(prompt)
+    try:
+        return await _gateway_chat(prompt, model)
+    except Exception as exc:  # noqa: BLE001 — the main model answers instead
+        logger.info(f"Fast model {model} unavailable ({exc}); asking the main model")
+        return await _chat(prompt)
+
+
+async def _gateway_chat(prompt: str, model: str, system_prompt: str = SYSTEM_PROMPT) -> str:
+    """One gateway round-trip. Imported lazily so tests need no gateway.
+
+    ``system_prompt`` is the breakdown persona unless a caller doing other work
+    (condensing a long transcript) brings its own.
+    """
     from agent_lib.gateway.ai import AiGatewayClient
 
-    provider, model = _llm_settings()
-    async with AiGatewayClient() as client:
-        reply = await client.chat(
-            provider=provider,
-            model_name=model,
-            prompt=prompt,
-            system_prompt=SYSTEM_PROMPT,
-            temperature=0.2,
-            # Explicit, and large: with the gateway's default a Large breakdown
-            # (an Epic, a dozen Stories, their Sub-tasks) was cut off mid-JSON,
-            # failed to parse, and silently became a heuristic breakdown.
-            max_tokens=_max_tokens(),
-        )
-    content = (reply or {}).get("content") or ""
+    provider = _llm_settings()[0]
+    # Which call this is, from the prompt's own opening words — enough to tell
+    # triage from breakdown from a retry in the log without widening _chat.
+    purpose = prompt.strip().split("\n", 1)[0][:48].replace(" ", "_")
+    with stage("llm", model=model, purpose=purpose, prompt_chars=len(prompt)) as fields:
+        if llm.direct_openai():  # a laptop run: no gateway there
+            content = await llm.openai_chat(
+                provider=provider,
+                model=model,
+                prompt=prompt,
+                system_prompt=system_prompt,
+                temperature=0.2,
+                max_tokens=_max_tokens(),
+            )
+        else:
+            async with AiGatewayClient() as client:
+                reply = await client.chat(
+                    provider=provider,
+                    model_name=model,
+                    prompt=prompt,
+                    system_prompt=system_prompt,
+                    temperature=0.2,
+                    # Explicit, and large: with the gateway's default a Large breakdown
+                    # (an Epic, a dozen Stories, their Sub-tasks) was cut off mid-JSON,
+                    # failed to parse, and silently became a heuristic breakdown.
+                    max_tokens=_max_tokens(),
+                )
+            content = (reply or {}).get("content") or ""
+        fields["reply_chars"] = len(content)
     if not content.strip():
         raise DecompositionError("Model returned an empty response.")
     return content
@@ -204,7 +258,7 @@ _VERDICT_TO_STATUS = {
 
 async def llm_triage(requirement: str, context: ProjectContext) -> ValidationVerdict:
     """Second-opinion triage: scope, relevance, and missing information."""
-    raw = await _chat(triage_prompt(requirement, context.as_prompt_text()))
+    raw = await _chat_fast(triage_prompt(requirement, context.as_prompt_text()))
     data = _parse_json_object(raw)
 
     verdict = str(data.get("verdict", "")).strip().upper()
@@ -275,7 +329,7 @@ async def llm_related(key: str, summary: str, description: str, request: str) ->
     that does not exist. Raises when the model gives no usable verdict.
     """
     data = _parse_json_object(
-        await _chat(related_ticket_prompt(key, summary, description, request))
+        await _chat_fast(related_ticket_prompt(key, summary, description, request))
     )
     verdict = data.get("related")
     if not isinstance(verdict, bool):
@@ -311,7 +365,14 @@ async def llm_breakdown(requirement: str, context: ProjectContext) -> WorkBreakd
     if lines:
         prompt = coverage_instructions(lines) + prompt
 
-    first, problem = await _attempt(prompt, lines, want_depth=True)
+    first, problem = None, ""
+    if parallel_breakdown() and len(lines) >= PARALLEL_MIN_LINES:
+        # Faster: a short plan, then every Story written at the same time.
+        first, problem = await _attempt_planned(requirement, context, lines)
+        if first is None:
+            logger.info(f"Planned breakdown unusable ({problem}); writing it in one call")
+    if first is None:
+        first, problem = await _attempt(prompt, lines, want_depth=True)
     findings: list[SelfFinding] = []
     if first is not None:
         findings = await review_draft(requirement, first, _chat)
@@ -349,8 +410,7 @@ async def _finish(
     """Drop answered questions, sharpen vague criteria, record what remains."""
     coverage = getattr(breakdown, "_coverage", {}) or {}
     breakdown = drop_answered_questions(breakdown, findings)
-    breakdown = await _sharpen_criteria(breakdown, requirement)
-    breakdown = await _carry_missing_details(breakdown, requirement, lines or [], coverage)
+    breakdown = await _repair(breakdown, requirement, lines or [], coverage)
     remaining = [
         f.as_instruction()
         for f in deterministic(breakdown) + findings
@@ -383,21 +443,11 @@ MISSING
 """
 
 
-async def _carry_missing_details(
-    breakdown: WorkBreakdown, requirement: str, lines: list[str], coverage: dict[str, Any]
-) -> WorkBreakdown:
-    """Put every stated fact into the Story it belongs in — guaranteed.
-
-    Asked inside the regeneration, the model left BGV-41's "Price missing",
-    "every billing contact", "30 days after the invoice date" and "only one
-    reminder" out a second time (2026-09-25). A small request for exactly
-    those criteria is followed far more reliably; each is kept only if it
-    really carries its fact. Whatever is still missing gets the requirement's
-    own sentence as a criterion — faithful by construction, never invented.
-    """
+def _carry_request(
+    breakdown: WorkBreakdown, lines: list[str], coverage: dict[str, Any]
+) -> tuple[dict[str, list[tuple[int, Detail]]], str]:
+    """Which stated facts are missing from which Story, and the request text."""
     gaps = missing_details(lines, coverage, breakdown)
-    if not gaps:
-        return breakdown
     wanted: dict[str, list[tuple[int, Detail]]] = {}
     for n, detail, _ in gaps:
         story = target_story(n, lines[n - 1], coverage, breakdown)
@@ -407,17 +457,20 @@ async def _carry_missing_details(
         + "; ".join(f'"{detail_phrase(d)}" (line {n}: {lines[n - 1]})' for n, d in facts)
         for title, facts in wanted.items()
     )
-    proposed: dict[str, list[str]] = {}
-    try:
-        raw = await _chat(_CARRY_PROMPT.format(requirement=requirement, items=items))
-        got = _parse_json_object(raw).get("criteria") or {}
-        if isinstance(got, dict):
-            proposed = {
-                _norm(k): [str(c) for c in v] for k, v in got.items() if isinstance(v, list)
-            }
-    except Exception as exc:  # noqa: BLE001 — the fallback below still carries every fact
-        logger.info(f"Carry request failed, using the requirement's own words: {exc}")
+    return wanted, items
 
+
+def _apply_carried(
+    breakdown: WorkBreakdown,
+    got: Any,
+    wanted: dict[str, list[tuple[int, Detail]]],
+    lines: list[str],
+    coverage: dict[str, Any],
+) -> WorkBreakdown:
+    """Keep each offered criterion only if it carries its fact; copy the rest."""
+    proposed: dict[str, list[str]] = {}
+    if isinstance(got, dict):
+        proposed = {_norm(k): [str(c) for c in v] for k, v in got.items() if isinstance(v, list)}
     data = breakdown.model_dump(mode="json")
     added = copied = 0
     for story in data["stories"]:
@@ -446,6 +499,30 @@ async def _carry_missing_details(
     return carried_breakdown
 
 
+async def _carry_missing_details(
+    breakdown: WorkBreakdown, requirement: str, lines: list[str], coverage: dict[str, Any]
+) -> WorkBreakdown:
+    """Put every stated fact into the Story it belongs in — guaranteed.
+
+    Asked inside the regeneration, the model left BGV-41's "Price missing",
+    "every billing contact", "30 days after the invoice date" and "only one
+    reminder" out a second time (2026-09-25). A small request for exactly
+    those criteria is followed far more reliably; each is kept only if it
+    really carries its fact. Whatever is still missing gets the requirement's
+    own sentence as a criterion — faithful by construction, never invented.
+    """
+    wanted, items = _carry_request(breakdown, lines, coverage)
+    if not wanted:
+        return breakdown
+    got: Any = {}
+    try:
+        raw = await _chat(_CARRY_PROMPT.format(requirement=requirement, items=items))
+        got = _parse_json_object(raw).get("criteria") or {}
+    except Exception as exc:  # noqa: BLE001 — the fallback still carries every fact
+        logger.info(f"Carry request failed, using the requirement's own words: {exc}")
+    return _apply_carried(breakdown, got, wanted, lines, coverage)
+
+
 async def _attempt(
     prompt: str, lines: list[str], *, want_depth: bool
 ) -> tuple[WorkBreakdown | None, str]:
@@ -454,8 +531,96 @@ async def _attempt(
     ``(breakdown, "")`` when it passes; ``(breakdown, why)`` when it is usable
     but thin; ``(None, why)`` when it cannot be used at all.
     """
-    raw = await _chat(prompt)
-    data = _parse_json_object(raw)
+    return _check(_parse_json_object(await _chat(prompt)), lines, want_depth=want_depth)
+
+
+# Below this many listed lines the requirement is one or two Stories: one call
+# writes it as fast as a plan followed by a Story would.
+PARALLEL_MIN_LINES = 6
+DEFAULT_LLM_CONCURRENCY = 6
+
+
+def parallel_breakdown() -> bool:
+    """TASK_PARALLEL_BREAKDOWN: plan first, then write the Stories in parallel."""
+    return os.environ.get("TASK_PARALLEL_BREAKDOWN", "true").strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+
+
+def llm_concurrency() -> int:
+    """How many Stories are written at the same time (TASK_LLM_CONCURRENCY)."""
+    try:
+        return max(1, int(os.environ.get("TASK_LLM_CONCURRENCY", "") or DEFAULT_LLM_CONCURRENCY))
+    except ValueError:
+        return DEFAULT_LLM_CONCURRENCY
+
+
+async def _attempt_planned(
+    requirement: str, context: ProjectContext, lines: list[str]
+) -> tuple[WorkBreakdown | None, str]:
+    """A plan (Epic and Story titles), then every Story written at once.
+
+    The wait is the plan plus the slowest single Story, instead of one answer
+    holding all of them. The assembled draft is checked by ``_check`` exactly
+    like a one-call draft; ``(None, why)`` sends the caller back to that call.
+    """
+    project = context.as_prompt_text(for_breakdown=True)
+    try:
+        plan = _parse_json_object(await _chat(plan_prompt(requirement, project, lines)))
+    except Exception as exc:  # noqa: BLE001 — the one-call path takes over
+        return None, f"the plan could not be used: {exc}"
+    planned = [
+        (str(item.get("title") or "").strip(), str(item.get("focus") or "").strip())
+        for item in plan.get("stories") or []
+        if isinstance(item, dict) and str(item.get("title") or "").strip()
+    ]
+    if not planned:
+        return None, "the plan named no Stories"
+    coverage = plan.get("coverage") if isinstance(plan.get("coverage"), dict) else {}
+    gate = asyncio.Semaphore(llm_concurrency())
+
+    async def write(title: str) -> dict[str, Any]:
+        mine = [
+            lines[int(n) - 1]
+            for n, target in coverage.items()
+            if str(n).isdigit() and 0 < int(n) <= len(lines) and _norm(str(target)) == _norm(title)
+        ]
+        async with gate:
+            story = _parse_json_object(
+                await _chat(story_prompt(requirement, project, planned, title, mine))
+            )
+        story = story["story"] if isinstance(story.get("story"), dict) else story
+        story["title"] = title  # the plan's title, which "coverage" names
+        return story
+
+    try:
+        stories = await asyncio.gather(*(write(title) for title, _ in planned))
+    except Exception as exc:  # noqa: BLE001 — the one-call path takes over
+        return None, f"a Story could not be written: {exc}"
+
+    draft = {
+        k: plan[k]
+        for k in ("classification", "analysis", "work_kind", "defect", "epic")
+        if k in plan
+    }
+    draft["stories"] = list(stories)
+    draft["coverage"] = coverage
+    logger.info(f"Planned breakdown: {len(stories)} Stories written in parallel")
+    return _check(draft, lines, want_depth=True)
+
+
+def _check(
+    data: dict[str, Any], lines: list[str], *, want_depth: bool
+) -> tuple[WorkBreakdown | None, str]:
+    """Every check a draft must pass, however it was written.
+
+    Schema, every requirement line delivered, and — with ``want_depth`` — the
+    quality rules and every stated fact carried. The one-call and the planned
+    (parallel) drafts go through exactly this, so neither can be less accurate.
+    """
     coverage = data.pop("coverage", None)
     try:
         breakdown = _validated_breakdown(data)
@@ -543,28 +708,21 @@ SUB-TASKS
 """
 
 
-async def _sharpen_criteria(breakdown: WorkBreakdown, requirement: str) -> WorkBreakdown:
-    """One small request to rewrite the completion criteria nobody can check.
-
-    Asked for inside the breakdown, twice, the model still wrote "Expiry date
-    logic is implemented and tested" (BGV-92..102, 2026-09-25). A focused
-    request for just those fields is followed far more reliably. Any failure
-    keeps the breakdown as it is — it is correct, only less checkable.
-    """
+def _sharpen_request(breakdown: WorkBreakdown) -> tuple[list[tuple[Story, Subtask]], str]:
+    """The Sub-tasks whose completion criteria nobody can check, as request text."""
     vague = _vague_subtasks(breakdown)
-    if not vague:
-        return breakdown
     items = "\n".join(
         f"- {t.title} (Story: {st.title}; acceptance criteria: {'; '.join(st.acceptance_criteria)})"
         f"\n  description: {t.description}\n  current: {t.completion_criteria}"
         for st, t in vague
     )
-    try:
-        raw = await _chat(_SHARPEN_PROMPT.format(requirement=requirement, items=items))
-        rewritten = _parse_json_object(raw).get("criteria") or {}
-    except Exception as exc:  # noqa: BLE001 — a vaguer criterion beats a failed build
-        logger.info(f"Completion criteria not sharpened: {exc}")
-        return breakdown
+    return vague, items
+
+
+def _apply_sharpened(
+    breakdown: WorkBreakdown, rewritten: Any, vague: list[tuple[Story, Subtask]]
+) -> WorkBreakdown:
+    """Take each rewritten criterion that is concrete; keep the rest as they were."""
     if not isinstance(rewritten, dict):
         return breakdown
     wanted = {_norm(k): str(v).strip() for k, v in rewritten.items() if str(v).strip()}
@@ -578,10 +736,89 @@ async def _sharpen_criteria(breakdown: WorkBreakdown, requirement: str) -> WorkB
                 changed += 1
     logger.info(f"Sharpened {changed} of {len(vague)} vague completion criteria")
     try:
-        return WorkBreakdown.model_validate(data)
+        sharpened = WorkBreakdown.model_validate(data)
     except ValidationError as exc:
         logger.info(f"Sharpened criteria broke the schema, keeping the originals: {exc}")
         return breakdown
+    sharpened._coverage = getattr(breakdown, "_coverage", {}) or {}
+    return sharpened
+
+
+async def _sharpen_criteria(breakdown: WorkBreakdown, requirement: str) -> WorkBreakdown:
+    """One small request to rewrite the completion criteria nobody can check.
+
+    Asked for inside the breakdown, twice, the model still wrote "Expiry date
+    logic is implemented and tested" (BGV-92..102, 2026-09-25). A focused
+    request for just those fields is followed far more reliably. Any failure
+    keeps the breakdown as it is — it is correct, only less checkable.
+    """
+    vague, items = _sharpen_request(breakdown)
+    if not vague:
+        return breakdown
+    try:
+        raw = await _chat(_SHARPEN_PROMPT.format(requirement=requirement, items=items))
+        rewritten = _parse_json_object(raw).get("criteria") or {}
+    except Exception as exc:  # noqa: BLE001 — a vaguer criterion beats a failed build
+        logger.info(f"Completion criteria not sharpened: {exc}")
+        return breakdown
+    return _apply_sharpened(breakdown, rewritten, vague)
+
+
+_BOTH_REPAIRS = """\
+{carry_task}
+
+ALSO, in the same answer: {sharpen_task}
+
+Return JSON only, with both keys:
+{{"criteria": {{"<exact Story title>": ["Given …"]}},
+ "completion": {{"<exact Sub-task title>": "<new criterion>"}}}}
+
+REQUIREMENT
+{requirement}
+
+MISSING
+{carry_items}
+
+SUB-TASKS
+{sharpen_items}
+"""
+
+
+def _task_of(prompt: str) -> str:
+    """A repair prompt's instruction, without its own reply format and inputs."""
+    return prompt.split("Return JSON only")[0].strip()
+
+
+async def _repair(
+    breakdown: WorkBreakdown, requirement: str, lines: list[str], coverage: dict[str, Any]
+) -> WorkBreakdown:
+    """Sharpen vague criteria and carry missing facts — in one model call.
+
+    They were two calls, one after the other, whenever both were needed (L3,
+    2026-09-29). Each is still applied by its own rules, so what is kept is
+    exactly what the two separate calls kept; when only one is needed, its own
+    prompt is sent unchanged.
+    """
+    vague, sharpen_items = _sharpen_request(breakdown)
+    wanted, carry_items = _carry_request(breakdown, lines, coverage)
+    if not (vague and wanted):
+        breakdown = await _sharpen_criteria(breakdown, requirement)
+        return await _carry_missing_details(breakdown, requirement, lines, coverage)
+
+    prompt = _BOTH_REPAIRS.format(
+        carry_task=_task_of(_CARRY_PROMPT),
+        sharpen_task=_task_of(_SHARPEN_PROMPT),
+        requirement=requirement,
+        carry_items=carry_items,
+        sharpen_items=sharpen_items,
+    )
+    answer: dict[str, Any] = {}
+    try:
+        answer = _parse_json_object(await _chat(prompt))
+    except Exception as exc:  # noqa: BLE001 — each part keeps its own fallback
+        logger.info(f"Repair request failed, keeping criteria and copying facts: {exc}")
+    breakdown = _apply_sharpened(breakdown, answer.get("completion") or {}, vague)
+    return _apply_carried(breakdown, answer.get("criteria") or {}, wanted, lines, coverage)
 
 
 def _quality_problems(breakdown: WorkBreakdown) -> list[str]:
@@ -803,243 +1040,6 @@ _CONDITION_RE = re.compile(
 # --------------------------------------------------------------------------
 # Turning a raw clause into a capability phrase
 # --------------------------------------------------------------------------
-
-# Requester framing: how someone asks for a thing, not the thing itself.
-_REQUESTER_FRAMING = (
-    "we would like to",
-    "we would like",
-    "i would like to",
-    "i would like",
-    "it would be good if",
-    "it would be nice if",
-    "the client wants to",
-    "the client wants",
-    "the customer wants to",
-    "the customer wants",
-    "we want to",
-    "we want",
-    "can we please",
-    "can we",
-    "could we",
-    "please could you",
-    "please can you",
-    "please",
-)
-
-# Modal padding that adds no meaning to an imperative phrase.
-_MODAL_PADDING = (
-    "should be able to",
-    "must be able to",
-    "needs to be able to",
-    "need to be able to",
-    "to be able to",
-    "should be",
-    "must be",
-    "has to",
-    "have to",
-    "needs to",
-    "need to",
-)
-
-# Verbs that introduce an actor: "allow tenants to X" → actor tenants, action X.
-_ACTOR_VERBS = ("allow", "allows", "let", "lets", "enable", "enables", "permit", "permits")
-
-# "let them view ..." names no actor — the pronoun has no antecedent here, so
-# it must not be carried into the story as if it were one.
-_PRONOUN_ACTORS = frozenset(
-    "them they it he she us we you me him her someone anyone everyone".split()
-)
-_GENERIC_ACTOR = "user of this product"
-
-# Jira caps every summary at 255. One constant, used everywhere.
-MAX_SUMMARY_CHARS = 255
-
-
-def _strip_leading(text: str, phrases: tuple[str, ...]) -> str:
-    """Remove any of ``phrases`` from the front of ``text``, repeatedly."""
-    changed = True
-    while changed:
-        changed = False
-        lowered = text.lower().lstrip()
-        for phrase in phrases:
-            if lowered.startswith(phrase):
-                text = text.lstrip()[len(phrase) :].lstrip(" ,:-")
-                changed = True
-                break
-    return text.strip()
-
-
-def _deshout(text: str) -> str:
-    """Turn ALL-CAPS prose into sentence case.
-
-    A requirement typed in caps produced a shouting Jira title and a statement
-    that read "I want to mARK A DELIVERY COMPLETE" — the first-letter lowercase
-    applied to text that was already upper. Acronyms of four letters or fewer
-    are left alone so CSV, PDF and GPS survive.
-    """
-    words = [w for w in text.split() if any(ch.isalpha() for ch in w)]
-    if len(words) < 3:
-        return text
-    upper = [w for w in words if w.isupper()]
-    # Judge the phrase, not each word. A per-word length exemption kept short
-    # words like "MARK" upper, which then became "mARK" once the statement
-    # lowercased the first letter. An occasional acronym in otherwise normal
-    # prose ("as CSV and PDF") leaves this ratio well under the threshold.
-    if len(upper) / len(words) < 0.6:
-        return text
-    return text.lower()
-
-
-def normalise_capability(clause: str) -> str:
-    """Reduce a raw clause to a bare capability phrase.
-
-    ``We would like every tenant to be able to update their contact number``
-    becomes ``every tenant update their contact number``. Requester framing and
-    modal padding say how the request was made, not what is being asked for.
-    """
-    text = _strip_leading(_deshout(clause.strip(" .;,-–—\t")), _REQUESTER_FRAMING)
-    text = _strip_leading(text, _MODAL_PADDING)
-    # Padding can also sit mid-phrase: "every tenant to be able to update ..."
-    for phrase in _MODAL_PADDING:
-        pattern = re.compile(rf"\s+{re.escape(phrase)}\s+", re.IGNORECASE)
-        text = pattern.sub(" ", text)
-    return re.sub(r"\s+", " ", text).strip(" ,:-")
-
-
-# An actor is a short noun phrase. Anything longer, or containing a verb, is
-# the start of the action — not the actor.
-_MAX_ACTOR_WORDS = 3
-_ARTICLES = ("a ", "an ", "the ")
-
-
-def _plausible_actor(candidate: str) -> bool:
-    """True when ``candidate`` reads as a person/role rather than a phrase.
-
-    Guards the ``to``-split below. In "dispatchers assign a job to a driver"
-    the first " to " is the indirect object, so a naive split hands back the
-    actor "dispatchers assign a job" and the action "a driver". Requiring the
-    actor to be short and verb-free rejects that and falls through to the
-    first-noun rule instead.
-    """
-    words = candidate.split()
-    if not words or len(words) > _MAX_ACTOR_WORDS:
-        return False
-    return not has_action_intent(candidate)
-
-
-def _split_first_noun(rest: str) -> tuple[str, str]:
-    """``a driver report a fault`` → ``("driver", "report a fault")``."""
-    text = rest.strip()
-    lowered = text.lower()
-    for article in _ARTICLES:
-        if lowered.startswith(article):
-            text = text[len(article) :].strip()
-            break
-    words = text.split()
-    if len(words) < 2:
-        return _GENERIC_ACTOR, rest
-    if words[0].lower() in _PRONOUN_ACTORS:
-        return _GENERIC_ACTOR, " ".join(words[1:]).strip()
-    return _singular(_clean_actor(words[0])), " ".join(words[1:]).strip()
-
-
-def extract_actor(clause: str) -> tuple[str, str]:
-    """Split ``allow tenants to X`` into ``("tenants", "X")``.
-
-    Returns ``("user of this product", <clause>)`` when no actor is stated, so
-    the caller always has something to put in "As a ...".
-    """
-    text = normalise_capability(clause)
-    story = _USER_STORY_RE.match(text)
-    if story:
-        actor = re.match(r"^\s*as an?\s+(.{2,40}?),", text, re.IGNORECASE).group(1)
-        action = re.split(r",\s*i\s+want\s*", text, maxsplit=1, flags=re.IGNORECASE)[1]
-        action = re.split(r",\s*so that\b", action, maxsplit=1, flags=re.IGNORECASE)[0]
-        return _singular(_clean_actor(actor)), to_infinitive(action.strip())
-    lowered = text.lower()
-    for verb in _ACTOR_VERBS:
-        if lowered.startswith(verb + " "):
-            rest = text[len(verb) :].strip()
-            # "tenants to download a receipt" → actor "tenants", action "download..."
-            match = re.match(r"(.{2,40}?)\s+to\s+(.+)", rest, re.IGNORECASE)
-            if match:
-                actor = match.group(1).strip(" ,")
-                action = match.group(2).strip()
-                if actor and action and _plausible_actor(actor):
-                    if actor.lower() in _PRONOUN_ACTORS:
-                        return _GENERIC_ACTOR, action
-                    return _singular(_clean_actor(actor)), action
-            # Either no "to", or the text before it was not an actor:
-            # "dispatchers assign a job to a driver", "a driver report a fault".
-            return _split_first_noun(rest)
-    # "every tenant update their contact number"
-    match = re.match(r"(every|each|any|all)\s+(\w+)\s+(.+)", text, re.IGNORECASE)
-    if match:
-        return _singular(_clean_actor(match.group(2))), match.group(3).strip()
-    # "operations managers could see the total fuel cost ..." — a modal names
-    # the actor just as clearly as "allow <role> to ...", and the modal itself
-    # carries no meaning once the action is stated imperatively.
-    match = re.match(
-        r"(.{2,40}?)\s+(?:could|can|should|must|may|will|would)\s+(.+)",
-        text,
-        re.IGNORECASE,
-    )
-    if match:
-        actor = match.group(1).strip(" ,")
-        action = match.group(2).strip()
-        if action and _plausible_actor(actor):
-            if actor.lower() in _PRONOUN_ACTORS:
-                return _GENERIC_ACTOR, action
-            return _singular(_clean_actor(actor)), action
-    return _GENERIC_ACTOR, text
-
-
-def _clean_actor(actor: str) -> str:
-    """Trim an article and normalise case: "an Operations Manager" → "operations manager"."""
-    text = actor.strip(" ,")
-    lowered = text.lower()
-    for article in _ARTICLES:
-        if lowered.startswith(article):
-            text = text[len(article) :].strip()
-            break
-    # ALL CAPS input should not shout back out of the story statement.
-    if text.isupper():
-        text = text.lower()
-    return text[:1].lower() + text[1:] if text else text
-
-
-def _singular(actor: str) -> str:
-    """ "tenants" → "tenant". Crude but right for the actor nouns that appear."""
-    words = actor.split()
-    if not words:
-        return actor
-    last = words[-1]
-    if last.lower().endswith("ies") and len(last) > 4:
-        words[-1] = last[:-3] + "y"
-    elif last.lower().endswith("sses"):
-        words[-1] = last[:-2]
-    elif last.lower().endswith("s") and not last.lower().endswith(("ss", "us", "is")):
-        words[-1] = last[:-1]
-    return " ".join(words)
-
-
-def to_infinitive(action: str) -> str:
-    """Make the action read correctly after "I want to ...".
-
-    Strips a leading "to" so it is never doubled, and lowercases the first
-    letter so the sentence does not restart mid-clause.
-
-    An acronym is left alone: lowercasing the first letter of "SMS
-    notifications" produced Stories and user stories reading "sMS
-    notifications".
-    """
-    text = re.sub(r"^to\s+", "", action.strip(), flags=re.IGNORECASE)
-    if not text:
-        return text
-    first = text.split(maxsplit=1)[0]
-    if len(first) > 1 and first[:2].isupper():
-        return text
-    return text[:1].lower() + text[1:]
 
 
 def _clean_clause(clause: str) -> str:
@@ -1323,348 +1323,6 @@ def _split_capabilities(requirement: str) -> list[str]:
     return clauses or [_clean_clause(requirement) or requirement.strip()]
 
 
-def _size_for(count: int) -> Classification:
-    """The one place the Small/Medium/Large boundaries are defined."""
-    if count <= 1:
-        return Classification.SMALL
-    if count <= 4:
-        return Classification.MEDIUM
-    return Classification.LARGE
-
-
-def classify(requirement: str) -> Classification:
-    """Size a requirement from the number of distinct capabilities it asks for."""
-    return _size_for(len(split_capabilities(requirement)))
-
-
-def truncate(text: str, limit: int = MAX_SUMMARY_CHARS) -> str:
-    """Trim to ``limit`` on a word boundary, marking the cut with an ellipsis.
-
-    Jira's own limit is 255 for every issue type. The previous code used three
-    different magic numbers (80, 60, 120), none of them Jira's, and cut
-    mid-word with nothing to show it had happened.
-    """
-    text = " ".join(text.split())
-    if len(text) <= limit:
-        return text
-    cut = text[: limit - 1]
-    if " " in cut:
-        cut = cut[: cut.rfind(" ")]
-    return cut.rstrip(" ,.;:-") + "…"
-
-
-_FALLBACK_TITLE = "Requirement"
-
-
-def _flatten_list_markers(text: str) -> str:
-    """Turn a bullet list into a readable clause for a one-line summary.
-
-    An Epic built from a bullet list used to be summarised
-    "Add: - driver shift roster - fuel spend by depot - tyre replacement log",
-    with the markers still in it, because a Jira summary is one line and the
-    list had none of its own punctuation.
-    """
-    lines = [line.strip() for line in (text or "").splitlines()]
-    items = [re.sub(r"^(?:[-*\u2022]|\d+[.)])\s*", "", line) for line in lines if line]
-    if not items:
-        return text
-    if len(items) == 1:
-        # A single bullet still has a marker that does not belong in a summary.
-        return items[0]
-    head, rest = items[0], [i for i in items[1:] if i]
-    if not rest:
-        return head
-    joined = ", ".join(rest[:-1])
-    tail = f"{joined} and {rest[-1]}" if joined else rest[-1]
-    # "Please add:" already ends in a colon; do not add a second separator.
-    return f"{head.rstrip(':')}: {tail}" if head.endswith(":") else f"{head}, {tail}"
-
-
-def _titleise(clause: str, limit: int = MAX_SUMMARY_CHARS) -> str:
-    """A capability phrase fit for a Jira summary.
-
-    Normalises first, so requester framing ("We would like ...") and modal
-    padding ("to be able to") never reach the title.
-    """
-    title = truncate(normalise_capability(_flatten_list_markers(clause)), limit)
-    title = (title[:1].upper() + title[1:]) if title else ""
-    # The schema demands at least 3 characters. Degenerate input ("to to to")
-    # can normalise down to almost nothing, and a crash there would take down
-    # a whole run over a nonsense requirement.
-    return title if len(title) >= 3 else _FALLBACK_TITLE
-
-
-def _heuristic_subtasks(capability: str) -> list[Subtask]:
-    """Three delivery-shaped subtasks per capability, described by behaviour."""
-    return [
-        Subtask(
-            title=truncate(f"Define the rules for: {_titleise(capability)}"),
-            description=(
-                f"Agree and record the functional rules and edge cases for "
-                f'"{capability}" with the product owner, using only what the '
-                f"requirement states."
-            ),
-            expected_outcome=(
-                "An agreed, written set of rules and edge cases that the "
-                "implementation and tests can both be checked against."
-            ),
-            dependencies=NO_DEPENDENCIES,
-            completion_criteria=(
-                "The product owner has confirmed the recorded rules cover the "
-                "capability with no open questions."
-            ),
-        ),
-        Subtask(
-            title=truncate(f"Implement the behaviour for: {_titleise(capability)}"),
-            description=(
-                f'Build the behaviour described by "{capability}" according to '
-                f"the agreed rules."
-            ),
-            expected_outcome=(
-                "The capability behaves as described for the stated users under "
-                "normal and error conditions."
-            ),
-            dependencies="Depends on the agreed rules for this capability.",
-            completion_criteria=(
-                "The behaviour is demonstrable end to end and matches every " "agreed rule."
-            ),
-        ),
-        Subtask(
-            title=truncate(f"Verify and hand over: {_titleise(capability)}"),
-            description=(
-                f'Validate "{capability}" against the story acceptance criteria '
-                f"and hand the capability over for review."
-            ),
-            expected_outcome=(
-                "Evidence that each acceptance criterion for this capability is "
-                "met, ready for sign-off."
-            ),
-            dependencies="Depends on the implemented behaviour for this capability.",
-            completion_criteria=("All acceptance criteria pass and the reviewer has signed off."),
-        ),
-    ]
-
-
-# Benefit phrasing keyed off the verb. Still generic — only the model can state
-# real business value — but it beats one fixed sentence on every story.
-_BENEFIT_BY_VERB = {
-    "see": "I have the information in front of me when I need it",
-    "view": "I have the information in front of me when I need it",
-    "track": "I can see the current position without asking anyone",
-    "export": "I can work with the data outside this system",
-    "alert": "the right person hears about it without being chased",
-    "notify": "the right person hears about it without being chased",
-    "send": "the message reaches the recipient without manual effort",
-    "assign": "work reaches the right person without a hand-off step",
-    "report": "the problem is recorded the moment it is noticed",
-    "update": "the record stays accurate without going through support",
-    "upload": "the evidence is attached at the point it is captured",
-    "download": "I keep a copy without asking anyone for it",
-    "approve": "the decision is recorded and the work can move on",
-    "cancel": "I can undo a mistake without contacting support",
-    "filter": "I can find what I need in a long list",
-    "mark": "the status reflects reality as soon as it changes",
-}
-_DEFAULT_BENEFIT = "I can do this myself instead of asking someone else"
-
-
-def _article_for(noun: str) -> str:
-    """ "a" or "an", chosen by how the word is said rather than how it is spelt.
-
-    Plain vowel-letter matching gets the common fleet actors wrong both ways:
-    "an operations manager" is right, but so is "a user" — and "user" starts
-    with a vowel letter.
-    """
-    word = (noun or "").strip().split()[0].lower() if (noun or "").strip() else ""
-    if not word:
-        return "a"
-    # Sounded as a consonant despite the vowel letter: user, unit, European…
-    if word.startswith(("eu", "uni", "use", "user", "usu", "one")):
-        return "a"
-    # Sounded as a vowel despite the consonant letter: hour, honest…
-    if word.startswith(("hour", "honest", "heir")):
-        return "an"
-    return "an" if word[0] in "aeiou" else "a"
-
-
-def _benefit(action: str) -> str:
-    first = action.strip().split()[0].lower() if action.strip() else ""
-    return _BENEFIT_BY_VERB.get(first, _DEFAULT_BENEFIT)
-
-
-def _heuristic_story(capability: str, fallback_actor: str = "") -> Story:
-    raw_actor, raw_action = extract_actor(capability)
-    # A list usually names its actor once: "Let dispatchers assign a job, and
-    # notify the dispatcher when it is declined." The second clause has no
-    # actor of its own, and a reader carries the first one across. Do the same
-    # before giving up on "user of this product".
-    actor = fallback_actor if raw_actor == _GENERIC_ACTOR and fallback_actor else raw_actor
-    action = to_infinitive(raw_action)
-
-    # "I want to <action>" only reads as English when <action> is a verb
-    # phrase. When it is not — "the tyre log needs a monthly summary" — the
-    # template produced "As a user of this product, I want to the tyre log
-    # needs a monthly summary", which is what a reader sees and judges the
-    # whole agent by. State the capability instead of forcing it into a shape
-    # it does not fit.
-    phrasable = bool(action) and starts_with_verb(action)
-    if phrasable:
-        statement = (
-            f"As {_article_for(actor)} {actor}, I want to {action}, so that {_benefit(action)}."
-        )
-        value = (
-            f"Gives the {actor} direct access to {action}, which the requirement "
-            f"asks for explicitly."
-        )
-    else:
-        subject = action or capability
-        # The schema requires "I want" and "so that", so the shape is fixed —
-        # what changes is that the requirement is quoted as a statement rather
-        # than jammed in after "I want to".
-        # The schema requires "I want to <action>" or "I want a/the <thing>",
-        # so the capability is quoted as a thing rather than jammed in after
-        # "I want to".
-        statement = (
-            f"As {_article_for(actor)} {actor}, I want the capability described "
-            f'as "{subject}", so that the stated outcome is delivered.'
-        )
-        value = f"Delivers what the requirement states for the {actor}: {subject}."
-
-    return Story(
-        title=_titleise(action or capability),
-        user_story_statement=statement,
-        description=(f"Deliver the capability described in the requirement as: {capability}."),
-        business_value=value,
-        priority=Priority.MEDIUM,
-        estimated_complexity=Complexity.MEDIUM,
-        dependencies=NO_DEPENDENCIES,
-        acceptance_criteria=[
-            f'The behaviour described as "{capability}" is available to the intended users.',
-            "The behaviour matches the rules agreed with the product owner.",
-            "Error and edge cases behave as agreed rather than failing silently.",
-        ],
-        subtasks=_heuristic_subtasks(capability),
-    )
-
-
-def extract_exclusions(text: str) -> tuple[str, list[str]]:
-    """Split the "ruled out" section off the requirement.
-
-    Returns ``(requirement_without_it, excluded_phrases)``. The section has to
-    survive :func:`requirement_core` to get here — it is a decision about the
-    work, not discussion — but it must never be decomposed, or "SMS" becomes a
-    Story called "SMS".
-    """
-    from src.context.ingest import HEADING_EXCLUSIONS
-
-    marker = f"## {HEADING_EXCLUSIONS}"
-    if marker not in (text or ""):
-        return text, []
-    before, _, after = text.partition(marker)
-    rest = re.split(r"(?m)^## ", after, maxsplit=1)
-    body = rest[0]
-    remainder = f"## {rest[1]}" if len(rest) > 1 else ""
-    phrases = [
-        line.lstrip("- ").strip().lower()
-        for line in body.splitlines()
-        if line.strip().startswith("-")
-    ]
-    return (before + remainder).strip(), [p for p in phrases if p]
-
-
-def drop_excluded(capabilities: list[str], exclusions: list[str]) -> tuple[list[str], list[str]]:
-    """Remove capabilities a comment ruled out. Returns ``(kept, dropped)``.
-
-    Matching is word containment, not equality: a comment says "SMS", the
-    capability reads "Send SMS notifications to customers". Every word of the
-    exclusion must appear, so "email" does not knock out "email and SMS".
-    """
-    kept: list[str] = []
-    dropped: list[str] = []
-    for capability in capabilities:
-        words = set(re.findall(r"[a-z0-9]+", capability.lower()))
-        if any(
-            phrase and set(re.findall(r"[a-z0-9]+", phrase)).issubset(words)
-            for phrase in exclusions
-        ):
-            dropped.append(capability)
-        else:
-            kept.append(capability)
-    # Never empty the breakdown: if everything matched, the exclusion was too
-    # broad to trust and a human should decide rather than get nothing.
-    return (kept, dropped) if kept else (capabilities, [])
-
-
-def heuristic_breakdown(requirement: str, context: ProjectContext) -> WorkBreakdown:
-    """Build a schema-valid breakdown without a model.
-
-    Faithful but generic: it restates the capabilities the requirement asks for
-    and never invents business rules, roles, or dates.
-    """
-    # Everything below turns prose into ticket wording. The model can be told in
-    # a heading that comments are only context; this path cannot read that, so it
-    # is given the requirement sections alone, with the headings removed.
-    requirement, exclusions = extract_exclusions(requirement_core(requirement))
-    requirement = strip_section_headings(requirement)
-    capabilities, dropped = drop_excluded(split_capabilities(requirement), exclusions)
-    if dropped:
-        logger.info(f"Ruled out in discussion, so not built: {dropped}")
-    # Size what is actually being built. Sizing the original text counted work
-    # that was ruled out, so excluding two of three capabilities still produced
-    # an Epic over a single Story.
-    classification = _size_for(len(capabilities))
-    # Carry the most recently named actor across clauses that name none.
-    stories: list[Story] = []
-    seen_actor = ""
-    for cap in capabilities:
-        story = _heuristic_story(cap, seen_actor)
-        named, _ = extract_actor(cap)
-        if named != _GENERIC_ACTOR:
-            seen_actor = named
-        stories.append(story)
-
-    if classification is Classification.SMALL:
-        return WorkBreakdown(
-            classification=classification,
-            analysis=(
-                "The requirement asks for one focused capability, so it is sized "
-                "as Small and produces a single Story with its subtasks."
-            ),
-            stories=stories[:1],
-        )
-
-    scope_label = context.name or "the configured project"
-    # Built from the capabilities that survived, not from the original text. An
-    # Epic titled "Send email and SMS notifications" with no SMS Story under it
-    # tells a reader the work is covered when it was deliberately dropped.
-    epic_text = "; ".join(capabilities) if dropped else requirement.strip()
-    epic = Epic(
-        business_objective=(
-            f"Deliver the capabilities described in the requirement for {scope_label}: "
-            f"{truncate(epic_text, 400)}"
-        ),
-        scope=capabilities,
-        # What was ruled out is known here, and this is the field for it.
-        out_of_scope=dropped or [NOT_SPECIFIED],
-        priority=Priority.MEDIUM,
-        acceptance_criteria=[
-            "Every capability listed in scope is delivered and demonstrable.",
-            "Each related user story has passed its own acceptance criteria.",
-        ],
-        jira_summary=_titleise(epic_text) or "Requirement decomposition",
-    )
-    return WorkBreakdown(
-        classification=classification,
-        analysis=(
-            f"The requirement asks for {len(capabilities)} distinct capabilities, "
-            f"so it is sized as {classification.value} and produces an Epic with "
-            f"one Story per capability."
-        ),
-        epic=epic,
-        stories=stories,
-    )
-
-
 # --------------------------------------------------------------------------
 # Public entry points used by the tools layer
 # --------------------------------------------------------------------------
@@ -1699,7 +1357,7 @@ async def build_breakdown(requirement: str, context: ProjectContext) -> tuple[Wo
     boilerplate unrelated to the requirement ("…matches the rules agreed with
     the product owner"), and could never pass the self-review gate. The owner
     decided (2026-09-25): when the model cannot produce the breakdown, nothing
-    is created and the reply says so — whatever ``LTW_REQUIRE_LLM`` says.
+    is created and the reply says so — whatever ``TASK_REQUIRE_LLM`` says.
     """
     # Filenames the person wrote are theirs to keep; only invented ones are refused.
     with allow_source_files_from(requirement):

@@ -46,7 +46,7 @@ def main() -> int:
     base = env.get("JIRA_BASE_URL", "").rstrip("/")
     email = env.get("JIRA_EMAIL", "")
     token = env.get("JIRA_API_TOKEN", "")
-    keys = [k for k in env.get("ORCH_ALLOWED_PROJECT_KEYS", env.get("LTW_ALLOWED_PROJECT_KEYS", "")).split(",") if k]
+    keys = [k for k in env.get("ORCH_ALLOWED_PROJECT_KEYS", env.get("TASK_ALLOWED_PROJECT_KEYS", "")).split(",") if k]
     issue = sys.argv[2] if len(sys.argv) > 2 else ""
 
     print(f"\n\033[1mJira connectivity — {project}\033[0m")

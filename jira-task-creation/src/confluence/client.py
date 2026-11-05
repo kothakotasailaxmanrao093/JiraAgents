@@ -64,15 +64,16 @@ __all__ = [
 
 def enabled() -> bool:
     """On by default: a linked spec is usually the requirement itself."""
-    return env_bool("LTW_CONFLUENCE_ENABLED", default=True)
+    return env_bool("TASK_CONFLUENCE_ENABLED", default=True)
 
 
 def max_pages() -> int:
-    return max(1, env_int("LTW_CONFLUENCE_MAX_PAGES", DEFAULT_MAX_PAGES))
+    return max(1, env_int("TASK_CONFLUENCE_MAX_PAGES", DEFAULT_MAX_PAGES))
 
 
 def max_chars() -> int:
-    return max(500, env_int("LTW_CONFLUENCE_MAX_CHARS", DEFAULT_MAX_CHARS_PER_PAGE))
+    # A page is read in full, like an attachment; condensing fits it later.
+    return max(500, env_int("TASK_CONFLUENCE_MAX_CHARS", 1_000_000))
 
 
 def read_attachments() -> bool:
@@ -82,7 +83,7 @@ def read_attachments() -> bool:
     without this, and the breakdown that follows looks like the model ignored
     the requirement rather than never having seen it.
     """
-    return env_bool("LTW_CONFLUENCE_READ_ATTACHMENTS", default=True)
+    return env_bool("TASK_CONFLUENCE_READ_ATTACHMENTS", default=True)
 
 
 def _config() -> FetchConfig:
