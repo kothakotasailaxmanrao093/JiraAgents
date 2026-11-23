@@ -267,7 +267,6 @@ src/
   classification/ deciding kind, size, and the breakdown
   jira/           everything that talks to Jira
   notifications/  email
-  webhook/        a local server, for running without the platform
   models/         the shapes everything must fit
   config/         reading settings from the environment
   prompts/        what the language model is told
@@ -570,12 +569,13 @@ change, it is telling you about a real case.
 
 ## Part 7 — Running it without the platform
 
-`src/webhook/server.py` does the same job locally: receives the webhook,
-verifies the shared secret, runs the agent. Useful for development and for
-checking a change before publishing.
+`scripts/run_local.sh` (repository root) runs this agent and the Orchestration
+agent on a laptop: `--poll` watches Jira for new `@Aetherion` comments in place of
+the webhook, and `--form` opens a test form per agent. Useful for development and
+for checking a change before publishing.
 
 ```bash
-uv run python -m src.webhook.server
+scripts/run_local.sh --jira --poll --form
 ```
 
 See [TESTING.md](TESTING.md) for the full local setup, and

@@ -270,7 +270,11 @@ async def test_a_comment_read_before_a_question_was_asked_still_answers_it(memsy
 
 async def test_the_description_answers_a_question_in_its_own_words(memsy, llm):
     llm["answers"] = [
-        {"comment_id": "description", "question_id": "Q1", "quote": "must appear on the account statement"}
+        {
+            "comment_id": "description",
+            "question_id": "Q1",
+            "quote": "must appear on the account statement",
+        }
     ]
     _, kept = await _review("BTS-62", [], ASKED)
     q1 = kept["questions"][0]

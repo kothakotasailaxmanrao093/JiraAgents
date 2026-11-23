@@ -147,7 +147,8 @@ async def test_an_uploaded_vtt_reaches_the_review_cleanly(monkeypatch) -> None:
 
 def test_the_upload_field_offers_only_types_the_platform_accepts() -> None:
     """Publishing refused ".srt" on the upload field (2026-09-30); the list below is
-    the one the platform printed. .srt is still read when attached to a ticket."""
+    the one the platform printed. The form takes PDFs only (2026-11-23); transcripts
+    and other files are still read when attached to a ticket."""
     import json
     from pathlib import Path
 
@@ -158,7 +159,7 @@ def test_the_upload_field_offers_only_types_the_platform_accepts() -> None:
     triggers = json.loads(Path("src/agent/metadata.json").read_text())["config"]["triggers"]
     [upload] = [t for t in triggers if t["type"] == "file"]
     offered = set(upload["accepts"].split(","))
-    assert ".vtt" in offered
+    assert offered == {".pdf"}
     assert offered <= platform, offered - platform
 
 

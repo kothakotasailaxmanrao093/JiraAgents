@@ -47,10 +47,15 @@ def test_every_boolean_trigger_declares_a_default() -> None:
 
 
 def test_the_metadata_defaults_match_the_code() -> None:
-    """One definition, asserted in both places — this is the drift guard."""
+    """One definition, asserted in both places — this is the drift guard. The
+    "include_*" switches left the form (2026-11-23): the code's default applies."""
     triggers = _triggers()
+    for name, trigger in triggers.items():
+        if trigger.get("type") == "boolean":
+            assert name in TRIGGER_DEFAULTS, f"{name} is on the form but not in TRIGGER_DEFAULTS"
     for name, expected in sorted(TRIGGER_DEFAULTS.items()):
-        assert name in triggers, f"{name} is in TRIGGER_DEFAULTS but not in metadata.json"
+        if name not in triggers:
+            continue
         actual = triggers[name].get("default")
         assert actual == expected, (
             f"{name}: metadata.json says {actual!r}, config.TRIGGER_DEFAULTS says "

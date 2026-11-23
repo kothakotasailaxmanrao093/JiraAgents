@@ -88,20 +88,13 @@ uv sync
 cp .env.template .env
 ```
 
-Open `.env` and fill in the four settings under **REQUIRED**:
+Open `.env` and fill in the three settings under **REQUIRED**:
 
 | Setting | What to put |
 |---|---|
 | `JIRA_BASE_URL` | Your site address, no trailing slash — `https://yourcompany.atlassian.net` |
 | `JIRA_EMAIL` | The agent's Jira account |
 | `JIRA_API_TOKEN` | The token from step 3 above |
-| `TASK_WEBHOOK_SECRET` | Any long random string |
-
-Generate the secret with:
-
-```bash
-python -c "import secrets; print(secrets.token_urlsafe(32))"
-```
 
 Then check your project is ready:
 
@@ -229,7 +222,6 @@ rejected.
 |---|---|
 | URL | your endpoint, with `?tenant_id=<your tenant id>` |
 | Method | `POST` |
-| Headers | `X-Jira-Webhook-Secret` = your `TASK_WEBHOOK_SECRET` |
 | Body | Custom data, including a top-level `event_type` of `issue.commented` |
 
 **4. Add an Event Subscription** on the platform, with these filters:
@@ -258,13 +250,13 @@ every run fails with *"Issue 'FL' was not found"*.
 
 ## Running it locally
 
-Start the local server, which receives the webhook and runs the agent itself:
+Jira comments reach this agent through the Orchestration agent. To run the whole
+chain on a laptop, start it from the repository root: `--poll` watches your Jira
+site for new `@Aetherion` comments and `--form` opens a test form per agent.
 
 ```bash
-uv run python -m src.webhook.server
+scripts/run_local.sh --jira --poll --form
 ```
-
-Expose it with ngrok and point your Automation rule at the public URL.
 
 Run one ticket with no webhook at all:
 
