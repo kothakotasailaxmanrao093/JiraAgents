@@ -30,6 +30,9 @@
 #   scripts/run_local.sh --jira --form --follow
 #                                 …and show the agents' readable log lines in this
 #                                 terminal (each block headed by its log file)
+#   scripts/run_local.sh --form --no-open
+#                                 …the forms without opening browser tabs (a restart:
+#                                 refresh the tabs you already have)
 #   scripts/run_local.sh --form --keyword AetherionLocal
 #                                 …answer "@AetherionLocal build" only: the published
 #                                 router (same Jira webhook) ignores those comments
@@ -38,13 +41,14 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 AGENTS=(planning-agent coding-agent jira-task-creation jira-requirement-review jira-orchestration)
-JIRA_ONLY=0; POLL=0; FORM=0; FOLLOW=0; SITE=""; KEYWORD=""
-USAGE="usage: run_local.sh [--jira] [--poll] [--form] [--follow] [--site NAME] [--keyword NAME]"
+JIRA_ONLY=0; POLL=0; FORM=0; NO_OPEN=0; FOLLOW=0; SITE=""; KEYWORD=""
+USAGE="usage: run_local.sh [--jira] [--poll] [--form] [--no-open] [--follow] [--site NAME] [--keyword NAME]"
 while [ $# -gt 0 ]; do
   case "$1" in
     --jira) JIRA_ONLY=1 ;;
     --poll) POLL=1 ;;
     --form) FORM=1 ;;
+    --no-open) NO_OPEN=1 ;;
     --follow) FOLLOW=1 ;;
     --site) SITE="${2:-}"; [ -n "$SITE" ] || { echo "$USAGE"; exit 2; }; shift ;;
     --keyword) KEYWORD="${2:-}"; [ -n "$KEYWORD" ] || { echo "$USAGE"; exit 2; }; shift ;;
@@ -126,6 +130,9 @@ if [ "$FORM" = 1 ]; then
   # A form starts its agent on that agent's local queue, like the router does.
   export AETHERION_AGENT_TASK_QUEUE_MAP="$("$ROOT/jira-orchestration/.venv/bin/python" -c \
     "import json, sys; sys.path.insert(0, '$ROOT/scripts'); from local_worker import local_agent_map; print(json.dumps(local_agent_map()))")"
+  # Each form opens a browser tab when it starts (Python's webbrowser); BROWSER=true
+  # makes that a no-op command, so a restart does not open every tab again.
+  [ "$NO_OPEN" = 1 ] && export BROWSER=true
   # One port per agent, the same whichever agents run.
   for entry in jira-orchestration:8765 jira-task-creation:8766 jira-requirement-review:8767 \
                planning-agent:8768 coding-agent:8769; do

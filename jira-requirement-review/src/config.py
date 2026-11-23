@@ -67,7 +67,8 @@ DEFAULT_MODEL_ID = "gpt-5.1"
 #
 # Adding ``"default"`` to the metadata fixes what the form sends; keeping the
 # values here fixes what the code assumes. The test fails if they ever disagree
-# again.
+# again. The "include_*" switches are no longer on the form (2026-11-23): nobody
+# turned them off, so the defaults below always apply.
 # ---------------------------------------------------------------------------
 TRIGGER_DEFAULTS: dict[str, bool] = {
     # Read the surrounding context by default: a requirement is routinely
@@ -229,7 +230,7 @@ AGENT_DISPLAY_NAME = "JiraRequirementReview"
 # Kept in step by scripts/publish.py, which writes all three (pyproject,
 # metadata.json and this constant) together, and by
 # tests/test_version_agreement.py, which fails if they ever diverge.
-AGENT_VERSION = "2.2.36"
+AGENT_VERSION = "2.2.37"
 
 
 def agent_version() -> str:

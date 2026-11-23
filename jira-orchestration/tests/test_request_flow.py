@@ -94,8 +94,11 @@ def tools_for(**over: Any) -> Tools:
             "path": "/laptop/docs-export/pipeline/tdd-x.pdf",
         },
         # The services ranked for Planning's card (2026-11-03).
-        rank_card={"ok": True, "services": [{"service": "bank", "repo": "o/bank", "rank": 1}],
-                   "questions": []},
+        rank_card={
+            "ok": True,
+            "services": [{"service": "bank", "repo": "o/bank", "rank": 1}],
+            "questions": [],
+        },
     )
 
 

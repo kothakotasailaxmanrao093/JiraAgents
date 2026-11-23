@@ -47,8 +47,6 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "GMAIL_APP_PASSWORD",
         "GMAIL_SMTP_HOST",
         "GMAIL_SMTP_PORT",
-        "TASK_WEBHOOK_SECRET",
-        "TASK_JIRA_WEBHOOK_SECRET",
         "JIRA_BASE_URL",
         "JIRA_EMAIL",
         "JIRA_API_TOKEN",

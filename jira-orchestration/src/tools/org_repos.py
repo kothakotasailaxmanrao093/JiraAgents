@@ -59,13 +59,15 @@ async def _org_repos() -> list[dict]:
     # What each repository is, for the ranking of a card's services (2026-11-03).
     from memory_service import ranking
 
-    ranking.ABOUT.update({
-        str(r.get("name") or "").lower(): "; ".join(
-            str(v) for v in (r.get("language"), r.get("description")) if v
-        )
-        for r in repos
-        if r.get("language") or r.get("description")
-    })
+    ranking.ABOUT.update(
+        {
+            str(r.get("name") or "").lower(): "; ".join(
+                str(v) for v in (r.get("language"), r.get("description")) if v
+            )
+            for r in repos
+            if r.get("language") or r.get("description")
+        }
+    )
     _cache.update(at=time.monotonic(), org=org, repos=repos)
     return repos
 

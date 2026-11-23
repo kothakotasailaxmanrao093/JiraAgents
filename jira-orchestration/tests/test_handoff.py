@@ -652,8 +652,14 @@ def test_a_file_that_could_not_be_read_is_named_not_sent_empty():
 
 def test_planning_reads_the_comments_and_notes_in_the_description():
     """Planning reads the card's title, description and files (2026-11-03)."""
-    card = {"key": "BTS-40", "type": "Bug", "title": "t", "description": "Shift on select.",
-            "comments": ["Chrome 130", "  "], "files": []}
+    card = {
+        "key": "BTS-40",
+        "type": "Bug",
+        "title": "t",
+        "description": "Shift on select.",
+        "comments": ["Chrome 130", "  "],
+        "files": [],
+    }
     sent = handoff.payload(card, [{"service": "ui"}], [], notes="Agreed now: keep it disabled.")
     assert sent["card"]["description"] == (
         "Shift on select.\n\nComments on the card:\n- Chrome 130"

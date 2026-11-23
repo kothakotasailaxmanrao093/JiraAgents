@@ -6,53 +6,61 @@
         "triggers": [
             {
                 "name": "step",
-                "type": "text",
+                "type": "dropdown",
                 "required": true,
-                "description": "review, plan, code or memory",
+                "default": "review",
+                "options": [
+                    "review",
+                    "plan",
+                    "code",
+                    "memory"
+                ],
+                "description": "review, plan, code, memory",
                 "friendly_name": "Step"
             },
             {
                 "name": "issue_key",
                 "type": "text",
                 "required": false,
-                "description": "The Jira card, e.g. BTS-41 (review, plan, memory).",
-                "friendly_name": "Card"
+                "description": "The Jira card, e.g. KS-6. Needed for review, plan and memory.",
+                "friendly_name": "Card (review, plan, memory)"
             },
             {
                 "name": "answers",
                 "type": "textarea",
                 "required": false,
-                "description": "review: your answers to its questions, one per line or paragraph, each starting with its number — Q1: ...  Q2: ...  Kept for every later run; nothing is posted to Jira.",
-                "friendly_name": "Answers"
+                "description": "Your answers to the review's open questions, each starting with its number: Q1: ...  Q2: ...  Kept for every later run; nothing is posted to Jira.",
+                "friendly_name": "Answers (review)"
             },
             {
                 "name": "services",
                 "type": "text",
                 "required": false,
-                "description": "plan: the services to design for, e.g. ui (comma-separated, main one first). Empty: the ranking decides.",
-                "friendly_name": "Services"
+                "description": "The services to design for, e.g. ui (comma-separated, main one first). Empty: the ranking decides.",
+                "friendly_name": "Services (plan)"
             },
             {
                 "name": "uploaded_files",
                 "type": "file",
                 "required": false,
+                "multiple": true,
                 "accepts": ".pdf,.docx,.doc,.xlsx,.xls,.csv,.md,.txt,.json,.png,.jpg,.jpeg",
-                "description": "review: a document with your answers (e.g. the review's Word report, answered). plan: the review report and any other files (optional). code: the TDD PDF (required). Several files can be picked.",
-                "friendly_name": "Files"
+                "description": "review: a document with your answers (optional). plan: the review report and any other files (optional). code: the TDD PDF (required).",
+                "friendly_name": "Files (review, plan, code)"
             },
             {
                 "name": "branch_name",
                 "type": "text",
                 "required": false,
-                "description": "code: the new branch's name. Empty: fix/<card>-<number>.",
-                "friendly_name": "New branch"
+                "description": "The new branch's name. Empty: fix/<card>-<number>.",
+                "friendly_name": "New branch (code)"
             },
             {
                 "name": "target_branch",
                 "type": "text",
                 "required": false,
-                "description": "code: the branch the pull request goes into. Empty: the branch the TDD was written from.",
-                "friendly_name": "Pull request into"
+                "description": "The branch the pull request goes into. Empty: the branch the TDD was written from.",
+                "friendly_name": "Pull request into (code)"
             }
         ]
     }

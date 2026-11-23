@@ -131,9 +131,6 @@ Check at minimum:
 > edited *after* the package was built. Every stray event then sent an email.
 > Review this file **before** step 4, not after.
 
-`TASK_LOCAL_EXECUTION` is read only by `src/webhook/server.py`, which the
-platform does not run, so its value is harmless in a deployed package.
-
 ---
 
 ## Step 4 — Build and inspect locally

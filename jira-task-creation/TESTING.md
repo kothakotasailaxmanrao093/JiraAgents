@@ -83,50 +83,23 @@ READY. Project 'FL' can be used with the agent.
 If anything says `[FAIL]`, fix that before going further — the message tells you
 what to change.
 
-### 0.4 Start the service
+### 0.4 Start the agents
 
-**Restart it even if it is already running.** A running receiver holds the code
-it started with; anything changed since is not live.
+**Restart them even if they are already running.** A running worker holds the
+code it started with; anything changed since is not live.
 
-```bash
-# stop any old one
-pkill -f "uvicorn src.webhook.server"
-
-# start fresh
-python -m uvicorn src.webhook.server:app --host 0.0.0.0 --port 8000
-```
-
-In a second terminal:
+From the repository root (Ctrl+C stops them):
 
 ```bash
-ngrok http 8000
+scripts/run_local.sh --jira --poll --form
 ```
 
-Copy the `https://` address it prints, for example
-`https://chapped-grievance-blinks.ngrok-free.dev`.
+### 0.5 How comments reach the agent
 
-Confirm it is alive:
-
-```bash
-curl -s localhost:8000/health | python -m json.tool
-```
-
-`secret_required` must be `true`. If it is false, no secret is configured and
-**every delivery will be refused with 503** — that is deliberate, because this
-endpoint creates Jira tickets.
-
-### 0.5 Connect the webhook
-
-Jira → **Settings** → **System** → **WebHooks** → **Create a WebHook**
-
-| Field | Value |
-| --- | --- |
-| **URL** | `https://your-ngrok-address/jira/webhook` |
-| **Events** | ☑ Comment: created |
-| **Secret** | The same value as `TASK_JIRA_WEBHOOK_SECRET` in your `.env` |
-
-> **The URL must end in `/jira/webhook`.** Pointing it at the bare address is the
-> most common mistake — Jira gets a 405 and nothing happens.
+Jira comments go to the Orchestration agent, which hands a build to this one. On
+the platform a Jira Automation rule sends each comment as a webhook
+(WORKFLOW.md, "Webhooks"); on a laptop `--poll` stands in for it, checking your
+site for new `@Aetherion` comments. Its log is `.local-logs/jira-watch.log`.
 
 ### 0.6 Create the one starting ticket
 
@@ -190,9 +163,9 @@ parent.
 > work item and the Sub-tasks attach to it directly. No duplicate Story gets
 > created to repeat what the ticket already says.
 
-**If nothing happens at all**, stop and check these in order: the webhook URL
-ends in `/jira/webhook`; `/health` says `secret_required: true`; the receiver
-terminal logs a line for every delivery it declines, with the reason.
+**If nothing happens at all**, check `.local-logs/jira-watch.log` (was the
+comment seen?) and `.local-logs/jira-orchestration.log`: Orchestration logs a
+line for every comment it declines, with the reason.
 
 ---
 
@@ -576,15 +549,8 @@ Every subject line must state the outcome on its own. A subject reading only
 
 **E7 · A forged call is refused**
 
-```bash
-curl -s -o /dev/null -w "%{http_code}\n" -X POST \
-  http://localhost:8000/jira/webhook \
-  -H 'Content-Type: application/json' \
-  -H 'X-Hub-Signature: sha256=deadbeef' \
-  -d '{"webhookEvent":"comment_created","issue":{"key":"FL-1"}}'
-```
-
-Expect `401`. Also check a request with **no** signature gets `401`.
+The platform checks each Jira webhook's signature before Orchestration sees it:
+a wrong or missing signature gets `401 Invalid signature` (WORKFLOW.md, "Webhooks").
 
 **E8 · A link to another Atlassian site is never fetched**
 

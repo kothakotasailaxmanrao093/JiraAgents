@@ -84,16 +84,6 @@ def check(values: dict[str, str]) -> list[str]:
     if missing:
         problems.append(f"Required setting(s) not set: {', '.join(missing)}.")
 
-    # No webhook-secret check (2026-10-06): those secrets belong to the standalone
-    # webhook server (src/webhook/server.py), which Aetherion does not run — Jira
-    # reaches the agents through the Orchestration agent's Aetherion webhook.
-
-    if _truthy(values.get("TASK_LOCAL_EXECUTION", "")):
-        problems.append(
-            "TASK_LOCAL_EXECUTION is on. That makes the webhook server run the "
-            "agent in its own process, which is a local development mode."
-        )
-
     if _truthy(values.get("TASK_READ_ONLY", "")):
         problems.append(
             "TASK_READ_ONLY is on. The deployed agent will refuse every write and "
