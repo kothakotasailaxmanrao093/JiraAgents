@@ -24,5 +24,11 @@ def install(agent: str) -> bool:
         return False
     from openai import AsyncOpenAI
 
-    importlib.import_module(module).install(AsyncOpenAI)
+    try:
+        hook = importlib.import_module(module)
+    except ModuleNotFoundError:
+        # Coding since 0.0.13 (2026-11-23) calls OpenAI itself when no gateway
+        # key is set; it has no client hook to install.
+        return False
+    hook.install(AsyncOpenAI)
     return True

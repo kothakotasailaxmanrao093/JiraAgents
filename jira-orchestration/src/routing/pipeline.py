@@ -125,6 +125,29 @@ def ticket_keys(build: AgentResult) -> list[str]:
     return list(dict.fromkeys(keys))
 
 
+# Readiness with the card's open questions counted (2026-11-24). The review is
+# told not to ask again what the memory holds as open, so it can find nothing NEW
+# and score 5/5 while earlier questions are still unanswered (KS-6: 5/5 with 6
+# open). 5/5 means nothing is open: one or two open questions cap it at 4, three
+# or more at 3 — below the default 4/5 needed to design it.
+OPEN_CAP_FEW, OPEN_CAP_MANY, OPEN_MANY = 4, 3, 3
+
+
+def readiness_with_open(score: int, open_questions: int) -> int:
+    """The review's score, lowered while questions are still unanswered."""
+    score = int(score or 0)
+    if open_questions >= OPEN_MANY:
+        return min(score, OPEN_CAP_MANY)
+    if open_questions > 0:
+        return min(score, OPEN_CAP_FEW)
+    return score
+
+
+def open_count(questions: list[dict[str, Any]] | None) -> int:
+    """How many of the memory's questions have no answer yet."""
+    return sum(1 for q in questions or [] if not q.get("answers"))
+
+
 def review_points(review: AgentResult | None) -> list[str]:
     """What the review left open: its questions, else its findings."""
     if review is None or review.outcome is not Outcome.REVIEWED:
@@ -341,8 +364,48 @@ def planning_problem(planning: dict[str, Any] | None) -> str:
     return str(planning.get("message") or planning.get("error") or "Planning returned no design")
 
 
+_RESULT_PR = re.compile(r"^(Draft PR|PR): (.+)$")
+_LINK_URL = re.compile(r"\]\((https?://[^)\s]+)\)")
+
+
 def pull_requests(coding: dict[str, Any] | None) -> list[dict[str, Any]]:
-    return [pr for pr in (coding or {}).get("pull_requests") or [] if pr.get("pr_url")]
+    """Each pull request Coding opened: {"service", "pr_url", "draft", ...}.
+
+    Coding answers with ``pull_requests`` (up to 0.0.26) or, since 0.0.13 of the
+    rewritten agent (2026-11-23), with the platform's ``results`` links, one
+    titled "PR: <service>" or "Draft PR: <service>" per pull request."""
+    coding = coding or {}
+    found = [pr for pr in coding.get("pull_requests") or [] if pr.get("pr_url")]
+    if found:
+        return found
+    for item in coding.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        title = _RESULT_PR.match(str(item.get("title") or ""))
+        url = _LINK_URL.search(str(item.get("link") or ""))
+        if title and url:
+            found.append(
+                {
+                    "service": title.group(2),
+                    "pr_url": url.group(1),
+                    "draft": title.group(1) == "Draft PR",
+                }
+            )
+    return found
+
+
+def pushed_branches(coding: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Branches Coding pushed without a pull request (results titled
+    "Branch <name>: <service>"): {"service", "branch", "url"}."""
+    out = []
+    for item in (coding or {}).get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        title = re.match(r"^Branch (\S+): (.+)$", str(item.get("title") or ""))
+        url = _LINK_URL.search(str(item.get("link") or ""))
+        if title and url:
+            out.append({"service": title.group(2), "branch": title.group(1), "url": url.group(1)})
+    return out
 
 
 # GitHub refusing the token, or not reachable: a new design cannot fix these.

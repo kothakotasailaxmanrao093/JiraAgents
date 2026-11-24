@@ -376,7 +376,8 @@ def document(memory: dict[str, Any]) -> dict[str, Any] | None:
         lines += [
             "",
             "Questions asked before and not answered yet (still open: do not raise them "
-            "again, in these or other words; ask only what is new):",
+            "again, in these or other words; ask only what is new — but they still count "
+            "against readiness: the card is not fully ready while any is open):",
         ]
         lines += [f"- {q['id']} {q['question']}" for q in still_open]
     if earlier:

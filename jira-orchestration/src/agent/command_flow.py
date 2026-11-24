@@ -217,7 +217,9 @@ async def create_tdd(cmd: Command) -> CommandResult:
         )
     minimum = int(cmd.settings.get("tdd_min_readiness") or 0)
     points = rules.review_points(review) if review else []
-    score = review.readiness_score if review else 0
+    still_open = rules.open_count((kept or {}).get("questions"))
+    # Unanswered questions count against readiness, old ones included (2026-11-24).
+    score = rules.readiness_with_open(review.readiness_score, still_open) if review else 0
     ready = (
         review is not None
         and review.outcome is Outcome.REVIEWED
@@ -225,7 +227,9 @@ async def create_tdd(cmd: Command) -> CommandResult:
     )
     if not ready:
         why = (
-            f"The review scored {cmd.issue_key} {score}/5; {minimum}/5 is needed to design it."
+            f"The review scored {cmd.issue_key} {score}/5"
+            + (f" ({still_open} question(s) still open)" if still_open else "")
+            + f"; {minimum}/5 is needed to design it."
             if review is not None and review.outcome is Outcome.REVIEWED
             else "The readiness review could not run, so the story was not designed."
         )

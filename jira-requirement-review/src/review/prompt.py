@@ -237,7 +237,9 @@ def build_user_message(
         parts.append("")
         parts.append(
             "ALREADY LISTED ON THIS TICKET as open questions — do NOT raise any of "
-            "these again, in any wording; report only gaps they do not cover:"
+            "these again, in any wording; report only gaps they do not cover. They are "
+            "still unanswered, so they COUNT AGAINST READINESS: never score 5 while any "
+            "of them is open, and judge the score as if they were findings:"
         )
         parts.extend(f"  {i}. {q}" for i, q in enumerate(known_questions, start=1))
     parts.append("")
