@@ -9,6 +9,21 @@ the platform's Temporal UI (`wf.sbox.aetherion.io`, namespace `test`). Documents
 open in the page. Nothing is written to Jira; Coding pushes a new branch and opens
 a **draft** pull request, and nothing is merged.
 
+## First time on a new laptop
+
+```bash
+git clone https://github.com/kothakotasailaxmanrao093/JiraAgents.git JiraAgent
+cd JiraAgent
+delivery-studio/setup.sh
+```
+
+`setup.sh` takes Planning and Coding from `AetherionAgents/asurint` (branches `sm/planning-agent`,
+`sm/coding-agent`), installs every agent's packages, creates the Docker containers and copies the
+settings templates. Then fill in `.env.local` and each agent's `.env` — get the values in person or
+from a password manager, never in chat or git. `CODE_GRAPH_KEY` must be the same in
+`jira-orchestration/.env` and `planning-agent/.env`; in `coding-agent/.env` set `CODING_OPEN_PR=true`
+and `JENKINS_ENABLED=false`. Connect the VPN.
+
 ## Run it
 
 From the `JiraAgent` folder:
@@ -53,6 +68,7 @@ Answer them in the Answers box (`Q1: …`) or as Jira comments, then review agai
 
 ```
 delivery-studio/
+├── setup.sh                       first time on a new laptop
 ├── start.sh  stop.sh  logs.sh     the commands
 ├── backend/
 │   ├── main.py                    starts the server (FastAPI + uvicorn)
