@@ -30,6 +30,7 @@ import re
 import subprocess
 import sys
 import time
+from contextvars import ContextVar
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -61,6 +62,17 @@ from tools import memory_tools, org_repos, pipeline_tools  # noqa: E402
 
 MEMSY = local_memsy.install()
 
+# Who wants to know when an agent's run starts and ends (the local studio:
+# studio/server.py shows each one with its Temporal link). Called as
+# observer(event, workflow, agent_dir, workflow_id, queue, result).
+RUN_OBSERVER: ContextVar = ContextVar("local_run_observer", default=None)
+
+
+def _tell(event: str, *args) -> None:
+    observer = RUN_OBSERVER.get()
+    if observer is not None:
+        observer(event, *args)
+
 
 def _fn(tool):
     return getattr(tool, "__wrapped__", tool)
@@ -77,11 +89,16 @@ async def _start(workflow: str, agent_dir: str, payload: dict) -> dict:
 
     client = await AetherionRuntime().connect()
     queue = local_queue(agent_dir)
-    handle = await client.start_workflow(
-        workflow, payload, id=f"local-{agent_dir}-{int(time.time())}", task_queue=queue
-    )
+    workflow_id = f"local-{agent_dir}-{int(time.time())}"
+    handle = await client.start_workflow(workflow, payload, id=workflow_id, task_queue=queue)
     print(f"  {workflow} started on {queue}; waiting…", flush=True)
-    out = await handle.result()
+    _tell("started", workflow, agent_dir, workflow_id, queue, None)
+    try:
+        out = await handle.result()
+    except Exception as error:
+        _tell("failed", workflow, agent_dir, workflow_id, queue, str(error))
+        raise
+    _tell("finished", workflow, agent_dir, workflow_id, queue, out)
     # An agent may answer with a list (its result, then its documents):
     # Orchestration reads the first item (command_flow._call), and so does this.
     if isinstance(out, list):
@@ -179,7 +196,7 @@ def _answer_text(answer) -> str:
 
 
 def _review_html(issue_key: str, title: str, review: AgentResult, questions: list[dict],
-                 ready: bool) -> str:
+                 ready: bool, score: int) -> str:
     e = html.escape
     # Only what is still needed; the answered ones are counted, not repeated
     # (KS-6, 2026-11-05: long pasted answers buried the open questions).
@@ -197,9 +214,11 @@ def _review_html(issue_key: str, title: str, review: AgentResult, questions: lis
         f"<li>{e(m.as_sentence())}</li>" for m in review.sources_missing
     )
     verdict = "Ready for planning" if ready else "Not ready for planning yet"
+    held = (f" (the review alone: {review.readiness_score}/5; lowered while questions are open)"
+            if score < review.readiness_score else "")
     return f"""<html><body style="font-family: Helvetica; font-size: 10pt">
 <h1>{e(issue_key)} — Requirement review</h1><h3>{e(title)}</h3>
-<p><b>{verdict}</b> — readiness {review.readiness_score}/5.</p><p>{e(review.summary or '')}</p>
+<p><b>{verdict}</b> — readiness {score}/5{held}.</p><p>{e(review.summary or '')}</p>
 <h2>Findings</h2><ul>{findings or '<li>None</li>'}</ul>
 <h2>Open questions (answer in the Answers box: "Q1: ...")</h2>
 <ul>{''.join(rows) or '<li>None — nothing more is needed</li>'}</ul>{done}
@@ -259,8 +278,11 @@ async def review(issue_key: str, answers: str = "", files: list[str] | None = No
     still_open = [q for q in questions if not q.get("answers")]
     # Orchestration's own gate: the score alone; open questions go to Planning
     # as open (KS-6, 2026-11-04: all answered was this script's rule only).
-    ready = result.readiness_score >= (settings.tdd_min_readiness() or 1)
-    page = _review_html(issue_key, card["title"], result, questions, ready)
+    # Unanswered questions count against readiness, old ones included (2026-11-24):
+    # the review only looks for what is NEW, so it alone could say 5/5 with 6 open.
+    score = rules.readiness_with_open(result.readiness_score, len(still_open))
+    ready = score >= (settings.tdd_min_readiness() or 1)
+    page = _review_html(issue_key, card["title"], result, questions, ready, score)
     digest = hashlib.sha256(page.encode()).hexdigest()
     out, latest = _next_version(OUT / "requirement-review", f"{issue_key}-review")
     stamp = latest.with_suffix(".sha") if latest else None
@@ -272,7 +294,10 @@ async def review(issue_key: str, answers: str = "", files: list[str] | None = No
         pdf, note = out, f"saved {out.name}"
     answered = len(questions) - len(still_open)
     message = (
-        f"{issue_key}: readiness {result.readiness_score}/5, {len(result.findings)} findings, "
+        f"{issue_key}: readiness {score}/5"
+        + (f" (review {result.readiness_score}/5, lowered: {len(still_open)} question(s) open)"
+           if score < result.readiness_score else "")
+        + f", {len(result.findings)} findings, "
         f"{answered} of {len(questions)} questions answered. "
         + ("READY FOR PLANNING." + (f" {len(still_open)} question(s) still open go to Planning as "
                                      "open; answer them in the Answers box to settle them."
@@ -280,7 +305,8 @@ async def review(issue_key: str, answers: str = "", files: list[str] | None = No
            f"NOT READY: {len(still_open)} question(s) open — answer them in the Answers box "
            '("Q1: ..."), then run the review again.')
     )
-    return {"status": "success", "message": message, "ready": ready, "pdf": str(pdf),
+    return {"status": "success", "message": message, "ready": ready, "score": score,
+            "review_score": result.readiness_score, "pdf": str(pdf),
             "note": note, "open_questions": [f"Q{n} {q.get('question')}" for n, q
                                              in enumerate(_open_in_order(questions), start=1)]}
 
@@ -319,6 +345,14 @@ async def plan(
             services.append({**found, "rank": rank})
     print("  services: " + (", ".join(f"{s['rank']}. {s['service']} ({s['repo']})"
                                       for s in services) or "none ranked"))
+    if not services:
+        return {"status": "error", "message": (
+            "No services to design for: the repositories could not be listed"
+            + ("" if repos.strip() else
+               f" (the {settings.github_org() or 'GitHub'} organization's repositories were not "
+               "readable — is the VPN on for github.asurint.com? — and ORCH_PLANNING_REPOS "
+               "names none)")
+            + ". Connect, then plan again.")}
     decisions = await _fn(memory_tools.decisions_in_force)(
         issue_key, [s["service"] for s in services])
     payload = {**handoff.payload(card, services, list(kept.get("questions") or [])),
@@ -344,6 +378,11 @@ async def plan(
     data = storage.retrieve(os.environ["TENANT_ID"], key, RetrievalMode.FULL_OBJECT)
     dest, _ = _next_version(OUT / "planning-agent", f"{issue_key}-TDD")
     dest.write_bytes(data)
+    # The design in the project's history, as the published flow keeps it
+    # (command_flow): a later card about the same thing finds it (2026-11-24).
+    version = re.search(r"-v(\d+)\.pdf$", dest.name).group(1)
+    event_id, data = handoff.design_event(card, services, {"version": version, "url": str(dest)})
+    await handoff_flow.remember(_memory_tool, issue_key, "design", data, event_id)
     message = f"{issue_key}: TDD {out.get('tdd_status')} — {dest.name}"
     if out.get("draft_reason"):
         message += f" (draft because: {out['draft_reason']})"
@@ -397,18 +436,40 @@ async def code(pdf: str, branch_name: str = "", target_branch: str = "") -> dict
         _, key = storage.store_object(os.environ["TENANT_ID"],
                                       f"technical_designs/local/{path.name}",
                                       path.read_bytes(), "application/pdf")
-    targets = {s["service"]: target_branch.strip() or s["branch"] for s in services}
-    payload = {"mode": "delegated", "uploaded_files": [key], "repos": "",
-               "branches": {"branch": branch,
-                            "per_repo": {k: {"target": v} for k, v in targets.items()}}}
+    # Coding since 0.0.13 (2026-11-23) takes one branch name; each pull request
+    # goes into the branch its TDD was written from (the work order's).
+    payload = {"mode": "delegated", "uploaded_files": [key], "branch_name": branch,
+               "team_id": os.environ.get("TENANT_ID", "")}
     out = await _start("coding-agent", "coding-agent", payload)
+    pulls = rules.pull_requests(out)
+    branches = rules.pushed_branches(out)
+    # Each pull request in the project's history, as the published flow keeps it
+    # (command_flow): the next card about the same thing is ranked with it, and
+    # Planning reads it as a reference change (2026-11-24).
+    card_key = str(task.get("ticket") or "").upper()
+    if card_key:
+        for pr in pulls:
+            pr.setdefault("branch", branch)
+        for event_id, data in handoff.pr_events({"pull_requests": pulls},
+                                                str(task.get("title") or "")):
+            await handoff_flow.remember(_memory_tool, card_key, "pr_opened", data, event_id)
     prs = [f"{pr['service']}: {pr['pr_url']}{' (draft)' if pr.get('draft') else ''}"
-           for pr in out.get("pull_requests") or []]
+           for pr in pulls]
+    pushed = [f"{b['service']}: {b['url']}" for b in branches]
     others = [f"{s['service']}: {s['reason']}" for s in out.get("skipped") or []]
-    message = (f"Branch {branch}. " + ("; ".join(f"PR {p}" for p in prs) or "No pull request.")
+    if out.get("message"):
+        others.append(str(out["message"]))
+    ignored = (f" (asked for {target_branch.strip()!r}; Coding opens it into the TDD's branch)"
+               if target_branch.strip() else "")
+    message = (f"Branch {branch}{ignored}. "
+               + ("; ".join(f"PR {p}" for p in prs) or "No pull request.")
+               + (" Pushed: " + "; ".join(pushed) if pushed else "")
                + (" " + "; ".join(others) if others else ""))
-    return {"status": "success" if prs else out.get("status", "no_pull_requests"),
-            "message": message, "pull_requests": prs, "branch": branch}
+    status = "success" if prs or pushed else out.get("status", "nothing_pushed")
+    return {"status": status, "message": message, "pull_requests": prs,
+            "pull_request_links": pulls, "branches": branches, "branch": branch,
+            "services": [{"service": s["service"], "repo": s["repo"], "branch": s["branch"]}
+                         for s in services]}
 
 
 async def code_interactive(pdf: str) -> dict:
@@ -421,6 +482,32 @@ async def code_interactive(pdf: str) -> dict:
     target = input(f"Pull request into which branch? [{first}]: ").strip()
     branch = input(f"New branch name [{proposed_branch(task)}]: ").strip()
     return await code(pdf, branch, target)
+
+
+# --- break down (Task Creation) -----------------------------------------------------------
+
+
+async def breakdown(issue_key: str, create: bool = False) -> dict:
+    """The card split into work by Task Creation: a Story gets Sub-tasks, an Epic
+    Stories (the card itself is never changed). ``create`` False: a preview — the
+    breakdown as a PDF, nothing written to Jira. True: the issues are created."""
+    issue_key = issue_key.upper()
+    payload = {"issue_key": issue_key, "mode": "delegated", "force": True,
+               "reply_on_ticket": "no", "create_in_jira": bool(create),
+               "output": "create_in_jira" if create else "pdf_by_email"}
+    started = time.time()
+    out = await _start("JiraTaskCreation", "jira-task-creation", payload)
+    result = AgentResult.from_dict(out)
+    created = [{"key": c.key, "type": c.issue_type, "summary": c.summary, "url": c.url}
+               for c in result.created]
+    folder = ROOT / "docs-export" / "task-creation"
+    pdfs = sorted((p for p in folder.glob(f"*{issue_key}*.pdf") if p.stat().st_mtime >= started - 5),
+                  key=lambda p: p.stat().st_mtime, reverse=True) if folder.is_dir() else []
+    ok = result.outcome.value in ("CREATED", "PLANNED", "REVIEWED") and not result.errors
+    return {"status": "success" if ok else "error", "outcome": result.outcome.value,
+            "message": f"{result.headline}. {result.summary}".strip(),
+            "proposed": list(result.proposed), "created": created,
+            "pdf": str(pdfs[0]) if pdfs else ""}
 
 
 # --- memory -------------------------------------------------------------------------------

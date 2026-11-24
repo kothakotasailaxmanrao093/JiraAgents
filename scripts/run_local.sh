@@ -36,18 +36,23 @@
 #   scripts/run_local.sh --form --keyword AetherionLocal
 #                                 …answer "@AetherionLocal build" only: the published
 #                                 router (same Jira webhook) ignores those comments
+#   scripts/run_local.sh --studio
+#                                 …and the Delivery Studio at http://127.0.0.1:8780: one page
+#                                 that takes a card through Review -> Planning -> Coding,
+#                                 with every run linked to Temporal (delivery-studio/)
 #   logs:  .local-logs/<agent>.log
 #   try it: scripts/ask_local.py --health | ISSUE-KEY COMMENT-ID
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 AGENTS=(planning-agent coding-agent jira-task-creation jira-requirement-review jira-orchestration)
-JIRA_ONLY=0; POLL=0; FORM=0; NO_OPEN=0; FOLLOW=0; SITE=""; KEYWORD=""
-USAGE="usage: run_local.sh [--jira] [--poll] [--form] [--no-open] [--follow] [--site NAME] [--keyword NAME]"
+JIRA_ONLY=0; POLL=0; FORM=0; STUDIO=0; NO_OPEN=0; FOLLOW=0; SITE=""; KEYWORD=""
+USAGE="usage: run_local.sh [--jira] [--poll] [--form] [--studio] [--no-open] [--follow] [--site NAME] [--keyword NAME]"
 while [ $# -gt 0 ]; do
   case "$1" in
     --jira) JIRA_ONLY=1 ;;
     --poll) POLL=1 ;;
     --form) FORM=1 ;;
+    --studio) STUDIO=1 ;;
     --no-open) NO_OPEN=1 ;;
     --follow) FOLLOW=1 ;;
     --site) SITE="${2:-}"; [ -n "$SITE" ] || { echo "$USAGE"; exit 2; }; shift ;;
@@ -149,6 +154,14 @@ if [ "$FORM" = 1 ]; then
      "$ROOT/scripts/local_form.py" --port 8770) >"$LOGS/form-local-agents.log" 2>&1 &
   pids+=($!)
   echo "form for review -> plan -> code by hand: http://127.0.0.1:8770"
+fi
+if [ "$STUDIO" = 1 ]; then
+  [ "$FORM" = 1 ] || sleep 10  # let the workers connect first
+  "$ROOT/jira-orchestration/.venv/bin/python" "$ROOT/delivery-studio/backend/main.py" --port "${STUDIO_PORT:-8780}" \
+    >"$LOGS/studio.log" 2>&1 &
+  pids+=($!)
+  echo "Delivery Studio: http://127.0.0.1:${STUDIO_PORT:-8780}  (log: .local-logs/studio.log)"
+  if [ "$NO_OPEN" != 1 ]; then (sleep 3; open "http://127.0.0.1:${STUDIO_PORT:-8780}" 2>/dev/null || true) & fi
 fi
 if [ "$FOLLOW" = 1 ]; then
   # Only what a person reads: no worker-poll retries, raw HTTP GETs or the

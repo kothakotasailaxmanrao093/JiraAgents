@@ -28,8 +28,9 @@ AGENT_NAMES = {
     "jira-orchestration": ("JiraOrchestration",),
     "jira-task-creation": ("JiraTaskCreation",),
     "jira-requirement-review": ("JiraRequirementReview", "PostJiraReviewComment"),
-    "planning-agent": ("planning_agent", "query_agent"),
-    "coding-agent": ("coding-agent",),
+    "planning-agent": ("planning_agent",),
+    # coding-ci-watch: started by coding-agent when JENKINS_ENABLED=true (2026-11-23).
+    "coding-agent": ("coding-agent", "coding-ci-watch"),
     # Local only (2026-11-03): review -> plan -> code by hand, on Orchestration's Python.
     "local-agents": ("local_flow",),
 }
