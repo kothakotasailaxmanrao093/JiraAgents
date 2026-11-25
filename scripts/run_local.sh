@@ -79,7 +79,9 @@ fi
 if [ -n "$SITE" ]; then
   # After .env.local, so the site's values win; the workers keep what the shell has.
   set -a; . "$SITE_FILE"; set +a
-  echo "Jira site: ${JIRA_BASE_URL:-?} (from .env.site.$SITE)"
+  echo "Jira site: ${JIRA_BASE_URL:-?} (from .env.site.$SITE) — read only"
+  # Another team's Jira is only read: nothing is created, commented or labelled there.
+  export STUDIO_READ_ONLY=1 STUDIO_SITE="$SITE"
 fi
 [ "$JIRA_ONLY" = 1 ] || for c in planning-neo4j planning-s3; do
   docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$c" || echo "warning: Docker container $c is not running"

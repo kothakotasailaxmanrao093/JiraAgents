@@ -97,6 +97,12 @@ async function loadHealth() {
     $("#link-temporal").href = h.links.temporal;
     $("#link-jira").href = h.links.jira + (h.project ? `/jira/software/projects/${h.project}/boards` : "");
     $("#link-github").href = h.links.github;
+    const pill = $(".top-right .pill");
+    const host = (h.jira_site || "").replace(/^https?:\/\//, "");
+    pill.textContent = `Jira: ${host}${h.read_only ? " · read only" : ""} · Temporal sbox/test`;
+    pill.title = h.read_only ? "Another team's Jira: cards are only read; nothing is written there." : "";
+    const createBtn = $('[data-run="breakdown-create"]');
+    if (createBtn) createBtn.classList.toggle("hidden", !!h.read_only);
     const workersDown = h.workers.filter((w) => !w.running && w.agent !== "jira-task-creation");
     const svcDown = h.services.filter((s) => !s.ok);
     const dot = $("#health-dot");

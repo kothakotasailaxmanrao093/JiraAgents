@@ -107,6 +107,9 @@ async def report(busy: bool) -> dict[str, Any]:
             "github": f"{github_site}/{os.environ.get('ORCH_GITHUB_ORG', '')}",
         },
         "project": config.project(),
+        "read_only": config.READ_ONLY,
+        "site": config.SITE,
+        "jira_site": base,
     }
 
 

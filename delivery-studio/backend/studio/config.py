@@ -30,6 +30,9 @@ TEMPORAL_UI = os.environ.get(
 GITHUB_PROBE = os.environ.get("STUDIO_GITHUB_PROBE", "https://github.asurint.com/api/v3/meta")
 DEFAULT_PORT = int(os.environ.get("STUDIO_PORT", "8780"))
 MAX_UPLOAD = 25 * 1024 * 1024
+# Another team's Jira (start.sh --site NAME): only read — nothing is created there.
+READ_ONLY = os.environ.get("STUDIO_READ_ONLY", "").strip() in ("1", "true", "yes")
+SITE = os.environ.get("STUDIO_SITE", "").strip()
 
 # Each agent's folder -> the name shown on the page.
 AGENTS = {

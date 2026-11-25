@@ -41,6 +41,10 @@ async def start_run(req: RunRequest) -> dict[str, Any]:
     key = req.issue_key.strip().upper()
     if kind != "code" and not key:
         raise HTTPException(400, "Give the card's key, e.g. KS-6.")
+    if kind == "breakdown" and req.create_in_jira and config.READ_ONLY:
+        raise HTTPException(
+            403, "This Jira is read only (another team's site): preview the breakdown instead."
+        )
     if jobs.LOCK.locked():
         raise HTTPException(409, "Another run is in progress; wait for it to finish.")
     for name in ("review_pdf", "tdd_pdf"):
