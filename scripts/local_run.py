@@ -411,21 +411,109 @@ def task_of(pdf: str) -> dict:
     return json.loads(out or "{}")
 
 
+# --- the branch Coding starts from (2026-11-25) ------------------------------------------
+# "@Aetherion code" asks where the new branch is cut from; Coding (0.0.13+) always
+# starts from the branch and commit in the TDD's work order. Another source branch
+# is given to it by a copy of the TDD whose work order names that branch and its
+# latest commit — the pull request then goes into that branch too.
+
+
+def _github_get(path: str, params: dict | None = None):
+    import httpx
+
+    base = settings.github_api_url().rstrip("/")
+    token = os.environ.get("GITHUB_TOKEN", "").strip()
+    headers = {"Accept": "application/vnd.github+json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    r = httpx.get(f"{base}{path}", params=params, headers=headers, timeout=20)
+    r.raise_for_status()
+    return r.json()
+
+
+def branches(repo: str, limit: int = 300) -> list[str]:
+    """The repository's branch names (the default branch first)."""
+    info = _github_get(f"/repos/{repo}")
+    names: list[str] = []
+    for page in range(1, limit // 100 + 1):
+        got = _github_get(f"/repos/{repo}/branches", {"per_page": 100, "page": page})
+        names += [b["name"] for b in got]
+        if len(got) < 100:
+            break
+    default = info.get("default_branch") or ""
+    return ([default] if default in names else []) + sorted(n for n in names if n != default)
+
+
+def branch_head(repo: str, branch: str) -> str:
+    """The latest commit on a branch."""
+    from urllib.parse import quote
+
+    return _github_get(f"/repos/{repo}/branches/{quote(branch, safe='')}")["commit"]["sha"]
+
+
+def branch_exists(repo: str, branch: str) -> bool:
+    """True or False from GitHub; anything else (no VPN, a refused token) raises."""
+    import httpx
+
+    try:
+        branch_head(repo, branch)
+        return True
+    except httpx.HTTPStatusError as error:
+        if error.response.status_code == 404:
+            return False
+        raise
+
+
+def from_branch(pdf: str, source: str) -> str:
+    """A copy of the TDD whose work order starts every service from ``source``
+    (at its latest commit); the path of the copy."""
+    task = task_of(pdf)
+    for svc in task.get("services") or []:
+        svc["branch"] = source
+        svc["commit"] = branch_head(svc["repo"], source)
+    original = _local_file(pdf)
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", source)
+    copy = OUT / "planning-agent" / "from-branch" / f"{original.stem}-from-{safe}.pdf"
+    copy.parent.mkdir(parents=True, exist_ok=True)
+    code = ("import sys, json; from pypdf import PdfReader, PdfWriter; "
+            "w = PdfWriter(clone_from=PdfReader(sys.argv[1])); "
+            "w.add_metadata({'/CodingTask': sys.argv[3]}); w.write(sys.argv[2])")
+    subprocess.run([str(ROOT / "coding-agent/.venv/bin/python"), "-c", code, str(original),
+                    str(copy), json.dumps(task)], check=True)
+    return str(copy)
+
+
 def proposed_branch(task: dict) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", str(task.get("ticket") or task.get("title") or "change")
                   .lower()).strip("-")[:40]
     return f"fix/{slug}-{int(time.time()) % 100000}"
 
 
-async def code(pdf: str, branch_name: str = "", target_branch: str = "") -> dict:
-    """The TDD implemented: a new branch per service and a pull request into
-    ``target_branch`` (else the branch the TDD was written from)."""
+async def code(pdf: str, branch_name: str = "", source_branch: str = "") -> dict:
+    """The TDD implemented: a new branch ``branch_name`` per service, cut from
+    ``source_branch`` (else the branch the TDD was written from), and a draft
+    pull request into that same branch."""
     task = task_of(pdf)
     services = task.get("services") or []
     if not services:
         return {"status": "error", "message":
                 "This PDF holds no work order (a TDD written before 2026-11-02?)."}
     branch = branch_name.strip() or proposed_branch(task)
+    source = source_branch.strip()
+    for svc in services:
+        if branch_exists(svc["repo"], branch):
+            return {"status": "error", "message":
+                    f"A branch named {branch!r} already exists in {svc['repo']}: choose a new name."}
+    if source and any(svc["branch"] != source for svc in services):
+        for svc in services:
+            if not branch_exists(svc["repo"], source):
+                return {"status": "error", "message":
+                        f"{svc['repo']} has no branch {source!r} to start from."}
+        print(f"  starting from {source} (the TDD was written from "
+              f"{', '.join(sorted({s['branch'] for s in services}))})")
+        pdf = from_branch(pdf, source)
+        task = task_of(pdf)
+        services = task.get("services") or []
     if pdf.startswith("local-uploads/"):
         key = pdf
     else:
@@ -459,27 +547,27 @@ async def code(pdf: str, branch_name: str = "", target_branch: str = "") -> dict
     others = [f"{s['service']}: {s['reason']}" for s in out.get("skipped") or []]
     if out.get("message"):
         others.append(str(out["message"]))
-    ignored = (f" (asked for {target_branch.strip()!r}; Coding opens it into the TDD's branch)"
-               if target_branch.strip() else "")
-    message = (f"Branch {branch}{ignored}. "
+    sources = ", ".join(sorted({s["branch"] for s in services}))
+    message = (f"Branch {branch}, cut from {sources}; pull request into {sources}. "
                + ("; ".join(f"PR {p}" for p in prs) or "No pull request.")
                + (" Pushed: " + "; ".join(pushed) if pushed else "")
                + (" " + "; ".join(others) if others else ""))
     status = "success" if prs or pushed else out.get("status", "nothing_pushed")
     return {"status": status, "message": message, "pull_requests": prs,
             "pull_request_links": pulls, "branches": branches, "branch": branch,
+            "source": sources,
             "services": [{"service": s["service"], "repo": s["repo"], "branch": s["branch"]}
                          for s in services]}
 
 
 async def code_interactive(pdf: str) -> dict:
-    """The terminal's form: the target and the branch name asked, defaults offered."""
+    """The terminal's form: the branch to start from and the new branch's name asked."""
     task = task_of(pdf)
     print(f"TDD: {task.get('title')} ({task.get('ticket')}, {task.get('status')})")
     for s in task.get("services") or []:
         print(f"  {s['service']}: {s['repo']} at {s['branch']} ({s['commit'][:12]})")
     first = (task.get("services") or [{}])[0].get("branch", "")
-    target = input(f"Pull request into which branch? [{first}]: ").strip()
+    target = input(f"Start from which branch (the pull request goes into it too)? [{first}]: ").strip()
     branch = input(f"New branch name [{proposed_branch(task)}]: ").strip()
     return await code(pdf, branch, target)
 

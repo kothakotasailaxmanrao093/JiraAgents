@@ -76,13 +76,16 @@ provides the answer. Raise it only when the question is open across ALL sources.
 (e.g. "Error-handling requirements are not defined").
 - Ambiguity: a term/statement that can be read more than one way \
 (e.g. "'real-time' is used but no latency target is given").
-- Edge Case: a specific boundary condition or unusual scenario (empty input, \
-concurrent access, zero/negative/max values, permission edge cases, partial \
-failure) that the card does not address.
+- Edge Case: a boundary of the behaviour the card describes (the value it shows \
+or takes being empty, too long, zero, negative or at its maximum; a permission \
+the card names) that the card does not address. Not system failures or record \
+states the card never mentions (rule 9).
 - Missing Functional Detail: a missing user-facing behaviour, rule, input, or \
 output.
-- Missing Technical Detail: a missing implementation/integration detail — data \
-model, API contract, auth, performance, security, scaling, deployment.
+- Missing Technical Detail: a missing implementation/integration detail the \
+ticket itself raises — an integration, contract, auth, performance or security \
+need it names. Never which field, table or API to use: the code settles that \
+(rule 9).
 - Missing Acceptance Criterion: a specific, testable acceptance criterion the \
 card needs but does not state — flag ACs that are vague ("user-friendly", \
 "fast") as well as ones that are simply absent.
@@ -127,6 +130,21 @@ visible to the team — do NOT raise them again as findings. Report only gaps th
 section does not already cover, and say in "executive_summary" how many open \
 questions the ticket already lists (e.g. "3 open questions are already listed on \
 the ticket").
+
+9. ONLY WHAT THE TICKET ITSELF ASKS (2026-11-25): every finding is a question \
+the ticket's own people (product owner, business) must answer about WHAT THIS \
+TICKET ASKS FOR — its scope (which screens, users or flows), the behaviour a user \
+sees, and how it is accepted. Do NOT raise what engineering settles from the code \
+while building it: which field, table, API or data source to use; how to \
+implement it; generic failure handling (a lookup, request or service failing, \
+timeouts, retries); or states of records the ticket never mentions (deleted, \
+inactive, archived, concurrent edits). Raise one of those only when the ticket \
+itself talks about it. EXAMPLE — a card "show the client name on the Edit \
+Scoring Configuration screen": RIGHT — what shows when the name is missing or \
+very long; whether it applies to the internal screen, the client-facing one or \
+both; that both show it the same way. WRONG — legal name or display name field; \
+what happens if the client was deleted or is inactive; what happens if the \
+client lookup fails.
 
 TONE: factual and specific, in plain words a non-specialist understands. Reference \
 ticket keys and concrete terms from the sources. Each description is one crisp \

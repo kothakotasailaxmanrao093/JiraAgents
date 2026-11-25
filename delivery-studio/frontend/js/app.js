@@ -17,7 +17,7 @@ const state = {
 };
 
 const PAGES = {
-  pipeline: ["Pipeline", "A Jira card, reviewed, designed and coded by the agents, end to end."],
+  pipeline: ["Agent Workflow", "A Jira card, reviewed, broken down, designed and coded by the agents."],
   runs: ["Runs", "Every run started from this studio, with its Temporal workflows."],
   memory: ["Card memory", "What the agents remember about a card between runs."],
   system: ["System", "The local agents, their connections and their logs."],
@@ -86,7 +86,8 @@ function show(page) {
   if (page === "system") loadSystem();
   if (page === "memory" && $("#mem-key").value.trim() && !$("#memory-view").innerHTML.trim()) loadMemory();
 }
-window.addEventListener("hashchange", () => show(location.hash.slice(1)));
+window.addEventListener("hashchange", () => show(pageOf(location.hash.slice(1))));
+const pageOf = (hash) => (hash === "workflow" ? "pipeline" : hash);
 
 // --- health -----------------------------------------------------------------------
 async function loadHealth() {
@@ -322,7 +323,7 @@ function renderSteps(job) {
     } else {
       const prs = cd.pull_requests || [], brs = cd.branches || [];
       body.innerHTML = `
-        ${cd.branch ? `<div class="msg">Branch <code>${esc(cd.branch)}</code></div>` : ""}
+        ${cd.branch ? `<div class="msg">Branch <code>${esc(cd.branch)}</code>${cd.source ? ` · cut from <code>${esc(cd.source)}</code> · pull request into <code>${esc(cd.source)}</code>` : ""}</div>` : ""}
         ${prs.map((p) => `<div class="pr"><div class="top"><b>${esc(p.service)}</b>${p.draft ? `<span class="draft">Draft</span>` : ""}</div><a href="${esc(p.pr_url)}" target="_blank" rel="noopener">${esc(p.pr_url)} ↗</a></div>`).join("")}
         ${brs.map((b) => `<div class="pr"><div class="top"><b>${esc(b.service)}</b><span class="draft">Branch only</span></div><a href="${esc(b.url)}" target="_blank" rel="noopener">${esc(b.url)} ↗</a></div>`).join("")}
         ${!prs.length && !brs.length ? `<div class="msg" style="color:var(--bad)">${esc(cd.message || job.error || "Nothing was pushed.")}</div>` : `<div class="msg">${esc(cd.message || "")}</div>`}
@@ -351,6 +352,54 @@ setInterval(() => {
   $$(".elapsed[data-since]").forEach((e) => { e.textContent = fmtDur(Date.now() / 1000 - Number(e.dataset.since)); });
 }, 1000);
 
+// --- coding: which branch to start from, and the new branch's name ------------------
+// As "@Aetherion code" asks: the new branch is cut from the source branch, and the
+// draft pull request goes back into it.
+async function askBranches(kind) {
+  const key = state.card?.key || "";
+  let tdd = null;
+  if (kind === "code" && state.tddPdf) {
+    tdd = await api(`/api/tdd?path=${encodeURIComponent(state.tddPdf)}`).catch((e) => { toast(e.message); return null; });
+    if (!tdd) return null;
+  }
+  const suggested = tdd?.suggested_branch || `fix/${key.toLowerCase()}-${Date.now() % 100000}`;
+  const written = tdd ? [...new Set(tdd.services.map((s) => s.branch))].join(", ") : "";
+  const html = `
+    <p>${kind === "pipeline" ? "Review, then Planning, then Coding — stopping where a person is needed (open questions, a failed step)." : `Coding implements <b>${esc(state.tddName || "the design")}</b>.`}</p>
+    ${tdd ? tdd.services.map((s) => `<div class="svc-line"><b>${esc(s.service)}</b> · ${esc(s.repo)} · written from <code>${esc(s.branch)}</code></div>`).join("") : ""}
+    <label class="form-row">Start from branch <span class="hint">the new branch is cut from it, and the draft pull request goes into it${written ? ` · the design was written from ${esc(written)}` : " · empty: the branch the design is written from"}</span>
+      ${tdd ? `<select id="dlg-source"><option>${esc(written.split(", ")[0])}</option></select>` : `<input id="dlg-source" placeholder="e.g. develop (empty: the design's branch)">`}
+    </label>
+    <label class="form-row">New branch name <span class="hint">must not exist yet</span>
+      <input id="dlg-branch" value="${esc(suggested)}" spellcheck="false">
+      <span class="field-note" id="dlg-branch-note"></span>
+    </label>
+    <p class="msg" style="margin-top:14px">Coding <b>pushes this new branch</b> to each service's repository and opens a <b>draft pull request</b>. Nothing is merged, and nothing is written to Jira.</p>`;
+  const answer = confirmBox(kind === "code" ? "Run Coding" : "Run", html);
+  if (tdd) {
+    const repo = tdd.services[0].repo;
+    api(`/api/branches?repo=${encodeURIComponent(repo)}`).then((r) => {
+      const sel = $("#dlg-source");
+      const keep = sel.value;
+      sel.innerHTML = r.branches.map((b) => `<option ${b === keep ? "selected" : ""}>${esc(b)}</option>`).join("");
+    }).catch((e) => toast(e.message));
+    const check = async () => {
+      const name = $("#dlg-branch").value.trim(), note = $("#dlg-branch-note");
+      if (!name) { note.textContent = ""; return; }
+      const r = await api(`/api/branch-exists?repo=${encodeURIComponent(repo)}&name=${encodeURIComponent(name)}`).catch((e) => { note.className = "field-note bad"; note.textContent = e.message; return null; });
+      if (r) { note.className = "field-note " + (r.exists ? "bad" : "ok"); note.textContent = r.exists ? "A branch with this name already exists — choose another." : "Name is free."; }
+    };
+    $("#dlg-branch").onchange = check; check();
+  }
+  if (!(await answer)) return null;
+  const branch = $("#dlg-branch").value.trim();
+  if (!/^[A-Za-z0-9._\/-]+$/.test(branch) || branch.includes("..") || branch.endsWith("/")) {
+    toast("That is not a valid branch name."); return null;
+  }
+  if ($("#dlg-branch-note")?.classList.contains("bad")) { toast("That branch already exists — choose another name."); return null; }
+  return { branch, source: ($("#dlg-source").value || "").trim() };
+}
+
 // --- runs -------------------------------------------------------------------------
 async function start(kind) {
   if (!state.card && kind !== "code") return toast("Load a card first.");
@@ -368,17 +417,17 @@ async function start(kind) {
   const body = {
     kind, issue_key: state.card?.key || "", answers,
     services: $("#opt-services").value.trim(),
-    branch_name: $("#opt-branch").value.trim(),
+    branch_name: "",
     files: state.uploads.map((u) => u.key),
     review_pdf: kind === "plan" ? state.reviewPdf : "",
     tdd_pdf: kind === "code" ? state.tddPdf : "",
     create_in_jira: create,
   };
   if ((kind === "code" || kind === "pipeline") && !create) {
-    const ok = await confirmBox(kind === "code" ? "Run Coding" : "Run end to end",
-      `<p>${kind === "pipeline" ? "Review, then Planning, then Coding — stopping if the review needs answers." : `Coding implements <b>${esc(state.tddName || "the design")}</b>.`}</p>
-       <p>Coding <b>pushes a new branch</b> to each service's repository and opens a <b>draft pull request</b>. Nothing is merged, and nothing is written to Jira.</p>`);
-    if (!ok) return;
+    const chosen = await askBranches(kind);
+    if (!chosen) return;
+    body.branch_name = chosen.branch;
+    body.source_branch = chosen.source;
   }
   try {
     const stepOf = { breakdown: "tasks" }[kind] || kind;
@@ -423,11 +472,11 @@ async function loadRuns() {
     <tr>
       <td>${fmtTime(r.started)}</td>
       <td><span class="card-key">${esc(r.issue_key || "—")}</span></td>
-      <td>${esc({ pipeline: "End to end", review: "Review", breakdown: r.options?.create_in_jira ? "Break down · created" : "Break down · preview", plan: "Planning", code: "Coding" }[r.kind] || r.kind)}</td>
+      <td>${esc({ pipeline: "Full run", review: "Review", breakdown: r.options?.create_in_jira ? "Break down · created" : "Break down · preview", plan: "Planning", code: "Coding" }[r.kind] || r.kind)}</td>
       <td><span class="status" data-s="${esc(r.status)}">${esc(LABEL[r.status] || r.status)}</span></td>
       <td>${r.ended ? fmtDur(r.ended - r.started) : `<span class="spinner"></span>`}</td>
       <td><div class="wfs">${(r.workflows || []).map((w) => `<a class="wf ${esc(w.status)}" href="${esc(w.url)}" target="_blank" rel="noopener">${esc(w.agent)} ↗</a>`).join("") || "—"}</div></td>
-    </tr>`).join("") : `<tr><td colspan="6"><div class="empty">No runs yet. Start one from the Pipeline page.</div></td></tr>`;
+    </tr>`).join("") : `<tr><td colspan="6"><div class="empty">No runs yet. Start one from the Agent Workflow page.</div></td></tr>`;
 }
 
 // --- memory -----------------------------------------------------------------------
@@ -522,7 +571,7 @@ $("#load-memory").onclick = loadMemory;
 $("#mem-key").addEventListener("keydown", (e) => { if (e.key === "Enter") loadMemory(); });
 
 (async function init() {
-  show(location.hash.slice(1) || "pipeline");
+  show(pageOf(location.hash.slice(1)) || "pipeline");
   loadHealth();
   setInterval(loadHealth, 15000);
   loadCardList();
