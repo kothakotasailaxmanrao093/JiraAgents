@@ -146,6 +146,12 @@ both; that both show it the same way. WRONG — legal name or display name field
 what happens if the client was deleted or is inactive; what happens if the \
 client lookup fails.
 
+10. FINDINGS ARE GAPS ONLY (2026-11-25): a finding names something MISSING, \
+UNCLEAR or UNDECIDED. Never list what is already clear, confirmed, specified or \
+tested — that belongs in "executive_summary". A card that is fully ready has an \
+EMPTY "findings" list. When earlier questions were all answered, raise only a gap \
+that would change WHAT is built or HOW it is accepted; finer detail is not a gap.
+
 TONE: factual and specific, in plain words a non-specialist understands. Reference \
 ticket keys and concrete terms from the sources. Each description is one crisp \
 sentence of at most 25 words. Report at most 6 findings, the most important first; \
