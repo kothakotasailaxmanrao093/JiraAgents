@@ -5,19 +5,24 @@
 #   delivery-studio/start.sh --ui-only    only the UI (the agents are already running)
 #   delivery-studio/start.sh --no-open    don't open the browser
 #   delivery-studio/start.sh --port 8790  another port (default 8780)
+#   delivery-studio/start.sh --site client
+#                                         read another Jira (the settings in .env.site.client,
+#                                         template .env.site.example): read only — nothing is
+#                                         written to that Jira
 #
 # Ctrl+C stops what this started. delivery-studio/stop.sh stops everything.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 PYTHON="$ROOT/jira-orchestration/.venv/bin/python"
-UI_ONLY=0; NO_OPEN=0; PORT="${STUDIO_PORT:-8780}"
+UI_ONLY=0; NO_OPEN=0; SITE=""; PORT="${STUDIO_PORT:-8780}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --ui-only) UI_ONLY=1 ;;
     --no-open) NO_OPEN=1 ;;
     --port) PORT="${2:-}"; [ -n "$PORT" ] || { echo "--port needs a number"; exit 2; }; shift ;;
-    -h|--help) sed -n '2,9p' "$0"; exit 0 ;;
+    --site) SITE="${2:-}"; [ -n "$SITE" ] || { echo "--site needs a name"; exit 2; }; shift ;;
+    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
     *) echo "unknown option: $1 (try --help)"; exit 2 ;;
   esac
   shift
@@ -33,9 +38,17 @@ if [ "$UI_ONLY" = 0 ]; then
   # run_local.sh starts every agent's worker and, with --studio, this UI.
   args=(--studio)
   [ "$NO_OPEN" = 1 ] && args+=(--no-open)
+  [ -n "$SITE" ] && args+=(--site "$SITE")
   exec "$ROOT/scripts/run_local.sh" "${args[@]}"
 fi
 
+if [ -n "$SITE" ]; then
+  SITE_FILE="$ROOT/.env.site.$SITE"
+  [ -f "$SITE_FILE" ] || { echo "error: no $SITE_FILE — copy .env.site.example and fill it in"; exit 2; }
+  set -a; . "$ROOT/.env.local" 2>/dev/null || true; . "$SITE_FILE"; set +a
+  export STUDIO_READ_ONLY=1 STUDIO_SITE="$SITE"
+  echo "Jira site: ${JIRA_BASE_URL:-?} (from .env.site.$SITE) — read only"
+fi
 mkdir -p "$ROOT/.local-logs"
 echo "Delivery Studio: http://127.0.0.1:$PORT  (log: .local-logs/studio.log)"
 if [ "$NO_OPEN" != 1 ]; then (sleep 3; open "http://127.0.0.1:$PORT" 2>/dev/null || true) & fi
