@@ -52,11 +52,18 @@ Open a card directly: `http://127.0.0.1:8780/?card=KS-6`
 
 | Page | What it shows |
 |---|---|
-| **Pipeline** | Load a card; run the whole flow or one step. **Break down** (Task Creation): preview the Sub-tasks (a Story) or Stories (an Epic) as a PDF, then create them in Jira — the card itself is never changed. Readiness score, open questions and an answers box; ranked services and the TDD; the branch and pull requests. Each step links to its Temporal workflow; a live log underneath. |
+| **Agent Workflow** | Load a card; **Run** the whole flow or one step. **Break down** (Task Creation): preview the Sub-tasks (a Story) or Stories (an Epic) as a PDF, then create them in Jira — the card itself is never changed. Readiness score, open questions and an answers box; ranked services and the TDD; the branch and pull requests. Each step links to its Temporal workflow; a live log underneath. |
 | **Runs** | Every run started here, with status, duration and workflow links. |
 | **Card memory** | What Orchestration remembers about a card: questions with their answers, ranked services (encrypted at rest). |
 | **System** | The local agents, Jira, GitHub Enterprise, Temporal, OpenAI and Docker; each agent's log. |
 | **How it works** | The agents and how a card moves through them. |
+
+## Coding: which branch
+
+**Run coding** (and **Run**) asks, as `@Aetherion code` does, which branch to **start from** and the
+**new branch's name**. The new branch is cut from the chosen branch at its latest commit, and the draft
+pull request goes back into it. The branch list comes from GitHub Enterprise (VPN); a name that
+already exists is refused.
 
 ## Readiness
 

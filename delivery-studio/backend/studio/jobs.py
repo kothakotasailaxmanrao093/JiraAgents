@@ -216,7 +216,9 @@ async def _plan(job: Job, review_pdf: str | None) -> dict[str, Any]:
 
 async def _code(job: Job, tdd_pdf: str) -> dict[str, Any]:
     step = job.step("code", status="running", started=time.time())
-    out = await local_run.code(tdd_pdf, job.options.get("branch_name") or "", "")
+    out = await local_run.code(
+        tdd_pdf, job.options.get("branch_name") or "", job.options.get("source_branch") or ""
+    )
     pushed = bool(out.get("pull_request_links") or out.get("branches"))
     step.update(
         status="done" if pushed else "failed",
@@ -225,6 +227,7 @@ async def _code(job: Job, tdd_pdf: str) -> dict[str, Any]:
         pull_requests=out.get("pull_request_links") or [],
         branches=out.get("branches") or [],
         branch=out.get("branch"),
+        source=out.get("source"),
         services=out.get("services") or [],
     )
     return out

@@ -15,7 +15,7 @@
       <div><div class="brand-name">Aetherion</div><div class="brand-sub">Delivery Studio</div></div>
     </div>
     <nav>
-      <a href="#pipeline" data-page="pipeline" class="active"><svg viewBox="0 0 24 24"><path d="M4 12h4l3-7 4 14 3-7h2"/></svg>Pipeline</a>
+      <a href="#pipeline" data-page="pipeline" class="active"><svg viewBox="0 0 24 24"><path d="M4 12h4l3-7 4 14 3-7h2"/></svg>Agent Workflow</a>
       <a href="#runs" data-page="runs"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>Runs</a>
       <a href="#memory" data-page="memory"><svg viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 018 0v3"/></svg>Card memory</a>
       <a href="#system" data-page="system"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>System</a>
@@ -33,8 +33,8 @@
   <main>
     <header class="topbar">
       <div>
-        <h1 id="page-title">Pipeline</h1>
-        <p class="subtitle" id="page-sub">A Jira card, reviewed, designed and coded by the agents, end to end.</p>
+        <h1 id="page-title">Agent Workflow</h1>
+        <p class="subtitle" id="page-sub">A Jira card, reviewed, broken down, designed and coded by the agents.</p>
       </div>
       <div class="top-right">
         <span class="pill">Local workers · Temporal sbox/test</span>
@@ -62,7 +62,7 @@
           </div>
           <div class="actions">
             <button class="btn primary" id="run-all" disabled>
-              <svg viewBox="0 0 24 24"><path d="M7 5l12 7-12 7z"/></svg>Run end to end</button>
+              <svg viewBox="0 0 24 24"><path d="M7 5l12 7-12 7z"/></svg>Run</button>
           </div>
         </div>
         <ol class="stepper" id="stepper">
@@ -78,8 +78,6 @@
           <div class="opt-grid">
             <label>Services to design for <span class="hint">optional · comma separated, main first. Empty: the ranking decides.</span>
               <input id="opt-services" placeholder="e.g. ui, api"></label>
-            <label>New branch name <span class="hint">optional · empty: fix/&lt;card&gt;-&lt;n&gt;</span>
-              <input id="opt-branch" placeholder="fix/ks-6-client-name"></label>
             <label>Documents for the review <span class="hint">optional · answers or specs (PDF, DOCX, TXT…)</span>
               <input type="file" id="opt-files" multiple></label>
           </div>

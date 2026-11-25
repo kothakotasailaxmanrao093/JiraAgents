@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,7 @@ class RunRequest(BaseModel):
     review_pdf: str = ""
     tdd_pdf: str = ""
     create_in_jira: bool = False
+    source_branch: str = ""
 
 
 # --- runs -----------------------------------------------------------------------------
@@ -120,6 +122,48 @@ async def upload(file: UploadFile = File(...)) -> dict[str, Any]:
     if len(data) > config.MAX_UPLOAD:
         raise HTTPException(413, "Files up to 25 MB")
     return documents.save_upload(file.filename or "upload", data, file.content_type or "")
+
+
+# --- coding: where to start ------------------------------------------------------------
+
+
+@app.get("/api/tdd")
+async def get_tdd(path: str) -> dict[str, Any]:
+    """The TDD's work order: its services with the branch it was written from,
+    and a suggested name for the new branch."""
+    import local_run
+
+    p = Path(path)
+    if not documents.allowed(p) or not p.is_file():
+        raise HTTPException(404, "No such document")
+    task = await asyncio.to_thread(local_run.task_of, str(p))
+    services = [{k: s.get(k) for k in ("service", "repo", "branch")} for s in task.get("services") or []]
+    if not services:
+        raise HTTPException(400, "This PDF holds no work order")
+    return {"ticket": task.get("ticket"), "title": task.get("title"), "services": services,
+            "suggested_branch": local_run.proposed_branch(task)}
+
+
+@app.get("/api/branches")
+async def get_branches(repo: str) -> dict[str, Any]:
+    """A repository's branches, the default one first (GitHub Enterprise: VPN)."""
+    import local_run
+
+    try:
+        names = await asyncio.to_thread(local_run.branches, repo)
+    except Exception as error:  # noqa: BLE001 - shown on the page
+        raise HTTPException(502, f"Could not list the branches of {repo}: {error}") from None
+    return {"repo": repo, "branches": names}
+
+
+@app.get("/api/branch-exists")
+async def branch_exists(repo: str, name: str) -> dict[str, Any]:
+    import local_run
+
+    try:
+        return {"exists": await asyncio.to_thread(local_run.branch_exists, repo, name)}
+    except Exception as error:  # noqa: BLE001 - shown on the page
+        raise HTTPException(502, f"GitHub could not be asked ({error}) — is the VPN on?") from None
 
 
 # --- system ---------------------------------------------------------------------------
