@@ -30,3 +30,51 @@ def test_open_count_counts_unanswered_only() -> None:
     ]
     assert pipeline.open_count(questions) == 2
     assert pipeline.open_count(None) == 0
+
+
+# --- confirmations are not open questions (KS-17315, 2026-11-25) --------------------
+
+from shared.contract import AgentResult, Outcome  # noqa: E402
+
+
+def _review(score: int, findings: list[dict], questions: list[str] | None = None) -> AgentResult:
+    return AgentResult(
+        produced_by="JiraRequirementReview",
+        display_name="JiraRequirementReview",
+        headline="",
+        outcome=Outcome.REVIEWED,
+        readiness_score=score,
+        findings=findings,
+        questions=questions or [],
+    )
+
+
+CONFIRMATIONS = [
+    {
+        "finding_type": "Assumption",
+        "description": "The behaviour and responses are fully specified.",
+    },
+    {"finding_type": "Assumption", "description": "Tests on shadow15 indicate the flow works."},
+]
+
+
+def test_a_ready_review_leaves_nothing_open() -> None:
+    gap = {"finding_type": "Requirement Gap", "description": "Error text is not defined."}
+    assert pipeline.review_points(_review(5, CONFIRMATIONS + [gap])) == []
+
+
+def test_confirmations_never_become_questions() -> None:
+    assert pipeline.review_points(_review(4, CONFIRMATIONS)) == []
+
+
+def test_real_gaps_still_become_questions() -> None:
+    gap = {"finding_type": "Missing Acceptance Criterion", "description": "No acceptance criteria."}
+    assert pipeline.review_points(_review(3, CONFIRMATIONS + [gap])) == ["No acceptance criteria."]
+
+
+def test_a_ready_review_has_no_questions_even_typed_as_one() -> None:
+    assert pipeline.review_points(_review(5, CONFIRMATIONS, ["Relies on the Okta token."])) == []
+
+
+def test_explicit_questions_win() -> None:
+    assert pipeline.review_points(_review(3, CONFIRMATIONS, ["Which roles?"])) == ["Which roles?"]

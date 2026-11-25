@@ -148,15 +148,40 @@ def open_count(questions: list[dict[str, Any]] | None) -> int:
     return sum(1 for q in questions or [] if not q.get("answers"))
 
 
+# Findings that name something missing or unclear: only these may stand in for
+# questions. A review that finds the card ready can list what it confirmed
+# ("the responses are fully specified") — those are not open (KS-17315,
+# 2026-11-25: three confirmations became "open questions" and held a 5/5 at 3/5).
+GAP_FINDINGS = {
+    "open_question",
+    "dependency_question",
+    "requirement_gap",
+    "ambiguity",
+    "edge_case",
+    "missing_functional_detail",
+    "missing_technical_detail",
+    "missing_acceptance_criterion",
+}
+
+
+def _kind(finding: dict[str, Any]) -> str:
+    kind = finding.get("finding_type") or finding.get("category") or ""
+    return str(kind).strip().lower().replace(" ", "_")
+
+
 def review_points(review: AgentResult | None) -> list[str]:
-    """What the review left open: its questions, else its findings."""
+    """What the review left open: its questions, else its findings that are gaps.
+    A 5/5 review — fully ready — leaves nothing open."""
     if review is None or review.outcome is not Outcome.REVIEWED:
         return []
+    if (review.readiness_score or 0) >= 5:
+        return []  # fully ready: whatever it lists is a remark, not a question
     points = [q for q in review.questions if str(q).strip()]
     if not points:
         for finding in review.findings:
             text = str(finding.get("description") or finding.get("title") or "").strip()
-            if text:
+            kind = _kind(finding)
+            if text and (not kind or kind in GAP_FINDINGS or kind.startswith("missing")):
                 points.append(text)
     return points[:MAX_POINTS]
 
