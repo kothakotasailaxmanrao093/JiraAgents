@@ -136,11 +136,24 @@ async function loadCard(key) {
     enableActions();
     // The card's latest run, so a reload (or a new visit) shows where it got to.
     if (!state.job || state.job.issue_key !== c.key || state.job.status !== "running") {
-      const runs = await api("/api/runs").catch(() => []);
-      const last = runs.find((r) => r.issue_key === c.key && Object.keys(r.steps || {}).length);
-      if (last) {
-        const full = await api(`/api/runs/${last.id}`).catch(() => null);
-        if (full) { state.job = full; renderSteps(full); }
+      // Each step's newest result for this card, from whichever run made it.
+      const runs = (await api("/api/runs").catch(() => [])).filter((r) => r.issue_key === c.key && r.status !== "running");
+      const steps = {}, workflows = [];
+      for (const r of runs) {  // newest first
+        for (const [name, step] of Object.entries(r.steps || {})) {
+          if (!steps[name] && step.status && step.status !== "waiting") {
+            steps[name] = step;
+            const ids = step.workflow_ids || [];
+            workflows.push(...(r.workflows || []).filter((w) => ids.includes(w.id)));
+          }
+        }
+      }
+      if (Object.keys(steps).length) {
+        const merged = { id: "", kind: "history", issue_key: c.key, status: "done", steps, workflows, lines: [], error: "" };
+        state.job = merged;
+        renderSteps(merged);
+        state.job = null;  // nothing is running
+        enableActions();
       }
     }
   } catch (e) {
